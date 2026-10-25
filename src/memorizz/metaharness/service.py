@@ -1825,6 +1825,55 @@ class MetaHarness:
             for event in self.run_store.events(run_id, after=after, limit=limit)
         ]
 
+    def event_history(self, run_id: str) -> List[Dict[str, Any]]:
+        """Read all recorded events, without a page or text-length cutoff."""
+        history: List[Dict[str, Any]] = []
+        cursor = 0
+        while True:
+            page = self.events(run_id, after=cursor, limit=1000)
+            if not page:
+                return history
+            next_cursor = int(page[-1]["sequence"])
+            if next_cursor <= cursor:
+                raise RuntimeError("Harness event history did not advance")
+            history.extend(page)
+            cursor = next_cursor
+
+    def run_activity(self, run_id: str) -> Dict[str, Any]:
+        """A complete recorded snapshot of a run and its delegates' activity."""
+        root = self.get_run(run_id)
+        if root is None:
+            raise KeyError(f"Unknown harness run: {run_id}")
+        pending = [root]
+        seen = {run_id}
+        collected = []
+        while pending:
+            run = dict(pending.pop(0))
+            current = str(run["run_id"])
+            run["events"] = self.event_history(current)
+            collected.append(run)
+            children = getattr(self.run_store, "children", None)
+            delegates = (
+                children(current)
+                if callable(children)
+                else self._delegate_runs([current])
+            )
+            ids = [child.run_id for child in delegates]
+            # Some adapters report a separate delegate run on a tool event.
+            ids.extend(
+                str(event["data"]["harness_run_id"])
+                for event in run["events"]
+                if (event.get("data") or {}).get("harness_run_id")
+            )
+            for child_id in ids:
+                if child_id in seen:
+                    continue
+                seen.add(child_id)
+                child = self.get_run(child_id)
+                if child is not None:
+                    pending.append(child)
+        return {"run": collected[0], "delegated_runs": collected[1:]}
+
     def stream(
         self, run_id: str, *, after: int = 0, poll_seconds: float = 0.1
     ) -> Generator[Dict[str, Any], None, None]:

@@ -1,17 +1,15 @@
 {% extends "base.html" %}
 
 {% block title %}Agent harnesses - Memorizz{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/pages/harnesses.css?v=24">
+{% block head %}<link rel="stylesheet" href="/static/css/pages/harnesses.css?v=25">
 <link rel="stylesheet" href="/static/css/components/dialogs.css?v=2">
 <script src="/static/js/page-dialogs.js?v=1"></script>
-<script src="/static/js/harness-trajectory.js?v=14"></script>
+<script src="/static/js/harness-trajectory.js?v=15"></script>
 <link rel="stylesheet" href="/static/css/pages/harness-compare.css?v=3">
 <script src="https://cdn.jsdelivr.net/npm/marked@14.0.0/marked.min.js"></script>
 <script src="/static/js/safe-markdown.js?v=2"></script>
 <script src="/static/js/harness-judge.js?v=1"></script>
-<script src="/static/js/harness-compare.js?v=8"></script>
-<link rel="stylesheet" href="/static/css/pages/memory-evolution.css?v=8">
-<script src="/static/js/memory-evolution.js?v=8" defer></script>{% endblock %}
+<script src="/static/js/harness-compare.js?v=8"></script>{% endblock %}
 
 {% block content %}
 {% from '_ui.html' import page_header, empty_state, id_chip %}
@@ -499,7 +497,7 @@
                 <span class="fleet-health fleet-health--{{ dot[run.signal] }}">{{ run.status_label }}</span>
             </header>
             <div class="fleet-detail-actions">
-                <button class="btn btn-primary harness-inspect" type="button" data-run-id="{{ run.run_id }}">Evidence</button>
+                <a class="btn btn-primary harness-inspect" href="/harnesses/runs/{{ run.run_id }}">Evidence</a>
                 <a class="btn" href="/api/harness-runs/{{ run.run_id }}?include_events=true" target="_blank" rel="noopener">JSON</a>
                 {% if run.status == 'succeeded' and run.final_response %}<button class="btn" type="button" data-judge-run="{{ run.run_id }}">{% if run.judgment %}Judge result{% else %}Evaluate answer{% endif %}</button>{% endif %}
                 {% if run.agent_id %}<a class="btn" href="/agents/{{ run.agent_id }}/playground">Agent</a>{% endif %}
@@ -528,7 +526,7 @@
             <div class="mem-body-head">
                 <h3 class="fleet-detail-title">Trajectory</h3>
                 <button type="button" class="btn btn-sm" data-memory-evolution-run="{{ run.run_id }}">Memory evolution</button>
-                <button type="button" class="btn btn-sm" data-trajectory-full="{{ run.run_id }}">Full view</button>
+                <a class="btn btn-sm" href="/harnesses/runs/{{ run.run_id }}">Full view</a>
             </div>
             <div class="hx-traj" data-trajectory-for="{{ run.run_id }}" data-active="{{ 'true' if run.group == 'active' else 'false' }}"><p class="hx-muted">Select the run to load its steps.</p></div>
 
@@ -629,20 +627,6 @@
 </section>
 {% endif %}
 
-<dialog id="harness-run-dialog" class="harness-dialog" aria-labelledby="harness-dialog-title">
-    <div class="harness-dialog-header"><div><span class="harness-eyebrow">Run evidence</span><h2 id="harness-dialog-title" class="mono">Harness run</h2></div><button id="harness-dialog-close" class="harness-dialog-close" type="button" aria-label="Close">×</button></div>
-    <div class="hx-dialog-tabs" role="tablist" aria-label="Evidence views">
-        <button type="button" role="tab" data-dialog-tab="trajectory" aria-selected="true">Trajectory</button>
-        <button type="button" role="tab" data-dialog-tab="json" aria-selected="false">Raw record</button>
-        <button type="button" role="tab" data-dialog-tab="memory" aria-selected="false">Memory evolution</button>
-    </div>
-    <div id="harness-dialog-trajectory" class="hx-traj hx-traj--full"></div>
-    <pre id="harness-dialog-content" hidden></pre>
-    <div id="harness-dialog-memory" hidden>
-        <a class="btn btn-sm" id="harness-memory-full" href="/traces/memory-evolution">Open full timeline</a>
-        {% with agent_id='', memory_id='', run_id='', lazy=true %}{% include '_memory_evolution.html' %}{% endwith %}
-    </div>
-</dialog>
 {% endblock %}
 
 {% block scripts %}
@@ -1264,42 +1248,10 @@
     applyCollapse();
     drawFlows();
 
-    // ------------------------------------------------------------------
-    // Evidence dialog: the trajectory in full, or the raw run record.
-    // ------------------------------------------------------------------
-    const dialog = document.getElementById('harness-run-dialog');
-    const content = document.getElementById('harness-dialog-content');
-    const dialogTrajectory = document.getElementById('harness-dialog-trajectory');
-    const dialogMemory = document.getElementById('harness-dialog-memory');
-    const setDialogTab = (tab) => {
-        dialog.querySelectorAll('[data-dialog-tab]').forEach(button => button.setAttribute('aria-selected', button.dataset.dialogTab === tab ? 'true' : 'false'));
-        content.hidden = tab !== 'json';
-        dialogTrajectory.hidden = tab !== 'trajectory';
-        dialogMemory.hidden = tab !== 'memory';
-        if (tab === 'memory' && window.MemorizzMemoryEvolution) {
-            const root = dialogMemory.querySelector('[data-memory-evolution]');
-            root.dataset.runId = dialog.dataset.runId;
-            window.MemorizzMemoryEvolution.mount(root).setScope({runId: dialog.dataset.runId, agentId: '', memoryId: ''});
-            document.getElementById('harness-memory-full').href = '/traces/memory-evolution?' + new URLSearchParams({run_id: dialog.dataset.runId});
-        }
+    // Evidence is a dedicated, bookmarkable page.
+    const openEvidence = (runId, tab) => {
+        window.location.assign('/harnesses/runs/' + encodeURIComponent(runId) + (tab === 'memory' ? '#memory' : ''));
     };
-    const openEvidence = async (runId, tab) => {
-        document.getElementById('harness-dialog-title').textContent = runId;
-        dialog.dataset.runId = runId;
-        const pane = document.querySelector('.fleet-pane [data-trajectory-for="' + CSS.escape(runId) + '"]');
-        dialogTrajectory.dataset.trajectoryFor = runId;
-        dialogTrajectory.dataset.active = pane ? pane.dataset.active : 'false';
-        dialogTrajectory.dataset.signature = '';
-        content.textContent = 'Loading…';
-        setDialogTab(tab);
-        if (!dialog.open) dialog.showModal();
-        openTrajectory(runId);
-        try { const body = await request('/api/harness-runs/' + encodeURIComponent(runId) + '?include_events=true'); content.textContent = JSON.stringify(body.run, null, 2); }
-        catch (error) { content.textContent = error.message; }
-    };
-    dialog?.addEventListener('click', (event) => { const tab = event.target.closest('[data-dialog-tab]'); if (tab) setDialogTab(tab.dataset.dialogTab); });
-    document.getElementById('harness-dialog-close')?.addEventListener('click', () => dialog.close());
-    dialog?.addEventListener('close', () => { delete dialogTrajectory.dataset.trajectoryFor; });
 
     // ------------------------------------------------------------------
     // Actions, delegated so they keep working on refreshed content.
@@ -1325,10 +1277,6 @@
         if (memoryEvolution) { openEvidence(memoryEvolution.dataset.memoryEvolutionRun, 'memory'); return; }
         const trajectoryCell = target.closest('[data-show-trajectory]');
         if (trajectoryCell) { selectRun(trajectoryCell.dataset.showTrajectory, 'trajectory'); return; }
-        const full = target.closest('[data-trajectory-full]');
-        if (full) { openEvidence(full.dataset.trajectoryFull, 'trajectory'); return; }
-        const inspect = target.closest('.harness-inspect');
-        if (inspect) { openEvidence(runIdOf(inspect), 'trajectory'); return; }
         const show = target.closest('[data-select-run]');
         if (show) { selectRun(show.dataset.selectRun); return; }
         const compareRuns = target.closest('[data-compare-runs]');

@@ -17,6 +17,8 @@ from memorizz.memory_provider import FileSystemConfig, FileSystemProvider
 from memorizz.metaharness import (
     AgentHarness,
     HarnessCapabilities,
+    HarnessEvent,
+    HarnessEventType,
     HarnessPermissions,
     HarnessRun,
     HarnessStatus,
@@ -104,6 +106,105 @@ def seed_approvals(service, root):
     service._drive_compare = delayed
 
 
+def seed_evidence(service, root):
+    run = HarnessRun(
+        run_id="evidence-fixture",
+        harness="claude-code",
+        status=HarnessStatus.SUCCEEDED,
+        task={"task": "Review the complete activity", "workspace": root},
+        result={"final_response": "All recorded activity is available."},
+    )
+    payloads = [
+        ("status", {"session_id": "fixture-session", "model": "fixture-model"}),
+        (
+            "status",
+            {
+                "memory_context": {
+                    "source": "memorizz_plugin",
+                    "hook": "SessionStart",
+                    "text": "MEMORY-CONTEXT\n" * 400,
+                }
+            },
+        ),
+        ("message", {"role": "user", "text": "Full user request\n" * 200}),
+        ("reasoning", {"hidden": True}),
+        (
+            "tool_call",
+            {
+                "id": "tool-1",
+                "name": "Bash",
+                "input": {"command": "x" * 5000 + "INPUT-END"},
+            },
+        ),
+        ("tool_result", {"id": "tool-1", "content": "λ" * 9000 + "OUTPUT-END"}),
+        ("command", {"id": "cmd", "command": "read output", "status": "in_progress"}),
+        (
+            "command",
+            {
+                "id": "cmd",
+                "command": "read output",
+                "exit_code": 0,
+                "aggregated_output": "y" * 6000 + "COMMAND-END",
+            },
+        ),
+        (
+            "file_change",
+            {"changes": [{"path": "report.txt", "diff": "z" * 5000 + "DIFF-END"}]},
+        ),
+        (
+            "tool_call",
+            {
+                "id": "worker",
+                "name": "Agent",
+                "subagent": True,
+                "input": {"prompt": "Inspect everything"},
+            },
+        ),
+        (
+            "message",
+            {
+                "parent_id": "worker",
+                "role": "assistant",
+                "text": "Nested subagent text",
+            },
+        ),
+    ]
+    events = [
+        HarnessEvent(run.run_id, HarnessEventType(kind), data)
+        for kind, data in payloads
+    ]
+    events.extend(
+        HarnessEvent(run.run_id, HarnessEventType.LOG, {"text": f"log {i}"})
+        for i in range(10_005)
+    )
+    events.append(
+        HarnessEvent(
+            run.run_id,
+            HarnessEventType.MESSAGE,
+            {"role": "assistant", "text": "LAST-EVENT-SENTINEL"},
+        )
+    )
+    service.run_store.replace(run, events)
+    for name, parent in [
+        ("delegate-fixture", run.run_id),
+        ("nested-fixture", "delegate-fixture"),
+    ]:
+        child = HarnessRun(
+            run_id=name,
+            harness="codex",
+            status=HarnessStatus.SUCCEEDED,
+            task={"task": name, "metadata": {"parent_run_id": parent}},
+        )
+        service.run_store.replace(
+            child,
+            [
+                HarnessEvent(
+                    name, HarnessEventType.MESSAGE, {"text": name + "-ACTIVITY"}
+                )
+            ],
+        )
+
+
 def run():
     with TemporaryDirectory(prefix="memorizz-harness-browser-") as root:
         os.environ.update(
@@ -127,7 +228,10 @@ def run():
             scratch_root=root + "/scratch",
         )
         suite = os.getenv("MEMORIZZ_HARNESS_BROWSER_SUITE", "harness_judge")
-        if suite == "harness_judge":
+        if suite == "harness_evidence":
+            os.environ["MEMORIZZ_UI_READ_ONLY"] = "true"
+            seed_evidence(service, root)
+        elif suite == "harness_judge":
             seed_judgments(service, root)
         else:
             seed_approvals(service, root)

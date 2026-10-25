@@ -142,6 +142,27 @@ async def harnesses_page(request: Request):
 STEP_TYPES = ("message", "command", "tool_call", "file_change")
 
 
+@router.get("/harnesses/runs/{run_id}", response_class=HTMLResponse)
+async def harness_run_page(request: Request, run_id: str):
+    """A linkable, full-page view of one run's recorded evidence."""
+    if not _state.get("provider"):
+        return RedirectResponse(url="/connect", status_code=302)
+    run = await asyncio.to_thread(_service().get_run, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Harness run not found")
+    from ..execution_view import shape_harness_run
+
+    return templates.TemplateResponse(
+        "harness_run.html",
+        {
+            "request": request,
+            "active_page": "harnesses",
+            "run": run,
+            "row": shape_harness_run(run),
+        },
+    )
+
+
 def _step_counts(service, runs) -> Dict[str, Dict[str, int]]:
     """Messages, commands, tool calls and file changes per ledger run."""
     run_ids = [str(run.get("run_id") or "") for run in runs]
@@ -737,8 +758,18 @@ async def api_harness_run(run_id: str, include_events: bool = False):
     if value is None:
         raise HTTPException(status_code=404, detail="Harness run not found")
     if include_events:
-        value["events"] = await asyncio.to_thread(service.events, run_id)
+        value["events"] = await asyncio.to_thread(service.event_history, run_id)
     return {"ok": True, "run": value}
+
+
+@router.get("/api/harness-runs/{run_id}/activity")
+async def api_harness_run_activity(run_id: str):
+    """Every recorded event and full payload, including linked delegate runs."""
+    try:
+        activity = await asyncio.to_thread(_service().run_activity, run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Harness run not found") from exc
+    return JSONResponse(activity, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/api/harness-runs/{run_id}/events")

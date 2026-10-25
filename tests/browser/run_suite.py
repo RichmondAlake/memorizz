@@ -19,6 +19,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SUITES = (
     (
+        "harness_evidence",
+        "MEMORIZZ_BROWSER_TEST_PORT",
+        "memorizz-browser-fixture-token",
+        "/harnesses",
+    ),
+    (
         "observability",
         "MEMORIZZ_BROWSER_TEST_PORT",
         "memorizz-browser-fixture-token",
@@ -113,6 +119,7 @@ def main():
             "MEMORIZZ_USAGE_MOBILE_SCREENSHOT": str(output / "usage-mobile.png"),
             "PERSONA_SCREENSHOT_DIR": str(output),
             "MEMORIZZ_JUDGE_EVIDENCE": str(output / "harness-judge"),
+            "MEMORIZZ_EVIDENCE_SCREENSHOT": str(output / "harness-evidence-mobile.png"),
             "MEMORIZZ_HARNESS_BROWSER_SUITE": name,
             "MEMORIZZ_BROWSER_EMPTY_LEDGER": "1"
             if name == "harness_approval_empty"

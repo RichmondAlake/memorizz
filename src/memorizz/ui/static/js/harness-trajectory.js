@@ -102,9 +102,9 @@
                     existing.end = t;
                     existing.exit = data.exit_code;
                     existing.running = data.status === 'in_progress';
-                    if (data.aggregated_output) existing.detail = '$ ' + data.command + '\n\n' + excerpt(data.aggregated_output, 4000);
+                    if (data.aggregated_output) existing.detail = '$ ' + data.command + '\n\n' + data.aggregated_output;
                 } else {
-                    const step = add({kind: 'command', title: 'Command', summary: '$ ' + excerpt(String(data.command || '').replace(/^\/bin\/\w+ -lc /, ''), 180), detail: '$ ' + data.command + (data.aggregated_output ? '\n\n' + excerpt(data.aggregated_output, 4000) : ''), exit: data.exit_code, running: data.status === 'in_progress'});
+                    const step = add({kind: 'command', title: 'Command', summary: '$ ' + excerpt(String(data.command || '').replace(/^\/bin\/\w+ -lc /, ''), 180), detail: '$ ' + data.command + (data.aggregated_output ? '\n\n' + data.aggregated_output : ''), exit: data.exit_code, running: data.status === 'in_progress'});
                     if (id) items.set('cmd:' + id, step);
                 }
                 break;
@@ -138,6 +138,7 @@
                     summary: data.subagent ? (prompt ? excerpt(String(prompt).replace(/\s+/g, ' '), 200) : '') : summary,
                     detail: input && !(data.subagent && !prompt) ? pretty(input) : '',
                     running: !done, toolId: data.id, parent: data.parent_id,
+                    runId: data.harness_run_id, harness: data.harness,
                 });
                 if (data.id) items.set('tool:' + data.id, step);
                 break;
@@ -152,7 +153,7 @@
                         step.end = t;
                         step.error = !!block.is_error;
                         step.cache = block.cache || data.cache || null;
-                        step.detail = (step.detail ? 'Input\n' + step.detail + '\n\n' : '') + 'Result\n' + excerpt(output, 4000);
+                        step.detail = (step.detail ? 'Input\n' + step.detail + '\n\n' : '') + 'Result\n' + output;
                         if (block.is_error) step.summary = excerpt(output, 200);
                         else if (data.status === 'approval_required') step.summary = 'Waiting for approval';
                     }
@@ -236,7 +237,7 @@
             const detail = step.detail ? '<details data-step="' + esc(step.key) + '"' + (open.has(step.key) ? ' open' : '') + '><summary>Details</summary><pre>' + esc(step.detail) + '</pre></details>' : '';
             const inner = step.children.length ? '<ol class="hx-traj-list hx-traj-children">' + step.children.map(item).join('') + '</ol>' : '';
             // A harness delegate's own run, one click away.
-            const runLink = step.runId ? '<button type="button" class="hx-traj-run" data-select-run="' + esc(step.runId) + '">Open its ' + esc(step.harness || 'harness') + ' run</button>' : '';
+            const runLink = step.runId ? '<a class="hx-traj-run" href="/harnesses/runs/' + encodeURIComponent(step.runId) + '">Open its ' + esc(step.harness || 'harness') + ' run</a>' : '';
             return '<li class="hx-traj-step hx-traj--' + step.kind + (step.error || (step.exit != null && Number(step.exit) !== 0) ? ' is-error' : '') + (running ? ' is-running' : '') + (cachedHit ? ' is-cached' : '') + '">'
                 + '<span class="hx-traj-icon" aria-hidden="true"></span>'
                 + '<div class="hx-traj-body"><div class="hx-traj-head"><strong>' + esc(step.title) + '</strong>' + (meta ? '<span class="hx-traj-meta">' + esc(meta) + '</span>' : '') + '<time>+' + step.at.toFixed(1) + 's</time></div>'

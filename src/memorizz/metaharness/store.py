@@ -25,6 +25,9 @@ class HarnessRunStore(Protocol):
     def get(self, run_id: str) -> Optional[HarnessRun]:
         ...
 
+    def children(self, run_id: str) -> List[HarnessRun]:
+        ...
+
     def list(
         self, *, limit: int = 100, status: Optional[str] = None
     ) -> List[HarnessRun]:
@@ -190,6 +193,17 @@ class SQLiteHarnessRunStore:
                 "SELECT payload FROM harness_runs WHERE run_id=?", (str(run_id),)
             ).fetchone()
         return self._decode(row) if row else None
+
+    def children(self, run_id: str) -> List[HarnessRun]:
+        """Every direct delegate, including runs older than the ledger page."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT payload FROM harness_runs "
+                "WHERE json_extract(payload, '$.task.metadata.parent_run_id')=? "
+                "ORDER BY created_at ASC, run_id ASC",
+                (str(run_id),),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
 
     def list(
         self, *, limit: int = 100, status: Optional[str] = None

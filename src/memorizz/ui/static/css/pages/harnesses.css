@@ -1488,8 +1488,7 @@ details[open].panel.hx-launch > summary {
     cursor: pointer;
 }
 
-.hx-traj pre,
-.harness-dialog .hx-traj pre {
+.hx-traj pre {
     max-height: 240px;
     margin: 6px 0 0;
     padding: 8px 10px;
@@ -1503,23 +1502,14 @@ details[open].panel.hx-launch > summary {
     overflow-wrap: anywhere;
 }
 
-.hx-traj--full {
-    max-height: 68vh;
-    margin: 0;
-    padding: 16px 20px 20px;
-    overflow: auto;
-}
-
-.hx-traj--full[hidden] { display: none; }
-
-.hx-dialog-tabs {
+.hx-evidence-tabs {
     display: flex;
     gap: 4px;
-    padding: 10px 20px 0;
+    margin: 20px 0 12px;
     border-bottom: 1px solid var(--border-subtle);
 }
 
-.hx-dialog-tabs button {
+.hx-evidence-tabs a {
     padding: 7px 12px;
     color: var(--text-secondary);
     background: none;
@@ -1527,12 +1517,29 @@ details[open].panel.hx-launch > summary {
     border-bottom: 2px solid transparent;
     font: inherit;
     font-size: 12.5px;
+    text-decoration: none;
     cursor: pointer;
 }
 
-.hx-dialog-tabs button[aria-selected="true"] {
+.hx-evidence-tabs a[aria-selected="true"] {
     color: var(--text-primary);
     border-bottom-color: var(--accent-primary);
+}
+
+.hx-evidence .page-header p { overflow-wrap: anywhere; }
+.hx-evidence .page-actions { flex-wrap: wrap; }
+.hx-evidence #evidence-copy { display: inline-flex; align-items: center; gap: 7px; }
+.hx-evidence-meta { display: flex; flex-wrap: wrap; gap: 8px 18px; color: var(--text-secondary); font-size: 13px; overflow-wrap: anywhere; }
+.hx-evidence-note { color: var(--text-muted); font-size: 12px; }
+.hx-evidence [role="tabpanel"] { min-width: 0; }
+.hx-evidence .hx-traj { margin-top: 18px; }
+.hx-evidence .hx-traj-body { min-width: 0; }
+.hx-evidence-json { padding: 18px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-secondary); color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+#evidence-copy-fallback { width: 100%; margin-top: 20px; }
+@media (max-width: 640px) {
+    .hx-evidence-tabs { gap: 0; }
+    .hx-evidence-tabs a { padding: 9px; }
+    .hx-evidence .hx-traj-children { margin-left: 0; }
 }
 
 /* ---------- Launch form additions ---------- */
@@ -2186,6 +2193,7 @@ details[open].panel.hx-launch > summary {
 
 /* ---------- A harness delegate's own run, from its subagent step ---------- */
 .hx-traj-run {
+    display: inline-block;
     margin: 4px 0 2px;
     padding: 1px 8px;
     color: var(--accent-primary);
@@ -2194,6 +2202,7 @@ details[open].panel.hx-launch > summary {
     border-radius: 999px;
     font: inherit;
     font-size: 11.5px;
+    text-decoration: none;
     cursor: pointer;
 }
 

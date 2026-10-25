@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Run evidence · {{ run.run_id }} - Memorizz{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="/static/css/pages/harnesses.css?v=25">
+<link rel="stylesheet" href="/static/css/pages/memory-evolution.css?v=8">
+<script src="/static/js/harness-trajectory.js?v=15" defer></script>
+<script src="/static/js/memory-evolution.js?v=8" defer></script>
+<script src="/static/js/harness-run.js?v=1" defer></script>
+{% endblock %}
+{% block content %}
+{% from '_ui.html' import page_header %}
+<div class="hx-evidence" id="run-evidence" data-run-id="{{ run.run_id }}">
+    {% call page_header('Run evidence', run.run_id, back=('/harnesses', '← Agent harnesses')) %}
+        <span id="evidence-copy-status" class="hx-evidence-note" role="status" aria-live="polite"></span>
+        <button type="button" class="btn" id="evidence-copy" title="Copy every recorded event, full inputs and outputs, and linked delegate runs" aria-label="Copy full activity">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>
+            <span>Copy full activity</span>
+        </button>
+    {% endcall %}
+    <div class="hx-evidence-meta">
+        <strong>{{ row.harness_label }}</strong>
+        {% if row.model %}<span class="mono">{{ row.model }}</span>{% endif %}
+        <span id="evidence-run-status">{{ row.status_label }}</span>
+        {% if row.workspace %}<span class="mono">{{ row.workspace }}</span>{% endif %}
+    </div>
+    <nav class="hx-evidence-tabs" role="tablist" aria-label="Evidence views">
+        <a id="tab-trajectory" href="#trajectory" role="tab" aria-controls="evidence-trajectory" aria-selected="true">Trajectory</a>
+        <a id="tab-record" href="#record" role="tab" aria-controls="evidence-record" aria-selected="false" tabindex="-1">Raw record</a>
+        <a id="tab-memory" href="#memory" role="tab" aria-controls="evidence-memory" aria-selected="false" tabindex="-1">Memory evolution</a>
+    </nav>
+    <p id="evidence-load-status" class="hx-evidence-note" role="status" aria-live="polite">Loading recorded activity…</p>
+    <section id="evidence-trajectory" role="tabpanel" aria-labelledby="tab-trajectory" tabindex="0">
+        <div id="evidence-steps" class="hx-traj" data-active="{{ 'true' if row.group == 'active' else 'false' }}"></div>
+    </section>
+    <section id="evidence-record" role="tabpanel" aria-labelledby="tab-record" tabindex="0" hidden>
+        <pre id="evidence-json" class="hx-evidence-json">Loading…</pre>
+    </section>
+    <section id="evidence-memory" role="tabpanel" aria-labelledby="tab-memory" tabindex="0" hidden>
+        <a class="btn btn-sm" href="/traces/memory-evolution?run_id={{ run.run_id }}">Open full timeline</a>
+        {% with agent_id='', memory_id='', run_id=run.run_id, lazy=true %}{% include '_memory_evolution.html' %}{% endwith %}
+    </section>
+    <textarea id="evidence-copy-fallback" aria-label="Full activity to copy" readonly rows="12" hidden></textarea>
+</div>
+{% endblock %}
