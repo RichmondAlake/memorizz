@@ -1,9 +1,80 @@
 # Changelog
 
-## Unreleased
+## 0.17.16 — 2026-10-25
+
+### Added
+
+- **`/desktop` in the chat** (alias `/computer-use`): `/desktop on` gives the
+  agent you are talking to the desktop tools at once, with no restart, and
+  saves them with it; `/desktop off` removes them, `/desktop` shows the state
+  and what macOS allows, and `/desktop doctor --ask` shows macOS's permission
+  prompts. Before, desktop control needed `memorizz desktop connect` in a
+  shell and a restart.
+- **`open_url(url, app=None)`**, a desktop tool that opens a link or deep link
+  in an app: `app="Notion"` opens a Notion page in the Notion app, and
+  `notion://`, `slack://` or `mailto:` links work too (`file:` links are
+  refused). Notion's desktop app shows nothing to Accessibility, so before
+  this the agent could not open a page there at all.
+- **Approve in the chat.** A turn that reaches an action needing approval now
+  asks `Allow desktop__open_url(url="…", app="Notion")? [y/N]` and, on yes,
+  runs that exact call and lets the agent carry on, asking again at its next
+  action. No declines it, and Ctrl-C leaves it pending for `/approvals`. It
+  replaces three `/approvals` commands per action, for desktop, browser and
+  MCP tools alike.
+- Desktop control is a capability the agent can ask for. A request such as
+  "open it in my Notion desktop app" or "computer use" now leads to
+  `/desktop on`, where it used to be routed to `/browser on` (and the model
+  sometimes invented a `computer_use` tool). It is listed only on a Mac.
+- **A page for each harness run** at `/harnesses/runs/{run_id}`, in place of
+  the Evidence dialog, so a run can be linked and bookmarked. Its tabs are
+  Trajectory (live while the run is active), Raw record and Memory evolution,
+  each reachable by `#hash`. **Copy full activity** copies every recorded
+  event in full, with the runs it delegated to, from the new
+  `/api/harness-runs/{id}/activity`. Trajectory details no longer cut outputs
+  at 4,000 characters, "Open its … run" goes to the delegate's own page, and
+  `?include_events=true` returns every event rather than the first 1,000.
 
 ### Fixed
 
+- **Browser control works out of the box, about 3.6x faster.** Every
+  `/browser run` and `browser_control` call failed within 3 seconds with
+  Browser Use 0.13 (`ChatOpenAI.__init__() missing 1 required positional
+  argument: 'model'`): its chat wrappers have no default model, and MemoRizz
+  passed none unless `MEMORIZZ_BROWSER_USE_MODEL` was set. With no model set,
+  it now uses `gpt-5.4-mini` (OpenAI), `claude-haiku-5-5` (Anthropic) or
+  `gemini-flash-latest` (Google). Saved agents keep the model unset, so they
+  follow a better default later. gpt-6 models failed every step
+  (`'temperature' does not support 0.2`) and now work. Over three tasks the
+  mean went from 31.4 s and 98,100 prompt tokens per task (with a model set by
+  hand) to 8.6 s and 29,400: Browser Use's judge, an extra LLM call that only
+  logs a verdict, is off, and screenshots go only when the browser agent asks
+  for one (`MEMORIZZ_BROWSER_USE_VISION=auto`, the new default in the CLI and
+  the UI).
+- Browser Use's telemetry, on by default, uploaded each task's text, the
+  visited URLs, its actions and its answer to PostHog. MemoRizz now runs it
+  with `ANONYMIZED_TELEMETRY=false` unless you set that variable yourself.
+- A browser result reports `timings` (startup, run, steps), token `usage` and
+  `cost_usd`. `duration_seconds` is the wall time of the whole call (on
+  success it used to be the browser agent's step time). `output` is capped at
+  12,000 characters (`max_output_chars`, with `output_truncated` when cut),
+  only the last five errors are kept, and URLs are de-duplicated, so the
+  result handed back to the chat model stays near 1–1.5 KB. A worker that
+  failed to build its model returns a structured error, not a traceback.
+- With Ollama embeddings, every chat turn that called a tool printed
+  `Error generating Ollama embedding: the input length exceeds the context
+  length` and `Workflow stored without an embedding`. A workflow memory was
+  embedded with its tools' full output (a whole Notion page, a list of 65
+  tools), past `nomic-embed-text`'s 2,048 tokens. It is now embedded from
+  what it was for: its name, description, the tools it called in order, its
+  outcome and the request, about 165 characters in place of 53,000 for the
+  run in the report. Re-embedding after an embedding-model swap uses the same
+  text.
+- The Ollama embedder embeds the start of a text that is past the model's
+  context instead of failing: Ollama's older `/api/embeddings` endpoint
+  refuses such text, so it falls back to `/api/embed`, which cuts it to fit.
+  Shorter text is embedded exactly as before. Entity memory now knows Ollama
+  runs `nomic-embed-text` with 2,048 tokens (not 8,192), so a large entity's
+  vector still records how much of it it covers.
 - The Codex and Claude Code plugins never started their MCP server on a Mac
   without MemoRizz installed. With no `memorizz` to run, the plugin falls back
   to `uvx`, and `uvx` picked macOS's Python 3.9, so it installed the last
@@ -17,6 +88,10 @@
 
 ### Docs
 
+- The desktop-control guide covers `/desktop`, `open_url` and approving in
+  the chat; the browser-control guide has a speed-and-cost section. The setup
+  steps no longer say to run `browser-use doctor`: from Browser Use 0.13 it
+  checks Browser Use's own Chrome daemon, not the browser MemoRizz runs.
 - The coding-agent plugins guide shows the one-step Claude Code install,
   `claude plugin install memorizz --marketplace RichmondAlake/memorizz`, and
   how a marketplace install picks up a new release.
