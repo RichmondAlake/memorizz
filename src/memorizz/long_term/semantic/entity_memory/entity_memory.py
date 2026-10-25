@@ -90,6 +90,12 @@ _MODEL_INPUT_TOKENS = (
     ("qwen3-embedding", 32000),
     ("qwen/qwen3-embedding", 32000),
 )
+#: Ollama's builds of some models take less than the original (it reports
+#: nomic-embed-text's context as 2,048 tokens). Checked before the list above.
+_OLLAMA_MODEL_INPUT_TOKENS = (
+    ("nomic-embed-text-v2", 512),
+    ("nomic-embed", 2048),
+)
 #: Input limits by embedding provider when the model is not listed above.
 _PROVIDER_INPUT_TOKENS = {
     "openai": 8191,
@@ -157,7 +163,10 @@ def embedding_input_tokens() -> int:
         return int(raw)
     provider, model = _active_embedding_model()
     name = model.casefold()
-    for prefix, tokens in _MODEL_INPUT_TOKENS:
+    table = _MODEL_INPUT_TOKENS
+    if provider.casefold() == "ollama":
+        table = _OLLAMA_MODEL_INPUT_TOKENS + table
+    for prefix, tokens in table:
         if name.startswith(prefix):
             return tokens
     return _PROVIDER_INPUT_TOKENS.get(provider.casefold(), _DEFAULT_INPUT_TOKENS)

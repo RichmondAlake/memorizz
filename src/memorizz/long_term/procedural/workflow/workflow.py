@@ -2,6 +2,7 @@
 # Licensed under the PolyForm Noncommercial License 1.0.0.
 # See LICENSE file in the project root for full license information.
 
+import json
 import logging
 import uuid
 from datetime import datetime
@@ -16,6 +17,47 @@ from .canonicalization import canonical_hash as _canonical_hash
 from .canonicalization import canonical_signature as _canonical_signature
 
 logger = logging.getLogger(__name__)
+
+#: Most characters of the description and of the request a workflow's
+#: embedding text keeps (a pasted document must not crowd out the tools).
+_EMBEDDING_FIELD_CHARS = 2000
+#: Most tool calls a workflow's embedding text names.
+_EMBEDDING_TOOL_LIMIT = 40
+
+
+def workflow_embedding_text(row: Dict[str, Any]) -> str:
+    """The text a workflow is embedded from: its name, description, the tools
+    it called in order, its outcome and the request.
+
+    Tool arguments and results are left out. They hold whatever the tools
+    returned (a whole Notion page, a list of 65 tools), which says nothing
+    about when the workflow applies and runs past small embedding models'
+    input limits (Ollama's nomic-embed-text takes 2,048 tokens).
+    """
+    steps = row.get("steps")
+    if isinstance(steps, str):
+        # Stores with JSON columns may hand the steps back as text.
+        try:
+            steps = json.loads(steps)
+        except ValueError:
+            steps = None
+    tools = [unit["tool"] for unit in _canonical_signature(steps) if unit["tool"]]
+    outcome = row.get("outcome")
+    if isinstance(outcome, dict):
+        outcome = outcome.get("value")
+    elif isinstance(outcome, WorkflowOutcome):
+        outcome = outcome.value
+    return " ".join(
+        str(x)
+        for x in (
+            row.get("name"),
+            str(row.get("description") or "")[:_EMBEDDING_FIELD_CHARS],
+            " ".join(tools[:_EMBEDDING_TOOL_LIMIT]),
+            outcome,
+            str(row.get("user_query") or "")[:_EMBEDDING_FIELD_CHARS],
+        )
+        if x
+    ).strip()
 
 
 # Workflow outcome enum
@@ -148,17 +190,25 @@ class Workflow:
         --------
         list or numpy.array: The embedding vector representing the workflow.
         """
-        # Convert steps to string representation
-        steps_str = str(self.steps)
-
-        embedding_input = f"{self.name} {self.description} {steps_str} {self.outcome.value} {self.user_query or ''}"
         try:
-            return get_embedding(embedding_input)
+            return get_embedding(self.embedding_input())
         except Exception as exc:
             # No embedding provider (e.g. no API key) must not fail the turn;
             # the workflow is kept and simply is not found by similarity.
             logger.warning("Workflow stored without an embedding: %s", exc)
             return None
+
+    def embedding_input(self) -> str:
+        """The exact text the workflow embedding is generated from."""
+        return workflow_embedding_text(
+            {
+                "name": self.name,
+                "description": self.description,
+                "steps": self.steps,
+                "outcome": self.outcome,
+                "user_query": self.user_query,
+            }
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         """

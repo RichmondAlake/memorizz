@@ -89,20 +89,9 @@ def embedding_text(memory_type: MemoryType, row: Dict[str, Any]) -> str:
             if x
         ).strip()
     if memory_type == MemoryType.WORKFLOW_MEMORY:
-        outcome = row.get("outcome")
-        if isinstance(outcome, dict):
-            outcome = outcome.get("value")
-        return " ".join(
-            str(x)
-            for x in (
-                row.get("name"),
-                row.get("description"),
-                row.get("steps"),
-                outcome,
-                row.get("user_query"),
-            )
-            if x
-        ).strip()
+        from ..long_term.procedural.workflow.workflow import workflow_embedding_text
+
+        return workflow_embedding_text(row)
     if memory_type == MemoryType.SKILLBOX:
 
         def joined(value):

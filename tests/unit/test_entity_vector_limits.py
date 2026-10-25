@@ -249,6 +249,12 @@ def test_the_input_limit_follows_the_model_and_the_override(monkeypatch):
     monkeypatch.setenv("MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER", "ollama")
     monkeypatch.setenv("MEMORIZZ_DEFAULT_EMBEDDING_MODEL", "mxbai-embed-large")
     assert embedding_input_tokens() == 512
+    # Ollama runs nomic-embed-text with a 2,048-token context, not 8,192.
+    monkeypatch.setenv("MEMORIZZ_DEFAULT_EMBEDDING_MODEL", "nomic-embed-text")
+    assert embedding_input_tokens() == 2048
+    monkeypatch.setenv("MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER", "huggingface")
+    monkeypatch.setenv("MEMORIZZ_DEFAULT_EMBEDDING_MODEL", "nomic-embed-text-v1.5")
+    assert embedding_input_tokens() == 8192
     monkeypatch.setenv("MEMORIZZ_ENTITY_EMBEDDING_MAX_TOKENS", "1500")
     assert embedding_input_tokens() == 1500
 

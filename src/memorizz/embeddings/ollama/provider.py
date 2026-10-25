@@ -90,7 +90,24 @@ class OllamaEmbeddingProvider(BaseEmbeddingProvider):
         """Embed a single string via the native client (attr- or dict-style resp)."""
         if self.requested_dimensions:
             return self._embed_shortened(text, self.requested_dimensions)
-        resp = self.client.embeddings(model=self.model, prompt=text)
+        try:
+            resp = self.client.embeddings(model=self.model, prompt=text)
+        except Exception as exc:
+            if "context length" not in str(exc).lower():
+                raise
+            # /api/embeddings refuses text past the model's context; /api/embed
+            # embeds its start. Its vector has unit length, the old one does
+            # not, but they point the same way and stores compare by cosine.
+            logger.info(
+                "Embedding the start of a %d-character input past %s's context",
+                len(text),
+                self.model,
+            )
+            resp = self.client.embed(model=self.model, input=text, truncate=True)
+            vectors = getattr(resp, "embeddings", None)
+            if vectors is None and isinstance(resp, dict):
+                vectors = resp.get("embeddings")
+            return list(vectors[0]) if vectors else []
         vector = getattr(resp, "embedding", None)
         if vector is None and isinstance(resp, dict):
             vector = resp.get("embedding")

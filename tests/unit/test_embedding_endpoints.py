@@ -255,3 +255,34 @@ def test_ollama_without_a_size_is_unchanged(monkeypatch):
     assert provider.get_embedding("hi") == [2.0] * 8
     assert provider.get_dimensions() == 8
     assert {name for name, _ in client.calls} == {"embeddings"}
+
+
+class _ShortOllama(_Ollama):
+    """/api/embeddings refuses long text, as Ollama does past the context."""
+
+    def embeddings(self, model, prompt):
+        if len(prompt) > 100:
+            self.calls.append(("embeddings", {}))
+            raise RuntimeError(
+                "the input length exceeds the context length (status code: 500)"
+            )
+        return super().embeddings(model, prompt)
+
+
+def test_ollama_embeds_the_start_of_text_past_the_context(monkeypatch):
+    client = _ShortOllama()
+    provider = _ollama(monkeypatch, client)
+    assert provider.get_embedding("short") == [2.0] * 8
+    assert provider.get_embedding("long " * 100) == [2.0] * 8
+    assert client.calls[-2:] == [("embeddings", {}), ("embed", {"truncate": True})]
+
+
+def test_ollama_still_raises_other_errors(monkeypatch):
+    class _Down(_Ollama):
+        def embeddings(self, model, prompt):
+            raise ConnectionError("Failed to connect to Ollama")
+
+    provider = _ollama(monkeypatch, _Down())
+    provider._dimensions_probed = True
+    with pytest.raises(ConnectionError):
+        provider.get_embedding("hi")
