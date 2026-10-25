@@ -17,9 +17,14 @@ instead of into the MemoRizz environment:
 
 ```bash
 uv tool install --python 3.12 browser-use
-browser-use install
-browser-use doctor
+browser-use install   # downloads Chromium
 ```
+
+From Browser Use 0.13 the `browser-use` command itself drives your own running
+Chrome through a background daemon, so `browser-use doctor` checks that daemon
+and reports failures that do not affect MemoRizz. MemoRizz needs only the
+Python package and Chromium. To check the whole path, run a real task:
+`/browser run Read the title at https://example.com` in the CLI.
 
 MemoRizz resolves the isolated Python interpreter from the `browser-use` entry
 point installed by `uv tool`/`pipx`, then uses the official Python Agent API. It
@@ -49,9 +54,9 @@ agent = (
         {
             "provider": "browseruse",
             "llm_provider": "openai",
-            "model": "gpt-4.1-mini",
+            "model": "gpt-5.4-mini",
             "headless": True,
-            "use_vision": True,
+            "use_vision": "auto",
             "allowed_domains": ["example.com", "*.notion.so"],
             "prohibited_domains": ["admin.example.com"],
             "block_ip_addresses": True,
@@ -163,9 +168,9 @@ Environment configuration:
 | `MEMORIZZ_BROWSER_USE_COMMAND` | `browser-use` | Entry point for the isolated Browser Use installation |
 | `MEMORIZZ_BROWSER_USE_PYTHON_COMMAND` | discovered from entry point | Optional isolated Python executable override |
 | `MEMORIZZ_BROWSER_USE_LLM_PROVIDER` | `openai` | `openai`, `anthropic`, `google`, or `browseruse` |
-| `MEMORIZZ_BROWSER_USE_MODEL` | provider default | Browser-agent model |
+| `MEMORIZZ_BROWSER_USE_MODEL` | see below | Browser-agent model |
 | `MEMORIZZ_BROWSER_USE_HEADLESS` | `true` | Hide/show the local browser window |
-| `MEMORIZZ_BROWSER_USE_VISION` | `true` | Enable screenshot understanding |
+| `MEMORIZZ_BROWSER_USE_VISION` | `auto` | `auto` sends a screenshot only when the browser agent asks for one; `true` sends one every step; `false` never |
 | `MEMORIZZ_BROWSER_USE_ALLOWED_DOMAINS` | empty | Comma-separated navigation allowlist |
 | `MEMORIZZ_BROWSER_USE_PROHIBITED_DOMAINS` | empty | Comma-separated denylist |
 | `MEMORIZZ_BROWSER_USE_BLOCK_IP_ADDRESSES` | `true` | Block direct IP navigation |
@@ -177,6 +182,38 @@ Environment configuration:
 The UI Settings page exposes the common fields, while each agent editor and
 playground panel controls whether the capability is attached.
 
+## Speed and cost
+
+Each task runs in a fresh worker with a fresh headless Chromium, so a call
+spends about two seconds importing Browser Use and launching the browser
+before the browser agent's first step. MemoRizz keeps that boundary,
+so no task inherits cookies, tabs or sign-ins from an earlier approved task,
+and trims the rest:
+
+- The browser agent defaults to a fast, cheap model: `gpt-5.4-mini` for
+  OpenAI, `claude-haiku-5-5` for Anthropic, `gemini-flash-latest` for Google,
+  and Browser Use's own default for `browseruse`. Browser Use's OpenAI,
+  Anthropic and Google wrappers have no default model of their own. Set
+  `MEMORIZZ_BROWSER_USE_MODEL=gpt-5.6-luna` for the lowest cost; in the runs
+  below it cost about a fifth as much and took about a fifth longer.
+- Vision defaults to `auto`. Every step carries the page's text and element
+  tree; a screenshot goes along only when the browser agent asks for one.
+- Browser Use's judge is off. It replays each finished run, with up to ten
+  screenshots, in one more LLM call whose verdict is only logged.
+- Browser Use's telemetry is off unless you set `ANONYMIZED_TELEMETRY`
+  yourself. It uploads each task, the URLs visited, the actions taken and the
+  final answer.
+
+Measured on a Mac with Browser Use 0.13.7, over three tasks (read
+example.com, list the top three Hacker News stories, search Wikipedia and read
+the first sentence of an article), two runs each:
+
+| Setup | Mean time per task | Mean prompt tokens | Mean cost |
+|---|---:|---:|---:|
+| Earlier defaults with `gpt-4.1-mini`: screenshot every step, judge on | 31.4 s | 98,100 | $0.030 |
+| Current defaults: `gpt-5.4-mini`, vision `auto`, no judge | 8.6 s | 29,400 | $0.013 |
+| `gpt-5.6-luna`, vision `auto`, no judge | 10.1 s | 23,200 | $0.002 |
+
 ## Result contract
 
 The tool returns structured JSON:
@@ -186,20 +223,46 @@ The tool returns structured JSON:
   "success": true,
   "task": "Read the title at https://example.com",
   "output": "Example Domain",
-  "urls": ["https://example.com"],
-  "actions": ["go_to_url", "done"],
+  "urls": ["https://example.com/"],
+  "actions": ["navigate", "done"],
   "errors": [],
   "steps": 2,
-  "duration_seconds": 3.4,
+  "duration_seconds": 4.9,
   "metadata": {
     "provider": "browseruse",
     "execution_boundary": "isolated_browser_use_python",
+    "model": "gpt-5.4-mini",
     "max_steps": 8,
     "headless": true,
-    "block_ip_addresses": true
+    "use_vision": "auto",
+    "block_ip_addresses": true,
+    "timings": {
+      "import_seconds": 0.6,
+      "browser_start_seconds": 1.0,
+      "startup_seconds": 1.8,
+      "run_seconds": 2.8,
+      "steps_seconds": 1.6,
+      "browser_stop_seconds": 0.0
+    },
+    "usage": {
+      "prompt_tokens": 14100,
+      "cached_tokens": 0,
+      "completion_tokens": 188,
+      "llm_calls": 1,
+      "cost_usd": 0.011421
+    }
   }
 }
 ```
+
+`duration_seconds` is the whole call. `timings` shows where it went:
+`startup_seconds` covers importing Browser Use, launching Chromium and building
+the agent, and `steps_seconds` is the browser agent's own steps. `usage` is
+the browser agent's token use, with `cost_usd` at list rates for OpenAI and
+Anthropic models MemoRizz has a rate card for. `output` is capped at 12,000
+characters (`max_output_chars`) so one page dump cannot fill the chat model's
+context; a cut output sets `output_truncated`. Only the last five step errors
+are kept, each shortened, with `errors_omitted` counting the rest.
 
 Timeouts and provider failures remain structured failures rather than partial
 untyped text. The isolated worker process group is terminated on timeout,
@@ -215,6 +278,8 @@ browser in a `finally` block.
 - Use separate browser profiles/accounts with least privilege; do not expose a
   personal administrator profile to a multi-tenant agent.
 - Keep direct IP blocking enabled and deny sensitive domains explicitly.
+- Leave `ANONYMIZED_TELEMETRY` unset (MemoRizz then sends `false`) unless you
+  accept Browser Use uploading task text, visited URLs and results.
 - Review the complete task and destination before approval, especially for
   forms, messages, purchases, uploads, account changes, and destructive work.
 - Browser Use is isolated from MemoRizz at the Python dependency boundary and

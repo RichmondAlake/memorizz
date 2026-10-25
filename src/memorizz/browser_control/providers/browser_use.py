@@ -41,6 +41,22 @@ _DEFAULT_ENV_ALLOWLIST = (
     "BU_NAME",
     "ANONYMIZED_TELEMETRY",
 )
+# Browser Use's chat wrappers for these providers have no default model, so a
+# config without one cannot even build its LLM. These are fast, cheap models
+# that complete ordinary browsing tasks; ``model`` overrides them.
+_DEFAULT_MODELS = {
+    "openai": "gpt-5.4-mini",
+    "anthropic": "claude-haiku-5-5",
+    "google": "gemini-flash-latest",
+}
+_VISION_MODES: Dict[str, Union[bool, str]] = {
+    "auto": "auto",
+    **dict.fromkeys(("1", "true", "yes", "on"), True),
+    **dict.fromkeys(("0", "false", "no", "off"), False),
+}
+_DEFAULT_MAX_OUTPUT_CHARS = 12_000
+_MAX_ERRORS = 5
+_MAX_ERROR_CHARS = 1_000
 
 
 def _string_list(values: Optional[Iterable[Any]]) -> list[str]:
@@ -50,6 +66,16 @@ def _string_list(values: Optional[Iterable[Any]]) -> list[str]:
         if item and item not in result:
             result.append(item)
     return result
+
+
+def _vision_mode(value: Any) -> Union[bool, str]:
+    """``True``, ``False`` or ``"auto"`` (a screenshot only when asked for)."""
+    if isinstance(value, bool):
+        return value
+    mode = _VISION_MODES.get(str(value).strip().lower())
+    if mode is None:
+        raise ValueError("Browser Use use_vision must be true, false or auto")
+    return mode
 
 
 class BrowserUseProvider(BrowserControlProvider):
@@ -71,7 +97,7 @@ class BrowserUseProvider(BrowserControlProvider):
         llm_provider: str = "openai",
         model: Optional[str] = None,
         headless: bool = True,
-        use_vision: bool = True,
+        use_vision: Union[bool, str] = "auto",
         allowed_domains: Optional[Sequence[str]] = None,
         prohibited_domains: Optional[Sequence[str]] = None,
         block_ip_addresses: bool = True,
@@ -79,6 +105,7 @@ class BrowserUseProvider(BrowserControlProvider):
         cdp_url_env: Optional[str] = "BU_CDP_URL",
         max_steps: int = 25,
         task_timeout: int = 600,
+        max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS,
         env_allowlist: Optional[Sequence[str]] = None,
         config: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -99,7 +126,7 @@ class BrowserUseProvider(BrowserControlProvider):
         )
         self.model = str(model).strip() if model else None
         self.headless = bool(headless)
-        self.use_vision = bool(use_vision)
+        self.use_vision = _vision_mode(use_vision)
         self.allowed_domains = _string_list(allowed_domains)
         self.prohibited_domains = _string_list(prohibited_domains)
         self.block_ip_addresses = bool(block_ip_addresses)
@@ -107,6 +134,7 @@ class BrowserUseProvider(BrowserControlProvider):
         self.cdp_url_env = str(cdp_url_env or "").strip() or None
         self.max_steps = max(1, min(int(max_steps), 100))
         self.task_timeout = max(10, min(int(task_timeout), 3_600))
+        self.max_output_chars = max(500, int(max_output_chars))
         self.env_allowlist = tuple(
             _string_list(env_allowlist or _DEFAULT_ENV_ALLOWLIST)
         )
@@ -135,6 +163,15 @@ class BrowserUseProvider(BrowserControlProvider):
 
     def _resolved_command(self) -> Optional[list[str]]:
         return self._resolve_command(self.command)
+
+    @property
+    def effective_model(self) -> Optional[str]:
+        """The configured model, else the fast default for ``llm_provider``.
+
+        Persisted config keeps ``model`` unset so a saved agent follows a
+        better default in a later release instead of pinning today's.
+        """
+        return self.model or _DEFAULT_MODELS.get(self.llm_provider)
 
     def _resolved_python_command(self) -> Optional[list[str]]:
         """Resolve the Python executable owned by the isolated Browser Use tool.
@@ -188,7 +225,7 @@ class BrowserUseProvider(BrowserControlProvider):
                 f"Browser Use CLI '{self.command[0]}' was not found. Install it "
                 "in an isolated Python 3.11+ tool environment with `uv tool "
                 "install --python 3.12 browser-use`, then run `browser-use "
-                "install` and `browser-use --doctor`."
+                "install` to download Chromium."
             )
         if self._resolved_python_command() is None:
             return (
@@ -226,6 +263,7 @@ class BrowserUseProvider(BrowserControlProvider):
             "cdp_url_env": self.cdp_url_env,
             "max_steps": self.max_steps,
             "task_timeout": self.task_timeout,
+            "max_output_chars": self.max_output_chars,
             "env_allowlist": list(self.env_allowlist),
             "execution_boundary": "isolated_browser_use_python",
             "requires_durable_approval": True,
@@ -235,7 +273,7 @@ class BrowserUseProvider(BrowserControlProvider):
         return {
             "task": task,
             "llm_provider": self.llm_provider,
-            "model": self.model,
+            "model": self.effective_model,
             "headless": self.headless,
             "use_vision": self.use_vision,
             "allowed_domains": list(self.allowed_domains),
@@ -251,11 +289,16 @@ class BrowserUseProvider(BrowserControlProvider):
         encoded = json.dumps(config, ensure_ascii=False, separators=(",", ":"))
         # This is a fixed program. The untrusted task is decoded from a quoted
         # JSON string instead of being concatenated as executable Python.
-        return f"""import asyncio
+        return f"""import time
+
+STARTED = time.monotonic()
+
+import asyncio
 import importlib.metadata
 import inspect
 import json
 import os
+import re
 
 from browser_use import Agent, Browser, ChatAnthropic, ChatBrowserUse, ChatGoogle, ChatOpenAI
 try:
@@ -263,8 +306,12 @@ try:
 except ImportError:  # Browser Use releases before BrowserProfile was public
     BrowserProfile = None
 
+IMPORTED = time.monotonic()
 CONFIG = json.loads({encoded!r})
 MARKER = {_RESULT_MARKER!r}
+# OpenAI's reasoning models reject the temperature Browser Use sends to any
+# model missing from its reasoning_models list, which predates gpt-6.
+OPENAI_REASONING = re.compile(r"^(o\\d|gpt-([5-9]|\\d{{2,}}))")
 
 def _json_safe(value):
     try:
@@ -294,18 +341,52 @@ def _supported_kwargs(target, values, required):
         )
     return {{name: value for name, value in values.items() if _accepts(target, name)}}
 
-async def _main():
+def _llm():
     provider = CONFIG["llm_provider"]
     model = CONFIG.get("model")
+    model_kwargs = {{"model": model}} if model else {{}}
     if provider == "browseruse":
-        llm = ChatBrowserUse(**({{"model": model}} if model else {{}}))
-    elif provider == "anthropic":
-        llm = ChatAnthropic(**({{"model": model}} if model else {{}}))
-    elif provider == "google":
-        llm = ChatGoogle(**({{"model": model}} if model else {{}}))
-    else:
-        llm = ChatOpenAI(**({{"model": model}} if model else {{}}))
+        return ChatBrowserUse(**model_kwargs)
+    if provider == "anthropic":
+        return ChatAnthropic(**model_kwargs)
+    if provider == "google":
+        return ChatGoogle(**model_kwargs)
+    llm = ChatOpenAI(**model_kwargs)
+    reasoning_models = getattr(llm, "reasoning_models", None)
+    if (
+        model
+        and isinstance(reasoning_models, list)
+        and OPENAI_REASONING.match(model.lower())
+        and not any(str(item).lower() in model.lower() for item in reasoning_models)
+    ):
+        llm.reasoning_models = [*reasoning_models, model]
+    return llm
 
+def _vision():
+    value = CONFIG["use_vision"]
+    if value != "auto":
+        return bool(value)
+    parameter = inspect.signature(Agent).parameters.get("use_vision")
+    # Releases before screenshot-on-request vision only take a bool.
+    if parameter is None or "auto" not in str(parameter.annotation):
+        return True
+    return value
+
+def _usage(history):
+    usage = getattr(history, "usage", None)
+    if usage is None:
+        return None
+    fields = {{
+        "prompt_tokens": "total_prompt_tokens",
+        "cached_tokens": "total_prompt_cached_tokens",
+        "cache_write_tokens": "total_prompt_cache_creation_tokens",
+        "completion_tokens": "total_completion_tokens",
+        "llm_calls": "entry_count",
+    }}
+    return {{name: getattr(usage, field, None) for name, field in fields.items()}}
+
+async def _main():
+    timings = {{"import_seconds": IMPORTED - STARTED}}
     policy_kwargs = {{
         "headless": bool(CONFIG["headless"]),
         "block_ip_addresses": bool(CONFIG["block_ip_addresses"]),
@@ -331,6 +412,7 @@ async def _main():
     browser = None
     policy_adapter = None
     try:
+        llm = _llm()
         if BrowserProfile is not None and _accepts(Browser, "browser_profile"):
             browser_profile = BrowserProfile(
                 **_supported_kwargs(
@@ -344,13 +426,26 @@ async def _main():
                 **_supported_kwargs(Browser, policy_kwargs, required_policy_fields)
             )
             policy_adapter = "browser_constructor"
-        agent = Agent(
-            task=CONFIG["task"],
-            llm=llm,
-            browser=browser,
-            use_vision=bool(CONFIG["use_vision"]),
-        )
+        start = getattr(browser, "start", None)
+        if start is not None:
+            began = time.monotonic()
+            await start()
+            timings["browser_start_seconds"] = time.monotonic() - began
+        agent_kwargs = {{
+            "task": CONFIG["task"],
+            "llm": llm,
+            "browser": browser,
+            "use_vision": _vision(),
+        }}
+        # The judge replays the finished run, with up to ten screenshots, in
+        # one more LLM call. Its verdict is only logged, never returned.
+        if "use_judge" in inspect.signature(Agent).parameters:
+            agent_kwargs["use_judge"] = False
+        agent = Agent(**agent_kwargs)
+        timings["startup_seconds"] = time.monotonic() - STARTED
+        began = time.monotonic()
         history = await agent.run(max_steps=int(CONFIG["max_steps"]))
+        timings["run_seconds"] = time.monotonic() - began
         successful = history.is_successful()
         if successful is None:
             successful = bool(history.is_done() and not history.has_errors())
@@ -362,6 +457,7 @@ async def _main():
             "errors": [str(item) for item in history.errors() if item],
             "steps": int(history.number_of_steps()),
             "duration_seconds": _json_safe(history.total_duration_seconds()),
+            "usage": _json_safe(_usage(history)),
             "browser_use_version": importlib.metadata.version("browser-use"),
             "browser_policy_adapter": policy_adapter,
         }}
@@ -377,21 +473,78 @@ async def _main():
         }}
     finally:
         if browser is not None:
+            began = time.monotonic()
             try:
                 await browser.stop()
             except Exception:
                 pass
+            timings["browser_stop_seconds"] = time.monotonic() - began
+    payload["timings"] = {{name: round(value, 3) for name, value in timings.items()}}
     print(MARKER + json.dumps(payload, ensure_ascii=False, default=str))
 
 asyncio.run(_main())
 """
 
     def _environment(self) -> Dict[str, str]:
-        return {
+        environment = {
             name: value
             for name in self.env_allowlist
             if (value := os.environ.get(name)) is not None
         }
+        # Browser Use's "anonymized" telemetry uploads each task, the URLs it
+        # visited, its actions and its final answer. It stays off unless the
+        # operator sets ANONYMIZED_TELEMETRY themselves.
+        environment.setdefault("ANONYMIZED_TELEMETRY", "false")
+        return environment
+
+    def _bounded_output(self, output: Any) -> tuple[Any, bool]:
+        """Cap the text handed back to the chat model's context."""
+        if not isinstance(output, str) or len(output) <= self.max_output_chars:
+            return output, False
+        return output[: self.max_output_chars], True
+
+    @staticmethod
+    def _bounded_errors(errors: Iterable[Any]) -> tuple[list[str], int]:
+        """Keep the last few step errors, each shortened; count the rest."""
+        messages = [str(item) for item in errors or [] if item]
+        kept = [
+            item if len(item) <= _MAX_ERROR_CHARS else item[:_MAX_ERROR_CHARS] + "…"
+            for item in messages[-_MAX_ERRORS:]
+        ]
+        return kept, len(messages) - len(kept)
+
+    def _usage(self, usage: Any) -> Optional[Dict[str, Any]]:
+        """Token counts the worker reported, priced at list rates when known."""
+        if not isinstance(usage, dict):
+            return None
+        counts = {
+            name: value
+            for name, value in usage.items()
+            if isinstance(value, int) and not isinstance(value, bool)
+        }
+        if "prompt_tokens" not in counts or "completion_tokens" not in counts:
+            return counts or None
+        writes = counts.get("cache_write_tokens") or 0
+        if self.llm_provider == "anthropic":
+            # Browser Use adds Anthropic's cache reads to its prompt tokens
+            # but not its cache writes; count every input token.
+            counts["prompt_tokens"] += writes
+        if self.llm_provider in {"openai", "anthropic"} and self.effective_model:
+            from ...observability.pricing import DEFAULT_PRICING
+
+            quote = DEFAULT_PRICING.quote(
+                {
+                    "provider": self.llm_provider,
+                    "model": self.effective_model,
+                    "input_tokens": counts["prompt_tokens"],
+                    "output_tokens": counts["completion_tokens"],
+                    "cached_tokens": counts.get("cached_tokens") or 0,
+                    "cache_write_tokens": writes,
+                }
+            )
+            if quote.get("cost_usd") is not None:
+                counts["cost_usd"] = round(float(quote["cost_usd"]), 6)
+        return counts
 
     @staticmethod
     def _terminate(process: subprocess.Popen[str]) -> None:
@@ -498,25 +651,44 @@ asyncio.run(_main())
                 },
             )
 
+        wall_seconds = round(time.monotonic() - started, 3)
+        output, output_truncated = self._bounded_output(payload.get("output"))
+        errors, errors_omitted = self._bounded_errors(payload.get("errors"))
+        # ``duration_seconds`` is the whole call, as on failure and timeout;
+        # the worker's phases show where that time went.
+        timings = {
+            name: value
+            for name, value in (payload.get("timings") or {}).items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        }
+        if isinstance(payload.get("duration_seconds"), (int, float)):
+            timings["steps_seconds"] = round(float(payload["duration_seconds"]), 3)
+        metadata: Dict[str, Any] = {
+            **self._result_metadata(bounded_steps, bounded_timeout),
+            "browser_use_version": payload.get("browser_use_version"),
+            "browser_policy_adapter": payload.get("browser_policy_adapter"),
+            "return_code": process.returncode,
+            "timings": timings,
+        }
+        usage = self._usage(payload.get("usage"))
+        if usage:
+            metadata["usage"] = usage
+        if output_truncated:
+            metadata["output_truncated"] = True
+            metadata["output_char_limit"] = self.max_output_chars
+        if errors_omitted:
+            metadata["errors_omitted"] = errors_omitted
         return BrowserControlResult(
             success=bool(payload.get("success")),
             task=normalized_task,
-            output=payload.get("output"),
-            urls=[str(item) for item in payload.get("urls") or []],
+            output=output,
+            # One URL per step: keep each page once, in visit order.
+            urls=_string_list(payload.get("urls")),
             actions=[str(item) for item in payload.get("actions") or []],
-            errors=[str(item) for item in payload.get("errors") or []],
+            errors=errors,
             steps=int(payload.get("steps") or 0),
-            duration_seconds=(
-                float(payload["duration_seconds"])
-                if isinstance(payload.get("duration_seconds"), (int, float))
-                else round(time.monotonic() - started, 3)
-            ),
-            metadata={
-                **self._result_metadata(bounded_steps, bounded_timeout),
-                "browser_use_version": payload.get("browser_use_version"),
-                "browser_policy_adapter": payload.get("browser_policy_adapter"),
-                "return_code": process.returncode,
-            },
+            duration_seconds=wall_seconds,
+            metadata=metadata,
         )
 
     def _result_metadata(self, max_steps: int, timeout: int) -> Dict[str, Any]:
@@ -524,7 +696,7 @@ asyncio.run(_main())
             "provider": self.provider_name,
             "execution_boundary": "isolated_browser_use_python",
             "llm_provider": self.llm_provider,
-            "model": self.model,
+            "model": self.effective_model,
             "max_steps": max_steps,
             "timeout": timeout,
             "headless": self.headless,

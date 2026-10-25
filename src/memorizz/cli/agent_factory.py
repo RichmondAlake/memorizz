@@ -460,12 +460,19 @@ def make_browser_control_config(
         )
 
     llm_provider = (_env("MEMORIZZ_BROWSER_USE_LLM_PROVIDER") or "openai").lower()
+    # ``auto`` sends a screenshot only when the browser agent asks for one;
+    # the page's text and element tree come with every step either way.
+    vision = (_env("MEMORIZZ_BROWSER_USE_VISION") or "auto").lower()
     config: Dict[str, Any] = {
         "provider": "browseruse",
         "command": _env("MEMORIZZ_BROWSER_USE_COMMAND") or "browser-use",
         "llm_provider": llm_provider,
         "headless": _env_bool("MEMORIZZ_BROWSER_USE_HEADLESS", True),
-        "use_vision": _env_bool("MEMORIZZ_BROWSER_USE_VISION", True),
+        "use_vision": (
+            "auto"
+            if vision == "auto"
+            else _env_bool("MEMORIZZ_BROWSER_USE_VISION", True)
+        ),
         "allowed_domains": _env_list("MEMORIZZ_BROWSER_USE_ALLOWED_DOMAINS"),
         "prohibited_domains": _env_list("MEMORIZZ_BROWSER_USE_PROHIBITED_DOMAINS"),
         "block_ip_addresses": _env_bool(

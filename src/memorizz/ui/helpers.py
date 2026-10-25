@@ -1177,8 +1177,11 @@ def _build_browser_control_config(
     config.setdefault(
         "headless", _browser_env_bool("MEMORIZZ_BROWSER_USE_HEADLESS", True)
     )
+    # ``auto`` (the default) sends a screenshot only when the browser agent
+    # asks for one, as in the CLI.
+    vision = _to_text(os.environ.get("MEMORIZZ_BROWSER_USE_VISION", "")).strip().lower()
     config.setdefault(
-        "use_vision", _browser_env_bool("MEMORIZZ_BROWSER_USE_VISION", True)
+        "use_vision", "auto" if vision in {"", "auto"} else _parse_bool(vision)
     )
     config.setdefault(
         "allowed_domains",

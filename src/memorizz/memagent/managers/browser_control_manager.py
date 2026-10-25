@@ -94,7 +94,9 @@ class BrowserControlManager:
 
             Browser control may click, type, submit forms, or otherwise change
             external systems. Describe the complete intended outcome in one
-            task. MemoRizz pauses this call for host approval before execution.
+            task, naming exactly what to report back: the browser agent's
+            final answer is returned as ``output``. MemoRizz pauses this call
+            for host approval before execution.
 
             Args:
                 task: Complete natural-language browser task.

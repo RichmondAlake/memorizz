@@ -177,8 +177,10 @@ Follow the [Oracle troubleshooting guide](memory-providers/oracle.md#troubleshoo
 
 - E2B validates `E2B_API_KEY` at construction. Confirm the sandbox extra and
   key are present.
-- Browser Use should be installed in an isolated tool environment. Run
-  `browser-use doctor` and inspect `agent.capability_report()`.
+- Browser Use should be installed in an isolated tool environment. Check the
+  whole path with `/browser run Read the title at https://example.com` and
+  inspect `agent.capability_report()`. From Browser Use 0.13,
+  `browser-use doctor` checks its own Chrome daemon, not MemoRizz's worker.
 
 Browser Use has its own model configuration. An Ollama chat session does not
 supply credentials for its default OpenAI browser model. If enabling it reports

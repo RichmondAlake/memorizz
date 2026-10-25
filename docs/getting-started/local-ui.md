@@ -322,12 +322,11 @@ specialist tools. See the
 
 ## Browser control in the UI
 
-Install Browser Use outside the MemoRizz environment, then validate it:
+Install Browser Use and its Chromium outside the MemoRizz environment:
 
 ```bash
 uv tool install --python 3.12 browser-use
-browser-use install
-browser-use doctor
+browser-use install              # downloads Chromium
 ```
 
 In **Settings -> Browser Control**, choose the Browser Use LLM provider/model,
