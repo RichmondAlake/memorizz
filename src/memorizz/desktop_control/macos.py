@@ -26,6 +26,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 ACCESSIBILITY_HINT = (
     "macOS has not given the app running MemoRizz (your terminal) Accessibility "
@@ -487,6 +488,29 @@ class _Apps:
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
             raise DesktopError(f"macOS could not open {path}: {detail}")
+
+    def open_url(self, url: str, path: Optional[str] = None) -> None:
+        command = ["open"] + (["-a", path] if path else []) + [url]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise DesktopError(f"macOS could not open {url}: {detail}")
+
+    def handler(self, url: str) -> Optional[str]:
+        """The name of the app macOS opens ``url`` with, if any."""
+        appkit = self._appkit
+        target = appkit.NSURL.URLWithString_(url)
+        found = (
+            appkit.NSWorkspace.sharedWorkspace().URLForApplicationToOpenURL_(target)
+            if target is not None
+            else None
+        )
+        if found is None:
+            return None
+        bundle = appkit.NSBundle.bundleWithURL_(found)
+        info = (bundle and bundle.infoDictionary()) or {}
+        name = info.get("CFBundleDisplayName") or info.get("CFBundleName")
+        return str(name or Path(str(found.path())).stem)
 
     def raise_app(self, pid: int) -> None:
         app = (
@@ -1067,6 +1091,50 @@ class MacDesktop:
             f"Opened {app.name}.\n\n"
             + self._outline(app, wait=5.0)
             + self._snapshot(app, "open")
+        )
+
+    def open_url(self, url: str, app: Optional[str] = None) -> str:
+        link = str(url or "").strip()
+        scheme = urlparse(link).scheme.lower()
+        if not scheme or link.startswith("-") or any(ch.isspace() for ch in link):
+            raise DesktopError(
+                "Give the whole link, e.g. open_url('https://www.notion.so/…') "
+                "or a deep link such as 'notion://…' or 'slack://…'."
+            )
+        if scheme == "file":
+            # A file can be a script macOS would run; apps go through open_app.
+            raise DesktopError(
+                "open_url opens links, not files. Use open_app to open an app."
+            )
+        wanted = str(app or "").strip()
+        path = None
+        if wanted:
+            located = None if wanted.startswith("-") else self.apps.locate(wanted)
+            if located is None:
+                raise DesktopError(
+                    f"No app called {wanted!r} is installed. Leave app out to "
+                    "open the link with its usual app."
+                )
+            path = located[0]
+        self.apps.open_url(link, path)
+        name = wanted or self.apps.handler(link)
+        found = None
+        deadline = time.monotonic() + self.launch_timeout
+        while name:
+            found = self._find(name)
+            if found is not None or time.monotonic() >= deadline:
+                break
+            time.sleep(0.25)
+        if found is None:
+            return f"Opened {link}."
+        self._pid = found.pid
+        if not self.ax.trusted():
+            return f"Opened {link} in {found.name}. {ACCESSIBILITY_HINT}"
+        time.sleep(self.settle)  # the app loads the link after it comes forward
+        return (
+            f"Opened {link} in {found.name}.\n\n"
+            + self._outline(found, wait=5.0)
+            + self._snapshot(found, "open")
         )
 
     def _wait_for_launch(self, name: str, bundle_id: str) -> App:

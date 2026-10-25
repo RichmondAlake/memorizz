@@ -18,9 +18,9 @@ the agent's app, and the agent's typing never lands in yours.
 
 !!! warning "The agent acts with your permissions"
     Desktop control operates real apps as you. Reading a window never asks.
-    Opening an app, clicking, typing, pressing keys and scrolling each wait for
-    your approval unless you connect with `--no-approval`. Turn approval off
-    only for apps and tasks you trust.
+    Opening an app or a link, clicking, typing, pressing keys and scrolling
+    each wait for your approval unless you connect with `--no-approval`. Turn
+    approval off only for apps and tasks you trust.
 
 ## Requirements
 
@@ -47,7 +47,22 @@ in. Turn it on under **System Settings → Privacy & Security → Accessibility*
 (and **Screen Recording** for screenshots), then run `doctor` again. Restart
 that app if it still says no.
 
-## Connect it to the chat agent
+## Turn it on in the chat
+
+In a `memorizz` chat, one command attaches the desktop tools to the agent you
+are talking to. No restart is needed, and the agent keeps them next time:
+
+```text
+/desktop on                      # computer use for this agent (/computer-use works too)
+/desktop                         # on or off, and what macOS allows
+/desktop doctor --ask            # show macOS's prompts for whatever is missing
+/desktop off                     # remove the tools again
+```
+
+`/desktop on --no-screenshots` keeps runs without window screenshots. Each
+action asks in the chat before it runs (see [Approvals](#approvals)).
+
+## Connect it from the shell
 
 ```bash
 memorizz desktop connect         # saves an MCP connection named "desktop"
@@ -75,6 +90,7 @@ Then ask for something in plain words:
 > Open Calculator and work out 12 × 7.
 > What does the note called "Groceries" in Notes say?
 > In System Settings, which Wi-Fi network am I on?
+> Open my "THE ALGORITHM" Notion page in the Notion app.
 ```
 
 ## The tools
@@ -84,6 +100,7 @@ Then ask for something in plain words:
 | `list_apps()` | The apps running on this Mac, and which one is in front. | Never |
 | `read_window(app, include_menus=False, limit=150)` | A running app's window as numbered elements. `app` defaults to the app used last; `include_menus` adds the menu bar and any open menu. | Never |
 | `open_app(name)` | Launch an app that is not running (or switch to it), then read its window. | Yes |
+| `open_url(url, app=None)` | Open a link or deep link in an app, then read its window. `app="Notion"` opens a `notion.so` or `app.notion.com` page in the Notion app; without `app` the link opens where macOS usually opens it. `notion://`, `slack://` and `mailto:` links work too; `file:` links are refused. The app comes to the front. | Yes |
 | `click(element, double=False)` | Click a numbered element, then read the window again. | Yes |
 | `type_text(text, element=None, submit=False, in_front=False)` | Type into a numbered field, or wherever the cursor is; `submit` presses Return. | Yes |
 | `press_keys(keys, app=None, in_front=False)` | Keys and shortcuts: `"cmd+n"`, `"down down return"`, `"escape"`. | Yes |
@@ -132,7 +149,16 @@ does not run and the agent is told to read again.
 
 Reading is free. Every other tool call becomes a durable approval proposal
 that names the exact tool and arguments, and nothing runs until you decide. In
-the chat:
+the chat, the turn stops and asks:
+
+```text
+Allow desktop__open_url(url="https://app.notion.com/p/8e5d…", app="Notion")? [y/N] y
+Opened THE ALGORITHM in your Notion desktop app.
+```
+
+Yes runs that exact call and lets the agent carry on; when it reaches the next
+action it asks again. Anything else declines it. Ctrl-C leaves the proposal
+pending, to decide later with the `/approvals` commands:
 
 ```text
 /approvals pending
@@ -206,8 +232,10 @@ for proposal in agent.list_approval_proposals(status="pending"):
 - **macOS only.** On another platform the tools report that desktop control
   needs macOS.
 - **Apps that hide their content.** Some Electron apps expose only an empty
-  window frame; Notion's desktop app is one. Use the
-  [Notion MCP preset](../guides/mcp-connectivity.md#notion) for Notion instead.
+  window frame; Notion's desktop app is one. The agent can still open a Notion
+  page there with `open_url`, but it cannot read or click inside it. To read or
+  edit Notion pages, use the
+  [Notion MCP preset](../guides/mcp-connectivity.md#notion).
 - **Web pages.** Chrome shows its toolbar and tabs, but not page content unless
   you turn on `chrome://accessibility`. For websites, use
   [browser control](../browser-control/index.md).
@@ -222,4 +250,4 @@ for proposal in agent.list_approval_proposals(status="pending"):
 | `Screen Recording: not allowed` | Steps are kept without screenshots. Allow Screen Recording for the same app to keep them. |
 | `Desktop control needs pyobjc` | Install the extra: `pip install "memorizz[desktop]"`, or reinstall the uv tool with it. |
 | `The window changed since the last read` | Expected after the app changed on its own; the agent reads again and continues. |
-| The agent has no `desktop__` tools | Restart the chat after `memorizz desktop connect`, and check `memorizz mcp test desktop`. |
+| The agent has no `desktop__` tools | Run `/desktop on` in the chat (or restart the chat after `memorizz desktop connect`), and check `memorizz mcp test desktop`. |

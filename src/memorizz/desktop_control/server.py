@@ -18,7 +18,9 @@ from .macos import DesktopError, MacDesktop
 INSTRUCTIONS = (
     "Operate apps on the user's Mac. read_window(app) shows any running app's "
     "window as numbered elements without changing anything, so use it first; "
-    "open_app is only for launching an app that list_apps does not show. Act by number "
+    "open_app is only for launching an app that list_apps does not show. "
+    "open_url opens a link or deep link in an app, e.g. a Notion page link with "
+    "app='Notion' shows that page in the Notion app. Act by number "
     "with click, type_text, press_keys and scroll; each action returns the "
     "window again with new numbers, so always use the latest ones. Ask the user "
     "before sending, deleting, buying or posting anything."
@@ -95,6 +97,17 @@ def create_desktop_mcp_server(
         To look at an app that is already running, use read_window instead.
         """
         return run(lambda mac: mac.open_app(name))
+
+    @server.tool(annotations=act)
+    async def open_url(url: str, app: Optional[str] = None) -> str:
+        """Open a link in an app on this Mac, then read its window.
+
+        app picks the app (e.g. "Notion" opens a notion.so or app.notion.com
+        page in the Notion app); without it the link opens where macOS
+        usually opens it. Deep links such as notion://, slack:// or mailto:
+        work too. The app comes to the front.
+        """
+        return run(lambda mac: mac.open_url(url, app=app))
 
     @server.tool(annotations=act)
     async def click(element: int, double: bool = False) -> str:

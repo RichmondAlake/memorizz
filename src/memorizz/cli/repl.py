@@ -164,6 +164,8 @@ def _stream_turn(session, query: str) -> None:
     answer, status, tools = "", "preparing", []
     # Capabilities the request needed but the agent lacks; offered afterwards.
     needed = []
+    # Tool calls waiting for approval; asked about after the turn.
+    approvals = []
     stream = None
     # The local UI's playground shows this turn as it streams.
     live_turn = LiveTurn(getattr(session.agent, "agent_id", None), query)
@@ -239,6 +241,7 @@ def _stream_turn(session, query: str) -> None:
                     tools.append(event.get("tool_name", "tool"))
                 elif kind == "approval.required":
                     status = "paused for approval"
+                    approvals.append((event.get("proposal") or {}).get("proposal_id"))
                 elif kind == "capability.suggested":
                     needed.extend(event.get("capabilities") or [])
                 elif kind == "capability.requested":
@@ -268,6 +271,10 @@ def _stream_turn(session, query: str) -> None:
             refresh(force=True)
     if save_stream_session(session) == "failed":
         session.console.print("[yellow]Session state could not be saved.[/yellow]")
+    if approvals:
+        from . import inline_approvals
+
+        inline_approvals.ask(session, approvals)
     if needed:
         from . import connect
 

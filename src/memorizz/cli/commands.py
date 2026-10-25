@@ -376,6 +376,14 @@ def cmd_browser(session, args: str):
         console.print(f"[red]Could not enable browser control:[/red] {exc}")
 
 
+def cmd_desktop(session, args: str):
+    """Turn computer use (the desktop tools) on or off for this agent."""
+    from . import desktop_commands
+
+    _con(session)
+    desktop_commands.chat_command(session, args)
+
+
 def cmd_approvals(session, args: str):
     """Operate the generic durable approval lifecycle for this agent."""
     console = _con(session)
@@ -2225,6 +2233,11 @@ COMMANDS: Dict[str, Command] = {
         "Configure or run governed browser control.",
         "/browser [on|off|status|run <task>]",
     ),
+    "desktop": Command(
+        cmd_desktop,
+        "Computer use: let the agent open, read and operate apps on this Mac.",
+        "/desktop [on|off|status|doctor]",
+    ),
     "approvals": Command(
         cmd_approvals,
         "List, decide, or resume durable tool approvals.",
@@ -2350,6 +2363,8 @@ COMMANDS: Dict[str, Command] = {
 ALIASES: Dict[str, str] = {
     "rename": "name",
     "mcp": "connect",
+    "computer-use": "desktop",
+    "computer": "desktop",
     # Unambiguous before /name was introduced.
     "n": "new",
     # These were unambiguous before /memory-provider was introduced.

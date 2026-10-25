@@ -84,6 +84,7 @@ COMMAND_KINDS = {
             "automation",
             "approvals",
             "browser",
+            "desktop",
             "web",
             "code",
         ),

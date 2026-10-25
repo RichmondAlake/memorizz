@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -30,6 +31,8 @@ class Capability:
     # An attached MCP server whose name or URL contains one of these provides it.
     server_terms: Tuple[str, ...] = ()
     preset: Optional[str] = None
+    # Other names a model or user may give it ("computer use").
+    aliases: Tuple[str, ...] = ()
 
 
 CAPABILITIES: Tuple[Capability, ...] = (
@@ -88,13 +91,38 @@ CAPABILITIES: Tuple[Capability, ...] = (
     Capability(
         id="browser",
         title="Browse websites",
-        summary="Open pages and fill in forms in a browser",
+        summary="Open websites and fill in forms in a web browser",
         patterns=(
             r"\b(open|visit|go to|click)\b[^.?!\n]{0,30}\b(website|site|web ?page|browser)\b",
             r"\bfill (in|out) (the |a |this )?form\b",
         ),
+        aliases=("browser use", "web browser"),
+    ),
+    Capability(
+        id="desktop",
+        title="Use apps on this Mac",
+        summary=(
+            "Open apps and links in them (a Notion page in the Notion app), "
+            "read their windows, click and type"
+        ),
+        patterns=(
+            r"\bcomputer[ -]?use\b",
+            r"\b(desktop|mac)\b[^.?!\n]{0,20}\bapp\w*",
+            r"\b(in|on|with) (my|the)( actual| own| real)? (desktop|mac)\b",
+        ),
+        server_terms=("desktop serve", "computer-use", "computer_use"),
+        aliases=(
+            "computer use",
+            "desktop control",
+            "desktop app",
+            "desktop apps",
+            "mac apps",
+            "use apps",
+        ),
     ),
 )
+#: Only a Mac can attach desktop control (``memorizz desktop serve``).
+_MAC_ONLY = {"desktop"}
 BY_ID = {capability.id: capability for capability in CAPABILITIES}
 
 INTERNET_PROVIDERS = (
@@ -133,6 +161,7 @@ def capability_state(
     sandbox_provider: Optional[str] = None,
     browser_provider: Optional[str] = None,
     environ: Optional[Dict[str, str]] = None,
+    platform: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Each capability's status and the ways to enable it, from live config.
 
@@ -143,7 +172,10 @@ def capability_state(
     signed_in = dict(signed_in or {})
     servers = [dict(server) for server in mcp_servers if isinstance(server, dict)]
     rows: List[Dict[str, Any]] = []
+    on_mac = (platform or sys.platform) == "darwin"
     for capability in CAPABILITIES:
+        if capability.id in _MAC_ONLY and not on_mac:
+            continue
         providing = [
             server for server in servers if _server_provides(server, capability)
         ]
@@ -222,7 +254,15 @@ def _offers(capability: Capability, env: Any) -> List[Dict[str, Any]]:
                 "docs": preset["docs"],
             }
         )
-    if capability.id in {"code_execution", "browser"}:
+    if capability.id == "desktop":
+        offers.append(
+            {
+                "kind": "command",
+                "command": "/desktop on",
+                "title": "Run /desktop on in the memorizz chat",
+            }
+        )
+    elif capability.id in {"code_execution", "browser"}:
         section = "sandbox" if capability.id == "code_execution" else "browser"
         offers.append(
             {
@@ -287,6 +327,7 @@ def resolve(name: Any) -> Optional[str]:
             capability.title.lower(),
             (capability.preset or "").replace("-", " "),
             *capability.server_terms,
+            *capability.aliases,
         }:
             return capability.id
     return None

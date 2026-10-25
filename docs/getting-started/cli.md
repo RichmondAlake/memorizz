@@ -349,7 +349,8 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/web [on\|off\|tavily\|firecrawl]` | Enable/disable internet search (Tavily/Firecrawl). |
 | `/code [on\|off]` | Toggle coding tools (file read/write + bounded commands, scoped to cwd). |
 | `/browser [status\|on\|off\|run <task>]` | Inspect/configure Browser Use or run an explicit host browser task. |
-| `/approvals [status/action]` | List, approve, reject, cancel, or resume durable generic tool proposals. |
+| `/desktop [on\|off\|status\|doctor]` | Computer use: let the agent open apps and links, read windows, click and type on this Mac (alias `/computer-use`). No restart needed. |
+| `/approvals [status/action]` | List, approve, reject, cancel, or resume durable generic tool proposals. A turn that needs approval also asks `Allow …? [y/N]` right away. |
 | `/memory [id\|project [path]]` | Show or switch the active memory id. `project` resolves the folder's project memory, the one the Codex and Claude Code plugins write to. |
 | `/session <run> [N]` | Show one recorded session inside the chat: its header and the last N turns (default 20), with tool activity counted between turns. Takes the short run id from `/sessions`. |
 | `/sessions [codex\|claude-code] [N]` | List the Codex and Claude Code sessions the MemoRizz plugins recorded: when, agent, project memory, turns, folder, opening prompt and run id. |
@@ -704,8 +705,7 @@ differ from MemoRizz's:
 
 ```bash
 uv tool install --python 3.12 browser-use
-browser-use install
-browser-use doctor
+browser-use install              # downloads Chromium
 
 export MEMORIZZ_BROWSER_CONTROL_PROVIDER=browseruse
 export MEMORIZZ_BROWSER_USE_COMMAND=browser-use
@@ -732,7 +732,9 @@ agent record.
 /browser off
 ```
 
-For a model-requested task, use the generic approval lifecycle:
+A model-requested task stops the turn and asks `Allow browser_control(…)? [y/N]`;
+yes runs it and lets the agent carry on. Ctrl-C leaves it pending for the
+generic approval lifecycle:
 
 ```text
 /approvals pending
@@ -749,19 +751,28 @@ UI, domain-policy, result, and custom-provider details.
 
 On a Mac, the chat agent can open, read and operate apps. Install the
 `desktop` extra, give the app you run MemoRizz in Accessibility permission, and
-connect the desktop tools:
+turn the desktop tools on from the chat:
 
 ```bash
 uv tool install --python 3.12 "memorizz[desktop]"
 memorizz desktop doctor --ask    # Accessibility, and Screen Recording for screenshots
-memorizz desktop connect         # one MCP connection, one tool per action
-memorizz                         # restart the chat
 ```
 
+```text
+/desktop on                      # computer use for this agent, no restart
+/desktop                         # status and permissions
+/desktop off
+```
+
+(`memorizz desktop connect` does the same from the shell; restart the chat
+after it.)
+
 The agent reads a window as a numbered outline of its buttons, fields and text,
-then acts by number. Reading never asks; opening an app, clicking, typing,
-pressing keys and scrolling wait for `/approvals` (connect with
-`--no-approval` to let them run). Actions reach the app in the background, so
+then acts by number, and `open_url` opens a link in an app (a Notion page in
+the Notion app). Reading never asks; opening an app or a link, clicking,
+typing, pressing keys and scrolling stop the turn with
+`Allow …? [y/N]`, and yes carries on (connect with
+`memorizz desktop connect --no-approval` to let them run). Actions reach the app in the background, so
 you can keep working in another one. Each run is kept as workflow memory, with
 a screenshot of every step when Screen Recording is allowed. See the
 [Desktop Control guide](../desktop-control/index.md).

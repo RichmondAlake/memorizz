@@ -84,6 +84,8 @@ class FakeApps:
         self.front = front
         self.installed = installed or {}
         self.launched = []
+        self.opened = []
+        self.handlers = {}
 
     def running(self):
         return list(self.apps)
@@ -106,6 +108,15 @@ class FakeApps:
 
     def raise_app(self, pid):
         pass
+
+    def open_url(self, url, path=None):
+        self.opened.append((url, path))
+        for app_path, bundle_id, app in self.installed.values():
+            if app_path == path and app not in self.apps:
+                self.apps.append(app)
+
+    def handler(self, url):
+        return self.handlers.get(url.split(":", 1)[0])
 
 
 def calculator_window():
@@ -384,6 +395,42 @@ def test_open_app_without_accessibility_still_opens():
     assert desktop.open_app("Notes").startswith("Opened Notes. macOS has not given")
 
 
+def test_open_url_opens_a_link_in_the_named_app_and_reads_it():
+    desktop = make_desktop()
+    link = "https://app.notion.com/p/8e5d150aa0a546c7b842208fb77869e0"
+    result = desktop.open_url(link, app="Notes")
+    assert desktop.apps.opened == [(link, "/System/Applications/Notes.app")]
+    assert result.startswith(f'Opened {link} in Notes.\n\nNotes — window "Notes"')
+
+
+def test_open_url_without_an_app_uses_the_links_usual_app():
+    desktop = make_desktop()
+    desktop.apps.handlers["calc"] = "Calculator"
+    result = desktop.open_url("calc://7")
+    assert desktop.apps.opened == [("calc://7", None)]
+    assert result.startswith("Opened calc://7 in Calculator.\n\nCalculator — window")
+    desktop.launch_timeout = 0.01
+    assert desktop.open_url("nothing://here") == "Opened nothing://here."
+
+
+def test_open_url_refuses_files_and_half_links():
+    desktop = make_desktop()
+    for bad in ("www.notion.so/page", "-a Terminal", "https://a b", ""):
+        with pytest.raises(DesktopError, match="Give the whole link"):
+            desktop.open_url(bad)
+    with pytest.raises(DesktopError, match="not files"):
+        desktop.open_url("file:///tmp/run.command")
+    with pytest.raises(DesktopError, match="No app called 'Nope'"):
+        desktop.open_url("https://example.com", app="Nope")
+    assert desktop.apps.opened == []
+
+
+def test_open_url_without_accessibility_still_opens():
+    desktop = make_desktop(trusted=False)
+    result = desktop.open_url("https://example.com", app="Notes")
+    assert result.startswith("Opened https://example.com in Notes. macOS has not")
+
+
 def test_server_marks_reads_free_and_actions_for_approval():
     pytest.importorskip("mcp")
     from memorizz.desktop_control.server import create_desktop_mcp_server
@@ -395,6 +442,7 @@ def test_server_marks_reads_free_and_actions_for_approval():
         "list_apps",
         "read_window",
         "open_app",
+        "open_url",
         "click",
         "type_text",
         "press_keys",
@@ -412,7 +460,14 @@ def test_server_marks_reads_free_and_actions_for_approval():
             },
         )
     }
-    assert mutating == {"open_app", "click", "type_text", "press_keys", "scroll"}
+    assert mutating == {
+        "open_app",
+        "open_url",
+        "click",
+        "type_text",
+        "press_keys",
+        "scroll",
+    }
 
 
 def test_server_returns_outlines_and_reports_desktop_errors():
