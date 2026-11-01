@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any, Dict, List
 
 import pytest
 from typer.testing import CliRunner
@@ -178,11 +179,11 @@ def test_hooks_never_fail_codex_and_prompt_recall_is_opt_in(
     quiet = CliRunner().invoke(app, ["plugin", "hook", "prompt"], input=payload)
     assert quiet.exit_code == 0 and quiet.stdout == ""
 
-    seen = {}
+    seen = {"memory_ids": []}
 
     class _Search:
         def retrieve_by_query(self, query, **kwargs):
-            seen.update(query=query, **kwargs)
+            seen["memory_ids"].append(kwargs.get("memory_id"))
             return [
                 {
                     "content": "Deploy with make release.",
@@ -197,7 +198,7 @@ def test_hooks_never_fail_codex_and_prompt_recall_is_opt_in(
     monkeypatch.setattr(plugin_commands, "_store", lambda: _Search())
     recalled = CliRunner().invoke(app, ["plugin", "hook", "prompt"], input=payload)
     assert "- 2026-10-01: Deploy with make release." in recalled.stdout
-    assert seen["memory_id"] == plugin_commands.project_memory_id(tmp_path)
+    assert plugin_commands.project_memory_id(tmp_path) in seen["memory_ids"]
     # A failing store, or a too-short prompt, says nothing.
     monkeypatch.setattr(plugin_commands, "_store", lambda: _FailingProvider())
     assert (
@@ -205,6 +206,75 @@ def test_hooks_never_fail_codex_and_prompt_recall_is_opt_in(
         == ""
     )
     assert plugin_commands.prompt_context(tmp_path, "hi", provider=_Search()) == ""
+
+
+def _record(text: str, memory_id: str, **extra: Any) -> Dict[str, Any]:
+    return {
+        "content": text,
+        "memory_id": memory_id,
+        "timestamp": "2026-10-31T09:00:00+00:00",
+        **extra,
+    }
+
+
+class _Records:
+    """A store holding fixed knowledge-base rows."""
+
+    def __init__(self, rows: List[Dict[str, Any]]):
+        self.rows = rows
+        self.listed = 0
+
+    def list_all(self, memory_type: Any, **_: Any) -> List[Dict[str, Any]]:
+        if getattr(memory_type, "value", memory_type) != "knowledge_base":
+            return []
+        self.listed += 1
+        return self.rows
+
+    def retrieve_by_query(self, _query: str, **kwargs: Any) -> List[Dict[str, Any]]:
+        return [
+            row for row in self.rows if row.get("memory_id") == kwargs.get("memory_id")
+        ]
+
+
+def test_sessions_start_with_what_connected_apps_saved(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("MEMORIZZ_MCP_SERVER_LOCAL_PRINCIPAL", raising=False)
+    project = plugin_commands.project_memory_id(tmp_path)
+    store = _Records(
+        [
+            _record("From Grok Bot: I prefer short answers.", "personal"),
+            _record("Deploy with make release.", project),
+            # Saved by an app that doesn't share the local agents' memory.
+            _record("Not for local agents.", "personal", user_id="someone"),
+        ]
+    )
+    context = plugin_commands.session_context(tmp_path, provider=store)
+    assert "From Grok Bot: I prefer short answers." in context
+    assert "`personal`" in context
+    assert "Deploy with make release." in context
+    assert "Not for local agents." not in context
+    assert store.listed == 1
+
+    recalled = plugin_commands.prompt_context(
+        tmp_path, "how short should answers be", provider=store
+    )
+    assert "From Grok Bot: I prefer short answers." in recalled
+    assert "Not for local agents." not in recalled
+
+
+def test_sessions_say_nothing_about_apps_until_one_saves(tmp_path: Path):
+    project = plugin_commands.project_memory_id(tmp_path)
+    context = plugin_commands.session_context(
+        tmp_path, provider=_Records([_record("Deploy.", project)])
+    )
+    assert "personal" not in context
+
+
+def test_project_memories_keep_room_when_apps_saved_a_lot(tmp_path: Path):
+    project = plugin_commands.project_memory_id(tmp_path)
+    rows = [_record(f"App fact {i} " + "x" * 300, "personal") for i in range(30)]
+    rows.append(_record("Deploy with make release.", project))
+    context = plugin_commands.session_context(tmp_path, provider=_Records(rows))
+    assert "Deploy with make release." in context
 
 
 def test_the_prompt_hook_script_exits_at_once_when_recall_is_off(tmp_path: Path):

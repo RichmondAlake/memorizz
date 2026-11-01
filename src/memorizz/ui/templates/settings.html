@@ -2,10 +2,10 @@
 
 {% block title %}Settings - Memorizz{% endblock %}
 
-{% block head %}<link rel="stylesheet" href="/static/css/pages/settings.css?v=3"><script src="/static/js/local-models.js?v=1"></script>{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/settings.css?v=4"><link rel="stylesheet" href="/static/css/components/dialogs.css?v=2"><script src="/static/js/local-models.js?v=1"></script><script src="/static/js/page-dialogs.js?v=1"></script><script src="/static/js/connected-apps.js?v=2" defer></script>{% endblock %}
 
 {% block content %}
-{% from '_ui.html' import page_header %}
+{% from '_ui.html' import page_header, empty_state, id_chip %}
 {% set summary = settings_summary %}
 {{ page_header('Settings', 'Manage provider credentials and the saved defaults that the UI, CLI and MCP server load.', 'System') }}
 
@@ -42,10 +42,12 @@
             {% for item in summary.sections %}
             <li><a href="#{{ item.id }}" data-section-link="{{ item.id }}">{{ item.title }}<span class="settings-count{% if item.set %} is-set{% endif %}" title="{{ item.set }} of {{ item.total }} fields set">{{ item.set }}/{{ item.total }}</span></a></li>
             {% endfor %}
+            <li><a href="#connected-apps" data-section-link="connected-apps">Connected apps<span class="settings-count{% if connected_apps.apps %} is-set{% endif %}" title="{{ connected_apps.apps|length }} connected">{{ connected_apps.apps|length }}</span></a></li>
         </ol>
         <p class="settings-none" id="settings-none" hidden>No setting matches this search.</p>
     </nav>
 
+<div class="settings-main">
 <form method="post" action="/settings" class="settings-form">
     <section class="panel settings-notes settings-section" id="settings-saving" aria-labelledby="settings-saving-title">
         <div class="panel-header">
@@ -191,6 +193,80 @@
         <span class="settings-actions-note">Blank fields keep their saved value.</span>
     </div>
 </form>
+
+{% set apps_view = connected_apps %}
+<section class="panel settings-section apps-section" id="connected-apps" aria-labelledby="connected-apps-title">
+    <div class="panel-header">
+        <div>
+            <h2 class="panel-title" id="connected-apps-title">Connected apps</h2>
+            <p class="panel-description">Cloud apps such as Grok Bot and ChatGPT dots can use this memory. You approve each app with a pairing code, and all the apps you approve share one memory.</p>
+        </div>
+        <span class="panel-meta settings-section-count" id="apps-count">{{ apps_view.apps|length }} connected</span>
+    </div>
+    <div data-setting-search="connected apps grok bot chatgpt dots claude pairing code mcp oauth plugins connector shared local agents">
+        {% if apps_view.error %}<p class="error-message" role="alert">{{ apps_view.error }}</p>{% endif %}
+        <div class="table-scroll" id="apps-list"{% if not apps_view.apps %} hidden{% endif %}>
+            <table class="data-table apps-table">
+                <thead><tr><th scope="col">App</th><th scope="col">Memory of</th><th scope="col">Can</th><th scope="col">Connected</th><th scope="col">Last used</th>{% if not apps_view.read_only %}<th scope="col"><span class="sr-only">Disconnect</span></th>{% endif %}</tr></thead>
+                <tbody>
+                {% for app in apps_view.apps %}
+                <tr data-grant-id="{{ app.grant_id }}">
+                    <td class="apps-name"><strong>{{ app.app_name }}</strong></td>
+                    <td data-label="Memory of"><span{% if not app.shared %} class="mono"{% endif %}>{{ app.memory_of }}</span></td>
+                    <td data-label="Can"><span class="pill{% if not app.read_only %} pill--success{% endif %}">{{ app.can }}</span></td>
+                    <td data-label="Connected"><time>{{ app.connected }}</time></td>
+                    <td data-label="Last used"{% if app.last_used_title %} title="{{ app.last_used_title }}"{% endif %}>{{ app.last_used }}</td>
+                    {% if not apps_view.read_only %}<td class="apps-action"><button type="button" class="btn btn-sm btn-danger" data-mutates data-disconnect="{{ app.grant_id }}" data-app-name="{{ app.app_name }}" aria-label="Disconnect {{ app.app_name }}">Disconnect</button></td>{% endif %}
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div id="apps-empty"{% if apps_view.apps %} hidden{% endif %}>
+            {{ empty_state('No apps are connected yet', 'Put your memory online, then sign in from the app with a pairing code.') }}
+        </div>
+
+        <div class="apps-grid">
+            <div class="apps-card">
+                <h3 class="apps-heading">Pairing code</h3>
+                {% if apps_view.read_only %}
+                <p class="apps-text">This UI is read-only, so apps can't be approved or disconnected here. In a terminal, <code>memorizz mcp apps pair</code> makes a code and <code>memorizz mcp apps revoke</code> disconnects an app.</p>
+                {% else %}
+                <p class="apps-text">Each code approves one app to use <strong class="mono">{{ apps_view.principal }}</strong>'s memory, or your local agents' if you choose to share it. It works once, for {{ apps_view.pairing_minutes }} minutes.</p>
+                <div class="apps-pair-controls">
+                    <button type="button" class="btn btn-primary" id="apps-pair" data-mutates>Make a pairing code</button>
+                    <label class="apps-check" for="apps-read-only"><input type="checkbox" id="apps-read-only"> Read only</label>
+                    <label class="apps-check" for="apps-shared"><input type="checkbox" id="apps-shared"> Share with my local agents</label>
+                </div>
+                <p class="apps-hint">Read only: the app can look up memories but not save new ones.</p>
+                <p class="apps-hint">Share with my local agents: the app uses the same memory as Claude Code, Codex and your other agents on this computer, in every project, including past sessions. It can change those memories too, unless it's read only.</p>
+                <div aria-live="polite">
+                    <div class="apps-code" id="apps-code" hidden>
+                        <div class="apps-code-row">
+                            <code class="apps-code-value" id="apps-code-value"></code>
+                            <button type="button" class="btn btn-sm apps-copy" id="apps-copy" data-copy="" title="Copy the code"><span class="apps-copy-idle">Copy</span><span class="apps-copy-done">Copied</span></button>
+                        </div>
+                        <p class="apps-code-note" id="apps-code-note"></p>
+                    </div>
+                </div>
+                <p class="apps-error" id="apps-error" role="alert" hidden></p>
+                {% endif %}
+            </div>
+            <div class="apps-card">
+                <h3 class="apps-heading">Set up</h3>
+                <ol class="apps-steps">
+                    <li><strong>Put your memory online.</strong> In a terminal, run {{ id_chip('memorizz mcp apps serve --tunnel', 40) }}, or pass <code>--public-url https://…</code> for a fixed address. Keep it running; it prints the server URL.</li>
+                    <li><strong>Grok Bot.</strong> Connect apps → Add a custom connector → name it memorizz, type Remote HTTPS, paste the URL (leave the OAuth fields empty), and sign in with a pairing code.</li>
+                    <li><strong>Grok.</strong> grok.com/connectors → New Connector → Custom → paste the URL, and sign in with a pairing code.</li>
+                    <li><strong>ChatGPT dots.</strong> Plugins → + → Add custom MCP server (Developer mode) → paste the URL, choose OAuth, and sign in with a pairing code. Your dot uses your plugins.</li>
+                    <li><strong>Claude.</strong> On claude.ai: Customize → Connectors → Add custom connector → paste the URL. In Claude Code: <code>claude mcp add --transport http memorizz &lt;URL&gt;</code>, then <code>claude mcp login memorizz</code>.</li>
+                </ol>
+                <p class="apps-hint">A <code>--tunnel</code> address changes every time it starts, so the apps must be connected again. Use <code>--public-url</code> with a fixed address to keep them.</p>
+            </div>
+        </div>
+    </div>
+</section>
+</div>
 </div>
 {% endblock %}
 

@@ -1,5 +1,54 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Grok Bot and ChatGPT dots can use your memory.** `memorizz mcp apps serve
+  --public-url https://…` (or `--tunnel` for a temporary Cloudflare address)
+  puts the MCP server online with an OAuth sign-in, and you approve each app
+  on its sign-in page with a one-time pairing code from `memorizz mcp apps
+  pair` or the UI's Settings → Connected apps. Every app you approve uses the
+  same memory, so what Grok saves, ChatGPT finds. Apps sign in the way they
+  do elsewhere: ChatGPT and Grok with a client metadata document (ChatGPT
+  signs its token requests with its key, which MemoRizz checks), others
+  with dynamic client registration. PKCE is required, tokens are issued only
+  for this server, and codes and tokens are stored as hashes. Before, a
+  remote MCP server took only fixed bearer tokens, which neither app can
+  send. Tested with a real Claude Code sign-in; not yet tried from a live Grok
+  Bot or ChatGPT. Guide: [Grok Bot and ChatGPT dots](docs/guides/cloud-apps.md).
+- `memorizz mcp apps list` and `revoke` show and disconnect apps; a
+  disconnected app's tokens stop working at once.
+- `search` and `fetch` tools on the remote MCP server, in the shape ChatGPT's
+  deep research and company knowledge call (and the only kind of tool some
+  ChatGPT plans allow a custom server).
+- `memorizz mcp serve --oauth` and `--tools memory` (a server with only the
+  memory tools); `memorizz mcp apps serve` uses both. A memory saved by an
+  app records which one (`created_via`), and its change history names it.
+  Grok Bot signs in with Cursor's client identity; MemoRizz names it Grok Bot
+  (or Grok, from grok.com) from where its sign-in returns to.
+- **Apps can share your local agents' memory.** Pair an app with `memorizz mcp
+  apps pair --shared` (or tick **Share with my local agents** in Settings →
+  Connected apps) and it uses the same memory as Claude Code, Codex and your
+  other agents on this computer, with nothing to migrate. It finds what they
+  saved in any project, including past sessions. What it saves goes to the
+  memory ID `personal`, which new Claude Code and Codex sessions list at the
+  start. Sharing is off by default, it's chosen per app, and a shared app
+  can't use the agents' tool logs, caches or run records.
+- **Claude Code can sign in to a remote MemoRizz server**, with `claude mcp add
+  --transport http` and `claude mcp login`. Before, sign-in failed with
+  "Redirect URI not registered", because Claude Code publishes its local
+  redirects without a port. A local redirect may now use any port; the rest
+  of it still has to match exactly. Steps for Claude are in the guide.
+
+### Fixed
+
+- A remote MCP server bound to 127.0.0.1 behind a proxy or tunnel refused
+  requests for its public address ("Invalid Host header"); it now accepts
+  its `--public-url` host.
+- The MCP server's config and the connected-apps store import without the
+  optional MCP SDK.
+
 ## 0.17.16 — 2026-10-25
 
 ### Added

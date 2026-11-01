@@ -17,7 +17,14 @@ READ_SCOPE = "memorizz:read"
 WRITE_SCOPE = "memorizz:write"
 EXECUTE_SCOPE = "memorizz:execute"
 ALL_SCOPES = (READ_SCOPE, WRITE_SCOPE, EXECUTE_SCOPE)
+TOOL_SETS = ("all", "memory")
 _PRINCIPAL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$")
+# A connected app with this principal shares the local agents' memory. It can't
+# name a real principal, which starts with a letter or number.
+LOCAL_AGENTS_PRINCIPAL = "@local"
+# Where connected apps save unless told otherwise; the local agents' plugins
+# read it alongside each project's memory.
+PERSONAL_MEMORY_ID = "personal"
 
 
 def _env_bool(name: str) -> Optional[bool]:
@@ -123,6 +130,11 @@ class MemorizzMCPServerConfig:
     public_url: Optional[str] = None
     stateless_http: bool = True
     allow_anonymous_http: bool = False
+    # Let cloud apps (Grok, ChatGPT dots) sign in with OAuth; each is approved
+    # with a pairing code. Needs a public HTTPS public_url.
+    oauth: bool = False
+    # "memory" lists only the memory tools, for apps that do best with few.
+    tool_set: str = "all"
     allow_writes: Optional[bool] = None
     allow_trace_queries: bool = False
     allow_agent_execution: Optional[bool] = None
@@ -163,6 +175,11 @@ class MemorizzMCPServerConfig:
             1_024, min(int(self.max_request_body_size), 16_777_216)
         )
         self.approval_ttl_seconds = max(1, min(int(self.approval_ttl_seconds), 86_400))
+        self.tool_set = str(self.tool_set or "all").strip().lower()
+        if self.tool_set not in TOOL_SETS:
+            raise ValueError(
+                "MCP server tool set must be one of: " + ", ".join(TOOL_SETS)
+            )
 
         is_stdio = self.transport == "stdio"
         if self.allow_writes is None:
@@ -213,12 +230,19 @@ class MemorizzMCPServerConfig:
                 "Remote harness execution requires explicit harness workspace roots"
             )
 
-        if not is_stdio and not self.api_key_grants and not self.allow_anonymous_http:
+        if self.oauth and is_stdio:
+            raise ValueError("OAuth sign-in needs --transport streamable-http")
+        if (
+            not is_stdio
+            and not self.api_key_grants
+            and not self.oauth
+            and not self.allow_anonymous_http
+        ):
             raise ValueError(
-                "Streamable HTTP requires MEMORIZZ_MCP_SERVER_API_KEYS or "
+                "Streamable HTTP requires MEMORIZZ_MCP_SERVER_API_KEYS, --oauth, or "
                 "the explicit --allow-anonymous flag"
             )
-        if not is_stdio and self.api_key_grants and not self.public_url:
+        if not is_stdio and (self.api_key_grants or self.oauth) and not self.public_url:
             if self.host not in {"127.0.0.1", "localhost", "::1"}:
                 raise ValueError(
                     "Authenticated non-loopback HTTP requires --public-url"
@@ -238,10 +262,15 @@ class MemorizzMCPServerConfig:
                 "::1",
             }:
                 raise ValueError("Non-loopback MCP server public URLs must use HTTPS")
+            if self.oauth and parsed.path not in ("", "/"):
+                raise ValueError(
+                    "With --oauth the public URL must be a bare origin such as "
+                    "https://memory.example.com"
+                )
 
     @property
     def auth_required(self) -> bool:
-        return self.transport != "stdio" and bool(self.api_key_grants)
+        return self.transport != "stdio" and (bool(self.api_key_grants) or self.oauth)
 
     def public_dict(self) -> Dict[str, Any]:
         return {
@@ -253,6 +282,8 @@ class MemorizzMCPServerConfig:
             "stateless_http": self.stateless_http,
             "auth_required": self.auth_required,
             "configured_principals": len(self.api_key_grants),
+            "oauth": bool(self.oauth),
+            "tool_set": self.tool_set,
             "allow_writes": bool(self.allow_writes),
             "allow_trace_queries": bool(self.allow_trace_queries),
             "allow_agent_execution": bool(self.allow_agent_execution),
@@ -290,6 +321,8 @@ class MemorizzMCPServerConfig:
             "public_url": os.environ.get("MEMORIZZ_MCP_SERVER_PUBLIC_URL"),
             "stateless_http": _env_bool("MEMORIZZ_MCP_SERVER_STATELESS_HTTP"),
             "allow_anonymous_http": _env_bool("MEMORIZZ_MCP_SERVER_ALLOW_ANONYMOUS"),
+            "oauth": _env_bool("MEMORIZZ_MCP_SERVER_OAUTH"),
+            "tool_set": os.environ.get("MEMORIZZ_MCP_SERVER_TOOLS"),
             "allow_writes": _env_bool("MEMORIZZ_MCP_SERVER_ALLOW_WRITES"),
             "allow_trace_queries": _env_bool("MEMORIZZ_MCP_SERVER_ALLOW_TRACE_QUERIES"),
             "allow_agent_execution": _env_bool(

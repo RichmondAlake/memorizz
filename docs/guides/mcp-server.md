@@ -64,6 +64,9 @@ framing is not corrupted.
 
 ## Remote Streamable HTTP
 
+To let cloud apps such as Grok Bot and ChatGPT dots use your memory, with an
+OAuth sign-in you approve per app, see [Grok Bot and ChatGPT dots](cloud-apps.md).
+
 Remote mode is secure-by-default:
 
 - bearer authentication is mandatory unless `--allow-anonymous` is explicit;
@@ -418,6 +421,8 @@ Every CLI option has a deployment-friendly environment equivalent:
 | `MEMORIZZ_MCP_SERVER_AGENT_IDS` | Comma-separated remote agent allowlist |
 | `MEMORIZZ_MCP_SERVER_ALLOW_ANONYMOUS` | Explicitly disable HTTP auth |
 | `MEMORIZZ_MCP_SERVER_STATELESS_HTTP` | Stateless Streamable HTTP sessions |
+| `MEMORIZZ_MCP_SERVER_OAUTH` | OAuth sign-in for cloud apps (`--oauth`); see [Grok Bot and ChatGPT dots](cloud-apps.md) |
+| `MEMORIZZ_MCP_SERVER_TOOLS` | `all` (default) or `memory`: list only the memory tools (`--tools`) |
 
 Static bearer grants are suitable for a single service or a controlled
 deployment. Rotate them through the platform secret manager and use separate

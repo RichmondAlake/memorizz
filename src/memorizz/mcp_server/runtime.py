@@ -30,7 +30,13 @@ from ..enums.memory_type import MemoryType
 from ..mcp.security import redact
 from ..metaharness.config import DEFAULT_HARNESS_CHOICES
 from .auth import RequestIdentity
-from .config import EXECUTE_SCOPE, READ_SCOPE, WRITE_SCOPE, MemorizzMCPServerConfig
+from .config import (
+    EXECUTE_SCOPE,
+    PERSONAL_MEMORY_ID,
+    READ_SCOPE,
+    WRITE_SCOPE,
+    MemorizzMCPServerConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +54,17 @@ _TENANT_MEMORY_TYPES = frozenset(
 )
 _WRITABLE_MEMORY_TYPES = frozenset(
     {MemoryType.KNOWLEDGE_BASE, MemoryType.SHORT_TERM_MEMORY}
+)
+# What a connected app sharing the local agents' memory may use: what they
+# know and what was said, but not their tool output, caches or run records.
+_SHARED_MEMORY_TYPES = frozenset(
+    {
+        MemoryType.CONVERSATION_MEMORY,
+        MemoryType.KNOWLEDGE_BASE,
+        MemoryType.SHORT_TERM_MEMORY,
+        MemoryType.SUMMARIES,
+        MemoryType.ENTITY_MEMORY,
+    }
 )
 _SENSITIVE_AGENT_FIELDS = {
     "model",
@@ -196,6 +213,46 @@ _EMBEDDINGS_HINT = (
     "MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER ollama` and `memorizz config set "
     "MEMORIZZ_DEFAULT_EMBEDDING_MODEL nomic-embed-text` (or set OPENAI_API_KEY)."
 )
+# The stores the search and fetch tools (ChatGPT's connector tools) cover.
+_CONNECTOR_TYPES = ("knowledge_base", "entity_memory")
+
+
+def _default_memory_id(identity: RequestIdentity) -> str:
+    """Where a save with no memory ID goes: connected apps keep one memory the
+    local agents can read; anything else gets a new one."""
+    return PERSONAL_MEMORY_ID if identity.client else str(uuid.uuid4())
+
+
+def _record_text(row: Dict[str, Any]) -> str:
+    for key in ("content", "text"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    shown = {
+        key: value
+        for key, value in row.items()
+        if key not in ("embedding", "_id", "id", "user_id")
+    }
+    return json.dumps(_json_value(shown), ensure_ascii=False, default=str)
+
+
+def _record_title(row: Dict[str, Any]) -> str:
+    for key in ("title", "name", "entity_name"):
+        if row.get(key):
+            return str(row[key])[:120]
+    lines = _record_text(row).strip().splitlines()
+    first = lines[0] if lines else "Memory"
+    return first if len(first) <= 80 else first[:79] + "…"
+
+
+def _record_url(row: Dict[str, Any]) -> str:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    for value in (row.get("source_url"), metadata.get("source_url")):
+        if isinstance(value, str) and value.startswith(("https://", "http://")):
+            return value
+    return ""
+
+
 _NO_EMBEDDINGS_NOTE = (
     "No embedding model is working, so these are keyword matches. " + _EMBEDDINGS_HINT
 )
@@ -416,6 +473,11 @@ class MemorizzRuntime:
             raise MemorizzServerError(
                 "memory_type_not_tenant_scoped",
                 f"Remote access to {memory_type.value} is not tenant scoped",
+            )
+        if identity.shared and memory_type not in _SHARED_MEMORY_TYPES:
+            raise MemorizzServerError(
+                "memory_type_not_tenant_scoped",
+                f"Connected apps can't use the local agents' {memory_type.value}",
             )
         if writable and memory_type not in _WRITABLE_MEMORY_TYPES:
             choices = ", ".join(item.value for item in _WRITABLE_MEMORY_TYPES)
@@ -2060,6 +2122,51 @@ class MemorizzRuntime:
             result["note"] = note
         return result
 
+    def connector_search(self, query: str, identity: RequestIdentity) -> Dict[str, Any]:
+        """``search`` as ChatGPT calls it: ``results`` of id, title and url."""
+        results: List[Dict[str, Any]] = []
+        for kind in _CONNECTOR_TYPES:
+            try:
+                found = self.search_memories(query, kind, identity, limit=10)
+            except MemorizzServerError as exc:
+                if exc.code == "invalid_query":
+                    raise
+                continue
+            for row in found["memories"]:
+                record_id = str(row.get("_id") or row.get("id") or "")
+                if record_id:
+                    results.append(
+                        {
+                            "id": f"{kind}:{record_id}",
+                            "title": _record_title(row),
+                            "url": _record_url(row),
+                        }
+                    )
+        return {"results": results}
+
+    def connector_fetch(self, record: str, identity: RequestIdentity) -> Dict[str, Any]:
+        """``fetch`` as ChatGPT calls it: one record from search, in full."""
+        kind, _, record_id = str(record or "").partition(":")
+        if kind not in _CONNECTOR_TYPES or not record_id:
+            raise MemorizzServerError(
+                "memory_not_found", "Fetch takes an id that search returned"
+            )
+        row = self.get_memory(record_id, kind, identity)["memory"]
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        details = {
+            "memory_type": kind,
+            "saved_at": row.get("timestamp"),
+            "saved_by": row.get("created_via") or metadata.get("created_via"),
+            "memory_id": row.get("memory_id"),
+        }
+        return {
+            "id": record,
+            "title": _record_title(row),
+            "text": _record_text(row),
+            "url": _record_url(row),
+            "metadata": {k: str(v) for k, v in details.items() if v},
+        }
+
     def _scoped_rows(
         self,
         memory_type: MemoryType,
@@ -2267,13 +2374,16 @@ class MemorizzRuntime:
             "routing",
         ):
             safe_metadata.pop(reserved, None)
+        if identity.client:
+            # Which connected app saved it, e.g. "Grok".
+            safe_metadata["created_via"] = identity.client
         if routing and routing.get("routed_to"):
             safe_metadata["routing"] = {
                 key: routing[key]
                 for key in ("routed_to", "confidence", "run_id", "applied")
                 if key in routing
             }
-        resolved_memory_id = str(memory_id or uuid.uuid4())
+        resolved_memory_id = str(memory_id or _default_memory_id(identity))
         document = {
             **safe_metadata,
             "content": text,
@@ -3166,6 +3276,8 @@ class MemorizzRuntime:
                 "invalid_entity", "Give at most 100 attributes per call"
             )
         entities = self._entity_memory()
+        if identity.client:
+            memory_id = memory_id or PERSONAL_MEMORY_ID
         scope = {"memory_id": memory_id, "user_id": identity.principal}
         created_targets: List[str] = []
         links = []

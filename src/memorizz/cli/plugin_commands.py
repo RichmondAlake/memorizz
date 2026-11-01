@@ -21,6 +21,8 @@ from typing import Any, Dict, List, Optional
 
 import typer
 
+from ..mcp_server.config import PERSONAL_MEMORY_ID
+
 plugin_app = typer.Typer(
     help=(
         "Use MemoRizz memory from Codex and Claude Code: install the plugin "
@@ -40,6 +42,7 @@ AGENTS = {"codex": "Codex", "claude-code": "Claude Code"}
 # Hook output is extra context for the model; keep it small.
 CONTEXT_CHARS = 2_000
 RECENT_MEMORIES = 8
+RECENT_PERSONAL = 5
 PROMPT_RECALL_ENV = "MEMORIZZ_PROMPT_RECALL"
 CAPTURE_ENV = "MEMORIZZ_SESSION_CAPTURE"  # turns (default) or off
 SUMMARY_ENV = "MEMORIZZ_SESSION_SUMMARY"  # true (default) or false
@@ -194,21 +197,38 @@ def _text(record: Dict[str, Any]) -> str:
     return " ".join(str(record.get("content") or record.get("text") or "").split())
 
 
-def _recent_memories(provider: Any, memory_id: str, limit: int) -> List[Dict[str, Any]]:
+def _knowledge(provider: Any) -> List[Dict[str, Any]]:
     from ..enums import MemoryType
 
-    user_id = _user_id()
-    rows = [
+    return [
         row
         for row in provider.list_all(MemoryType.KNOWLEDGE_BASE) or []
-        if isinstance(row, dict)
-        and row.get("memory_id") == memory_id
-        and _text(row)
-        and row.get("status") != "superseded"
+        if isinstance(row, dict) and _text(row) and row.get("status") != "superseded"
+    ]
+
+
+def _newest(
+    rows: List[Dict[str, Any]], memory_id: str, limit: int
+) -> List[Dict[str, Any]]:
+    user_id = _user_id()
+    kept = [
+        row
+        for row in rows
+        if row.get("memory_id") == memory_id
         and (user_id is None or row.get("user_id") == user_id)
     ]
-    rows.sort(key=lambda row: str(row.get("timestamp") or ""), reverse=True)
-    return rows[:limit]
+    kept.sort(key=lambda row: str(row.get("timestamp") or ""), reverse=True)
+    return kept[:limit]
+
+
+def _recent_memories(provider: Any, memory_id: str, limit: int) -> List[Dict[str, Any]]:
+    return _newest(_knowledge(provider), memory_id, limit)
+
+
+def _is_ours(row: Dict[str, Any], user_id: Optional[str]) -> bool:
+    """False for a personal memory saved by an app that doesn't share the local
+    agents' memory: that one belongs to the app's own principal."""
+    return row.get("memory_id") != PERSONAL_MEMORY_ID or row.get("user_id") == user_id
 
 
 def _last_summary(provider: Any, memory_id: str) -> Optional[Dict[str, Any]]:
@@ -288,6 +308,7 @@ def session_context(cwd: Any, provider: Any = None) -> str:
             'with memory_type "conversation_memory" or "summaries".'
         )
     owned = provider is None
+    personal: List[Dict[str, Any]] = []
     try:
         if provider is None and _remote_url():
 
@@ -306,13 +327,28 @@ def session_context(cwd: Any, provider: Any = None) -> str:
             )[:RECENT_MEMORIES]
             summaries = newest(_remote_rows("summaries", memory_id, 20), "created_at")
             summary = summaries[0] if summaries else None
+            personal = newest(
+                [
+                    row
+                    for row in _remote_rows("knowledge_base", PERSONAL_MEMORY_ID, 20)
+                    if _text(row)
+                ],
+                "timestamp",
+            )[:RECENT_PERSONAL]
             owned = False
         else:
             provider = provider or _store()
-            recent = _recent_memories(provider, memory_id, RECENT_MEMORIES)
+            rows = _knowledge(provider)
+            recent = _newest(rows, memory_id, RECENT_MEMORIES)
+            user_id = _user_id()
+            personal = _newest(
+                [row for row in rows if _is_ours(row, user_id)],
+                PERSONAL_MEMORY_ID,
+                RECENT_PERSONAL,
+            )
             summary = _last_summary(provider, memory_id)
     except Exception:
-        recent, summary = [], None
+        recent, summary, personal = [], None, []
     finally:
         if owned and provider is not None:
             _close(provider)
@@ -323,6 +359,14 @@ def session_context(cwd: Any, provider: Any = None) -> str:
             f"Last session summary ({when}, {summary.get('agent_id') or 'agent'}): "
             + (text[:700] + "…" if len(text) > 700 else text)
         )
+    if personal:
+        # A third of what's left, so a busy app never crowds out the project.
+        room = (CONTEXT_CHARS - sum(len(line) for line in lines)) // 3
+        lines.append(
+            f"Saved from your connected apps (memory ID `{PERSONAL_MEMORY_ID}`, newest "
+            "first; search it for more about the user or work outside this project):"
+        )
+        lines.extend(_bullets(personal, room))
     if recent:
         lines.append("Recent project memories (newest first):")
         lines.extend(_bullets(recent, CONTEXT_CHARS - sum(len(line) for line in lines)))
@@ -353,61 +397,58 @@ def prompt_context(cwd: Any, prompt: str, provider: Any = None) -> str:
         return ""
     from ..enums import MemoryType
 
-    memory_id = project_memory_id(cwd)
     user_id = _user_id()
+    scopes = ((project_memory_id(cwd), 4), (PERSONAL_MEMORY_ID, 2))
+    rows: List[Any] = []
     if provider is None and _remote_url():
         try:
-            found = remote_tool(
-                "memorizz_search_memories",
-                {"query": text, "memory_id": memory_id, "limit": 4},
-            )
+            for memory_id, limit in scopes:
+                found = remote_tool(
+                    "memorizz_search_memories",
+                    {"query": text, "memory_id": memory_id, "limit": limit},
+                )
+                rows.extend((found or {}).get("memories") or [])
         except Exception:
-            return ""
-        rows = [
-            row
-            for row in (found or {}).get("memories") or []
-            if isinstance(row, dict) and _text(row)
-        ]
-        if not rows:
-            return ""
-        return "\n".join(
-            [
-                "MemoRizz project memories that may be relevant:",
-                *_bullets(rows, CONTEXT_CHARS),
-            ]
-        )
-    owned = provider is None
-    try:
-        provider = provider or _store()
+            if not rows:
+                return ""
+    else:
+        owned = provider is None
         try:
-            rows = provider.retrieve_by_query(
-                text,
-                memory_store_type=MemoryType.KNOWLEDGE_BASE,
-                memory_id=memory_id,
-                limit=4,
-            )
+            provider = provider or _store()
+            for memory_id, limit in scopes:
+                try:
+                    found = provider.retrieve_by_query(
+                        text,
+                        memory_store_type=MemoryType.KNOWLEDGE_BASE,
+                        memory_id=memory_id,
+                        limit=limit,
+                    )
+                except Exception:
+                    # No embedding model: match on words instead.
+                    found = _keyword_matches(
+                        _recent_memories(provider, memory_id, 500), text, limit
+                    )
+                rows.extend(found or [])
         except Exception:
-            # No embedding model: match on words instead.
-            rows = _keyword_matches(_recent_memories(provider, memory_id, 500), text, 4)
-    except Exception:
-        return ""
-    finally:
-        if owned and provider is not None:
-            _close(provider)
-    rows = [
-        row
-        for row in rows or []
+            return ""
+        finally:
+            if owned and provider is not None:
+                _close(provider)
+    relevant = {
+        _text(row): row
+        for row in rows
         if isinstance(row, dict)
         and _text(row)
         and row.get("status") != "superseded"
         and (user_id is None or row.get("user_id") in (None, user_id))
-    ]
-    if not rows:
+        and _is_ours(row, user_id)
+    }
+    if not relevant:
         return ""
     return "\n".join(
         [
             "MemoRizz project memories that may be relevant:",
-            *_bullets(rows, CONTEXT_CHARS),
+            *_bullets(list(relevant.values()), CONTEXT_CHARS),
         ]
     )
 

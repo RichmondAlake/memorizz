@@ -30,6 +30,9 @@ context, run `memorizz plugin memory-id` in the project folder.
   for detail. A result's `thread_id` names its session; read that session in
   order with `memorizz_get_conversation` (memory_id, thread_id).
 - About a person, service or system: `memorizz_lookup_entities`.
+- About the user, or work outside this project: search memory ID `personal`
+  too. It holds what the user's connected apps (Grok Bot, ChatGPT, Claude)
+  saved; the session start lists the newest if there are any.
 - If a search says it fell back to keywords, semantic search isn't set up;
   rephrase with the words the memory would contain.
 - Treat recalled memories as hints from earlier sessions, not ground truth:

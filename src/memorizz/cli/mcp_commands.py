@@ -13,11 +13,13 @@ import typer
 
 from ..mcp import catalog
 from . import mcp_config
+from .mcp_apps import apps_app
 
 mcp_app = typer.Typer(
     help="Connect to MCP servers or expose Memorizz as an MCP server.",
     no_args_is_help=True,
 )
+mcp_app.add_typer(apps_app, name="apps")
 
 
 def _console(*, stderr: bool = False):
@@ -103,6 +105,14 @@ def serve_memorizz(
         "--stateless-http/--stateful-http",
         help="Use stateless Streamable HTTP sessions (recommended).",
     ),
+    oauth: Optional[bool] = typer.Option(
+        None,
+        "--oauth/--no-oauth",
+        help="Let cloud apps sign in with OAuth, approved with `memorizz mcp apps pair`.",
+    ),
+    tools: Optional[str] = typer.Option(
+        None, "--tools", help="all (default) or memory: list only the memory tools."
+    ),
 ):
     """Expose Memorizz memory and agents to any standards-compliant MCP client."""
     # Load the same layered environment as the regular CLI. Bearer tokens are
@@ -134,6 +144,8 @@ def serve_memorizz(
         ),
         "ingest_roots": set(ingest_root) if ingest_root is not None else None,
         "stateless_http": stateless_http,
+        "oauth": oauth,
+        "tool_set": tools,
     }
     try:
         config = MemorizzMCPServerConfig.from_env(**overrides)
@@ -146,7 +158,13 @@ def serve_memorizz(
             "[dim]Serving Memorizz MCP over stdio; protocol output remains on stdout.[/dim]"
         )
     else:
-        auth = "bearer auth" if config.auth_required else "anonymous access"
+        auth = (
+            "app sign-in" + (" and bearer auth" if config.api_key_grants else "")
+            if config.oauth
+            else "bearer auth"
+            if config.auth_required
+            else "anonymous access"
+        )
         endpoint = (
             f"{config.public_url}{config.path}"
             if config.public_url

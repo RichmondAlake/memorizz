@@ -11,6 +11,7 @@ import json
 import logging
 import os
 from typing import Any, Callable, Dict, Optional
+from urllib.parse import urlparse
 
 from mcp.server import MCPServer
 from mcp.server.auth.settings import AuthSettings
@@ -25,6 +26,43 @@ from .runtime import MemorizzRuntime, MemorizzServerError
 
 logger = logging.getLogger(__name__)
 DOCUMENTATION_URL = "https://richmondalake.github.io/memorizz/guides/mcp-server/"
+SERVER_INSTRUCTIONS = (
+    "Inspect server policy first. Use read tools freely. Agent execution, "
+    "configuration changes, compilation, compaction, and memory writes may be "
+    "disabled by server policy and should receive explicit user approval. "
+    "Never claim a mutation succeeded unless the tool returned ok=true."
+)
+# For cloud apps such as Grok Bot and ChatGPT dots, which share the memory.
+APP_INSTRUCTIONS = (
+    "This is the user's MemoRizz memory, shared with their other apps and agents. "
+    "Before answering questions about the user, their work or earlier "
+    "conversations, search it (search or memorizz_search_memories). When the user "
+    "asks you to remember something, or you learn a lasting fact, decision or "
+    "preference, save it with memorizz_store_memory (memory_type knowledge_base). "
+    "Leave memory_id out unless the user names one, so every app sees the same "
+    "memories. Never claim a memory was saved unless the tool returned ok=true."
+)
+# The tools the "memory" tool set keeps.
+MEMORY_TOOLS = frozenset(
+    {
+        "search",
+        "fetch",
+        "memorizz_server_info",
+        "memorizz_search_memories",
+        "memorizz_list_memories",
+        "memorizz_get_memory",
+        "memorizz_store_memory",
+        "memorizz_update_memory",
+        "memorizz_forget_memory",
+        "memorizz_lookup_entities",
+        "memorizz_upsert_entity",
+        "memorizz_memory_status",
+        "memorizz_list_conversations",
+        "memorizz_get_conversation",
+    }
+)
+# Cloud apps that may send an Origin header to the MCP endpoint.
+_APP_ORIGINS = ("https://chatgpt.com", "https://grok.com")
 
 
 class EntityRelationArgument(BaseModel):
@@ -38,13 +76,37 @@ class EntityRelationArgument(BaseModel):
     )
 
 
+class ConnectorResult(BaseModel):
+    """One search hit, in the shape ChatGPT's search tool expects."""
+
+    id: str
+    title: str
+    url: str
+
+
+class ConnectorResults(BaseModel):
+    results: list[ConnectorResult]
+
+
+class ConnectorDocument(BaseModel):
+    """One fetched record, in the shape ChatGPT's fetch tool expects."""
+
+    id: str
+    title: str
+    text: str
+    url: str
+    metadata: Optional[Dict[str, str]] = None
+
+
 async def _tool_call(function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     from ..memory_history import memory_change_context
 
+    identity = current_identity()
     try:
         with memory_change_context(
-            actor=current_identity().principal or "local-mcp",
+            actor=identity.principal or "local-mcp",
             source="mcp:" + function.__name__,
+            client=identity.client,
             harness_run_id=os.getenv("MEMORIZZ_HARNESS_RUN_ID"),
         ):
             return await asyncio.to_thread(function, *args, **kwargs)
@@ -82,6 +144,7 @@ def create_memorizz_mcp_server(
     config: Optional[MemorizzMCPServerConfig] = None,
     *,
     runtime: Optional[MemorizzRuntime] = None,
+    oauth_store=None,
 ) -> MCPServer:
     """Create the server without starting a transport (useful for embedding/tests)."""
     from .. import __version__
@@ -89,9 +152,25 @@ def create_memorizz_mcp_server(
     resolved = config or MemorizzMCPServerConfig.from_env()
     token_verifier = None
     auth = None
+    oauth_provider = None
     if resolved.auth_required:
         resource_url = f"{resolved.public_url}{resolved.path}"
-        token_verifier = StaticAPIKeyVerifier(resolved.api_key_grants, resource_url)
+        token_verifier = (
+            StaticAPIKeyVerifier(resolved.api_key_grants, resource_url)
+            if resolved.api_key_grants
+            else None
+        )
+        if resolved.oauth:
+            from .oauth import MemorizzOAuthProvider, MemorizzTokenVerifier
+            from .oauth_store import OAuthStore
+
+            oauth_provider = MemorizzOAuthProvider(
+                oauth_store or OAuthStore(),
+                issuer=resolved.public_url,
+                resource=resource_url,
+                allow_local_agents=resolved.tool_set == "memory",
+            )
+            token_verifier = MemorizzTokenVerifier(token_verifier, oauth_provider)
         auth = AuthSettings(
             issuer_url=resolved.public_url,
             resource_server_url=resource_url,
@@ -108,10 +187,9 @@ def create_memorizz_mcp_server(
             "governed external agent harness runs."
         ),
         instructions=(
-            "Inspect server policy first. Use read tools freely. Agent execution, "
-            "configuration changes, compilation, compaction, and memory writes may be "
-            "disabled by server policy and should receive explicit user approval. "
-            "Never claim a mutation succeeded unless the tool returned ok=true."
+            APP_INSTRUCTIONS
+            if resolved.oauth or resolved.tool_set == "memory"
+            else SERVER_INSTRUCTIONS
         ),
         version=__version__,
         website_url=DOCUMENTATION_URL,
@@ -1297,8 +1375,83 @@ def create_memorizz_mcp_server(
             "run, and poll its run or event record. Never invent approval or verification."
         )
 
+    if resolved.transport != "stdio":
+        # The two read-only tools ChatGPT's deep research and company
+        # knowledge call (and a Pro plan's only tools for custom servers).
+
+        @server.tool(annotations=read_only)
+        async def search(query: str) -> ConnectorResults:
+            """Search the user's memory (saved facts and known people, projects and things) and return matching records to fetch."""
+            return ConnectorResults.model_validate(
+                await _tool_call(service.connector_search, query, current_identity())
+            )
+
+        @server.tool(annotations=read_only)
+        async def fetch(id: str) -> ConnectorDocument:
+            """Read one record returned by search, with its full text."""
+            return ConnectorDocument.model_validate(
+                await _tool_call(service.connector_fetch, id, current_identity())
+            )
+
+    if resolved.tool_set == "memory":
+        for tool in list(server._tool_manager.list_tools()):
+            if tool.name not in MEMORY_TOOLS:
+                server.remove_tool(tool.name)
+
     _harden_tool_input_schemas(server)
+    server.memorizz_oauth_provider = oauth_provider
     return server
+
+
+def _transport_security(config: MemorizzMCPServerConfig):
+    """Host and Origin checks for a loopback bind, admitting the public URL."""
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    if config.host not in ("127.0.0.1", "localhost", "::1"):
+        return None
+    hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+    if config.public_url:
+        public = urlparse(config.public_url)
+        hosts += [public.netloc, f"{public.hostname}:*"]
+        origins.append(f"{public.scheme}://{public.netloc}")
+    if config.oauth:
+        origins += list(_APP_ORIGINS)
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=origins,
+    )
+
+
+def create_memorizz_http_app(
+    config: Optional[MemorizzMCPServerConfig] = None,
+    *,
+    runtime: Optional[MemorizzRuntime] = None,
+    oauth_store=None,
+):
+    """The Streamable HTTP app, with the OAuth sign-in routes when enabled."""
+    resolved = config or MemorizzMCPServerConfig.from_env()
+    server = create_memorizz_mcp_server(
+        resolved, runtime=runtime, oauth_store=oauth_store
+    )
+    app = server.streamable_http_app(
+        streamable_http_path=resolved.path,
+        stateless_http=resolved.stateless_http,
+        max_request_body_size=resolved.max_request_body_size,
+        transport_security=_transport_security(resolved),
+        host=resolved.host,
+    )
+    provider = server.memorizz_oauth_provider
+    if provider is not None:
+        from .oauth import oauth_routes
+
+        # First, so its resource metadata (which lists the write scope too)
+        # wins over the SDK's.
+        app.router.routes[:0] = oauth_routes(
+            provider, resource_path=resolved.path, documentation_url=DOCUMENTATION_URL
+        )
+    return app
 
 
 def run_memorizz_mcp_server(
@@ -1308,15 +1461,14 @@ def run_memorizz_mcp_server(
 
     load_layered_env()
     resolved = config or MemorizzMCPServerConfig.from_env()
-    server = create_memorizz_mcp_server(resolved)
     if resolved.transport == "stdio":
-        server.run(transport="stdio")
+        create_memorizz_mcp_server(resolved).run(transport="stdio")
         return
-    server.run(
-        transport="streamable-http",
+    import uvicorn
+
+    uvicorn.run(
+        create_memorizz_http_app(resolved),
         host=resolved.host,
         port=resolved.port,
-        streamable_http_path=resolved.path,
-        stateless_http=resolved.stateless_http,
-        max_request_body_size=resolved.max_request_body_size,
+        log_level="info",
     )

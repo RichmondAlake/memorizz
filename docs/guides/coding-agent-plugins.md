@@ -129,6 +129,15 @@ in a new session on the same project, explains the change and what the last
 session did. The script uses a throwaway Codex home and its own store. The
 README there shows how to run the same thing live in two terminals.
 
+### Apps that share this memory
+
+An app connected with `--shared` (Grok Bot, ChatGPT, Claude) uses the memory
+the plugin uses. It can find what your agents saved in any project, and what it
+saves goes to the memory ID `personal`. Each session lists the newest of those
+at the start, and your agent can search `personal` for more. Nothing changes
+until you share: with no such memories, the session start doesn't mention them.
+See [Share your local agents' memory](cloud-apps.md#share-your-local-agents-memory).
+
 ## See each session's trajectory
 
 After every turn the plugin reads the agent's own session log (Codex's rollout

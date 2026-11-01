@@ -258,12 +258,198 @@
     font-size: 12px;
 }
 
+/* ---------- Connected apps ---------- */
+
+/* The form and the Connected apps section share the right-hand column. */
+.settings-main {
+    min-width: 0;
+}
+
+/* More than the section's scroll margin: at /settings#connected-apps the form
+   then sits wholly above the viewport, so the browser anchors the scroll to
+   this section and it stays in view while the fields above fill in. */
+.settings-console .apps-section {
+    margin-top: 24px;
+}
+
+.settings-console .apps-table td {
+    vertical-align: middle;
+}
+
+.settings-console .apps-table .apps-name strong {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.settings-console .apps-table .apps-action {
+    width: 1%;
+    text-align: right;
+    white-space: nowrap;
+}
+
+.settings-console .apps-table .pill {
+    font-size: 11.5px;
+}
+
+.apps-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+    gap: 12px;
+    margin-top: 14px;
+}
+
+.apps-card {
+    min-width: 0;
+    padding: 14px 16px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+}
+
+.apps-heading {
+    margin: 0 0 6px;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.apps-text {
+    margin: 0 0 12px;
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    line-height: 1.5;
+}
+
+.apps-text strong {
+    color: var(--text-primary);
+}
+
+.apps-hint {
+    margin: 10px 0 0;
+    color: var(--text-muted);
+    font-size: 11.5px;
+    line-height: 1.45;
+}
+
+.apps-pair-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 16px;
+}
+
+.apps-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-primary);
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.apps-check input {
+    margin: 0;
+    accent-color: var(--accent-primary);
+}
+
+.apps-code {
+    margin-top: 14px;
+    padding: 12px 14px;
+    background: color-mix(in srgb, var(--accent-primary) 8%, var(--bg-card));
+    border: 1px solid color-mix(in srgb, var(--accent-primary) 40%, var(--border-color));
+    border-radius: var(--radius-md);
+}
+
+.apps-code[hidden] {
+    display: none;
+}
+
+.apps-code-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 14px;
+}
+
+.apps-code-value {
+    padding: 0;
+    color: var(--text-primary);
+    background: none;
+    font-family: var(--console-mono);
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    line-height: 1.2;
+    user-select: all;
+}
+
+.apps-code-note {
+    margin: 8px 0 0;
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    line-height: 1.5;
+}
+
+.apps-code-note strong {
+    color: var(--text-primary);
+    font-family: var(--console-mono);
+    font-size: 0.95em;
+}
+
+.apps-code.is-expired .apps-code-value {
+    color: var(--text-muted);
+    text-decoration: line-through;
+}
+
+.apps-copy-done,
+.apps-copy.is-copied .apps-copy-idle {
+    display: none;
+}
+
+.apps-copy.is-copied .apps-copy-done {
+    display: inline;
+}
+
+.apps-error {
+    margin: 10px 0 0;
+    color: var(--accent-danger);
+    font-size: 12.5px;
+}
+
+.apps-error[hidden] {
+    display: none;
+}
+
+.apps-steps {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding-left: 20px;
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    line-height: 1.55;
+}
+
+.apps-steps strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.apps-text code,
+.apps-steps code {
+    white-space: nowrap;
+}
+
 /* ---------- Narrow screens: one column ---------- */
 
 @media (max-width: 960px) {
     .settings-console {
         grid-template-columns: minmax(0, 1fr);
         gap: 12px;
+    }
+
+    .apps-grid {
+        grid-template-columns: minmax(0, 1fr);
     }
 
     .settings-index {
@@ -331,5 +517,61 @@
 
     .settings-actions .btn {
         flex: 1;
+    }
+
+    /* Each app becomes a short card: name and Disconnect on top, then
+       labelled facts. */
+    .settings-console .apps-table thead {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+    }
+
+    .settings-console .apps-table,
+    .settings-console .apps-table tbody {
+        display: block;
+    }
+
+    .settings-console .apps-table tbody tr {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 4px 12px;
+        padding: 12px 0;
+        border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .settings-console .apps-table tbody tr:hover {
+        background: none;
+    }
+
+    .settings-console .apps-table td {
+        display: block;
+        padding: 0;
+        border: 0;
+    }
+
+    .settings-console .apps-table .apps-action {
+        grid-column: 2;
+        grid-row: 1;
+        width: auto;
+    }
+
+    .settings-console .apps-table td[data-label] {
+        display: flex;
+        grid-column: 1 / -1;
+        align-items: center;
+        gap: 8px;
+        min-height: 24px;
+        font-size: 12.5px;
+    }
+
+    .settings-console .apps-table td[data-label]::before {
+        content: attr(data-label);
+        flex: none;
+        width: 84px;
+        color: var(--text-muted);
     }
 }

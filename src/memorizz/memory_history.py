@@ -231,6 +231,8 @@ def _emit_change(provider, kind, record_id, before, after, operation):
             or "unknown"
         ),
         "initiator": context.get("initiator"),
+        # The connected app (e.g. "Grok") that made the change for the actor.
+        "client": context.get("client"),
         "source": str(context.get("source") or description.get("source") or "sdk"),
         "source_ref": description.get("source_path")
         or description.get("source_uri")

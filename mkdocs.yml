@@ -30,6 +30,7 @@ nav:
       - MCP Integrations:
           - Connect to MCP Servers: guides/mcp-connectivity.md
           - Expose MemoRizz as an MCP Server: guides/mcp-server.md
+          - Grok Bot and ChatGPT dots: guides/cloud-apps.md
           - MemoRizz in Codex and Claude Code: guides/coding-agent-plugins.md
       - Internet Access: internet-access/providers.md
       - Browser Control: browser-control/index.md

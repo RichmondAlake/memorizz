@@ -60,6 +60,8 @@ from .routers.agents_crud import router as agents_crud_router
 from .routers.capabilities import router as capabilities_router
 from .routers.comparisons import router as comparisons_router
 from .routers.comparisons import stop_comparison_workers
+from .routers.connected_apps import connected_apps_context
+from .routers.connected_apps import router as connected_apps_router
 from .routers.continual_learning import router as continual_learning_router
 from .routers.evalground import router as evalground_router
 from .routers.evalground import stop_active_eval_run_processes
@@ -1113,6 +1115,7 @@ def create_app(
     app.include_router(memory_pages_router)
     app.include_router(memory_transfer_router)
     app.include_router(mcp_router)
+    app.include_router(connected_apps_router)
     app.include_router(vercel_skills_router)
     app.include_router(knowledge_base_router)
     app.include_router(whatsapp_router)
@@ -1396,6 +1399,7 @@ def create_app(
                 "message": None,
                 "error": None,
                 "active_page": "settings",
+                "connected_apps": connected_apps_context(),
             },
         )
 
@@ -1480,6 +1484,7 @@ def create_app(
                 "message": message,
                 "error": error,
                 "active_page": "settings",
+                "connected_apps": connected_apps_context(),
             },
         )
 
