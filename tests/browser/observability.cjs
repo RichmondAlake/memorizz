@@ -35,6 +35,13 @@ const {chromium} = require(process.env.MEMORIZZ_PLAYWRIGHT_MODULE || 'playwright
         rootOnly.hash = '';
         await page.goto(rootOnly.toString());
         assert(await page.locator('#trace-insights').evaluate(node => node.getBoundingClientRect().top + window.scrollY < 1200));
+        // The section bar and a card both lead to what failed, and the turn picker chooses a turn.
+        await page.locator('.trace-section-nav a[href="#trace-failures"]').click();
+        await page.locator('#trace-failures').waitFor();
+        assert.equal(new URL(page.url()).hash, '#trace-failures');
+        await page.locator('a.trace-analysis-stat--link[href="#trace-timeline"]').click();
+        assert.equal(new URL(page.url()).hash, '#trace-timeline');
+        assert(await page.locator('.trace-turn-picker select').count());
         await page.locator('#trace-category').selectOption('delivery');
         assert(await page.locator('[data-waterfall-kind="output_contract"]:visible').count());
         await page.locator('#trace-category').selectOption('all');

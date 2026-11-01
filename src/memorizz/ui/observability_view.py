@@ -11,7 +11,7 @@ A tape item is a dict with ``label``, ``value``, ``kind`` (``count``, ``usd``,
 
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 GOOD, WARN, BAD = "is-good", "is-warn", "is-bad"
 
@@ -319,6 +319,93 @@ def explain_error(event: Mapping[str, Any]) -> str:
     return f"Ended with status {status.replace('_', ' ')}." if status else ""
 
 
+# Someone stopped these on purpose; a run past its deadline did not.
+_DELIBERATE_STOPS = {"reader_closed", "cancel_requested"}
+
+
+def _is_failure(row: Mapping[str, Any]) -> bool:
+    event = row["event"]
+    if not row["error"]:
+        return False
+    if "approval_required" in (event.get("error_code"), event.get("status")):
+        return False
+    return not (
+        str(event.get("status") or "") == "cancelled"
+        and event.get("stop_reason") in _DELIBERATE_STOPS
+    )
+
+
+def failure_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """What broke, grouped by the same failure, with what stopped a turn first.
+
+    Built from timeline rows, so it shows only what scoping and the trace
+    content mode already let through: reasons come from codes, never content.
+    """
+
+    def turn_of(event: Mapping[str, Any]) -> str:
+        return str(event.get("turn_id") or event.get("root_trace_id") or "")
+
+    finished = {
+        turn_of(row["event"])
+        for row in rows
+        if row["event"].get("kind") == "turn_result" and not row["error"]
+    }
+    groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for row in filter(_is_failure, rows):
+        event = row["event"]
+        kind = str(event.get("kind") or "")
+        name = _tool_name(event) if kind.startswith("tool") else row["title"]
+        code = str(
+            event.get("outcome_reason_code")
+            or event.get("error_code")
+            or event.get("status")
+            or ""
+        )
+        group = groups.setdefault(
+            (name, code),
+            {
+                "name": name,
+                "code": code,
+                "why": row["why"],
+                "count": 0,
+                "turns": {},
+                "stopped": False,
+            },
+        )
+        group["count"] += 1
+        group["row"] = row
+        group["last_clock"] = row["clock"]
+        group["last_date"] = row["date"]
+        turn = turn_of(event)
+        group["stopped"] = group["stopped"] or turn not in finished
+        group["turns"][turn] = {
+            "turn_id": event.get("turn_id"),
+            "root_trace_id": event.get("root_trace_id"),
+            "thread_id": event.get("thread_id"),
+            "label": turn[:8],
+            "stopped": turn not in finished,
+        }
+    turns: Dict[str, Dict[str, Any]] = {}
+    for group in groups.values():
+        turns.update(group["turns"])
+        group["turns"] = list(group["turns"].values())
+    ordered = sorted(
+        groups.values(),
+        key=lambda group: (
+            not group["stopped"],
+            -group["count"],
+            group["last_date"],
+            group["last_clock"],
+        ),
+    )
+    return {
+        "total": sum(group["count"] for group in ordered),
+        "turns": len(turns),
+        "stopped": sum(1 for turn in turns.values() if turn["stopped"]),
+        "groups": ordered,
+    }
+
+
 def _turn_story(rows: List[Dict[str, Any]], result: Mapping[str, Any]) -> str:
     """What a turn that didn't finish had done before it stopped."""
     turn = result.get("turn_id")
@@ -505,6 +592,7 @@ def trace_timeline(
         "first": rows[0]["timestamp"] if rows else "",
         "last": rows[-1]["timestamp"] if rows else "",
         "revealable": sum(1 for row in rows if row["has_content"]),
+        "failures": failure_summary(rows),
     }
 
 

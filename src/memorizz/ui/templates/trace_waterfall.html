@@ -4,9 +4,12 @@
     <label>Lane <select id="trace-category"><option value="all">All</option><option value="memory">Memory</option><option value="model">Model</option><option value="tool">Tool</option><option value="host">Host action</option><option value="artifact">Artifact</option><option value="delivery">Delivery / contract</option><option value="errors">Errors and gaps</option></select></label>
     <label><input type="checkbox" id="trace-show-success"> Show successful low-level model/tool spans</label>
     <p>Recorded parent links, grouped by root and turn. Bars show observed timing, not inferred model latency. Select an operation to inspect its evidence.</p>
+    {% set any_failed = namespace(value=false) %}
+    {% for group in trace_waterfall %}{% if group.nodes|selectattr('status', 'in', ['error', 'partial'])|list %}{% set any_failed.value = true %}{% endif %}{% endfor %}
     {% for group in trace_waterfall %}
-    <details open>
-        <summary>Root <code>{{ group.root_trace_id or 'Unknown' }}</code> · Turn <code>{{ group.turn_id or 'Unknown' }}</code> · {{ group.nodes|length }} spans</summary>
+    {% set failed_steps = group.nodes|selectattr('status', 'in', ['error', 'partial'])|list|length %}
+    <details{% if failed_steps or (loop.first and not any_failed.value) or selected_root_trace_id %} open{% endif %}{% if failed_steps %} class="has-failures"{% endif %}>
+        <summary>{% if failed_steps %}<span class="trace-waterfall-failed">{{ failed_steps }} failed</span> {% endif %}Root <code>{{ group.root_trace_id or 'Unknown' }}</code> · Turn <code>{{ group.turn_id or 'Unknown' }}</code> · {{ group.nodes|length }} spans</summary>
         <p class="trace-scroll-hint">Scroll the table horizontally to inspect timing and duration →</p>
         <div class="traces-table-wrap" tabindex="0" role="region" aria-label="Causal waterfall, horizontally scrollable">
         <table class="traces-agents-table trace-waterfall-table">

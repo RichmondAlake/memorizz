@@ -1523,3 +1523,23 @@ body.theme-light .pg-composer {
   font-size: 12px;
   white-space: nowrap;
 }
+
+/* What failed comes before the turn's rows. */
+.pg-activity-header { display: grid; gap: 8px; margin: 10px 0; }
+.pg-activity-header > a { justify-self: start; font-size: 13px; }
+.pg-activity-failures { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.pg-activity-failures li { padding-left: 10px; border-left: 2px solid var(--accent-danger); overflow-wrap: anywhere; }
+.pg-activity-failures button {
+    display: block;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent-danger);
+    font: inherit;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+}
+.pg-activity-failures button:hover { text-decoration: underline; }
+.pg-activity-failures span { color: var(--text-secondary); font-size: 13px; }
+.pg-trace-item.is-focused { outline: 2px solid var(--accent-danger); outline-offset: 2px; }

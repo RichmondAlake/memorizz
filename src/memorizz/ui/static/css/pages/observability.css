@@ -1500,3 +1500,65 @@ body.theme-light #trace-timeline {
         justify-content: flex-start;
     }
 }
+
+/* Failures come first. Amber when the agent carried on, red when a turn stopped. */
+.obs-failures {
+    margin: 16px 0;
+    padding: 12px 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    scroll-margin-top: 72px;
+}
+.obs-failures.has-failures {
+    padding: 18px 20px;
+    border-left: 3px solid var(--accent-warning);
+}
+.obs-failures.has-stopped { border-left-color: var(--accent-danger); }
+.obs-failures-clear { margin: 0; color: var(--text-secondary); }
+.obs-failures-all { display: inline-block; margin-top: 10px; font-size: 13px; }
+.obs-failures-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 12px;
+}
+.obs-failures-head h2 { margin: 0; font-size: 20px; }
+.obs-failures-head p { margin: 4px 0 0; color: var(--text-secondary); }
+.obs-failure-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.obs-failure { padding: 12px 0; border-top: 1px solid var(--border-color); }
+.obs-failure-what { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+.obs-failure-what strong { font-size: 15px; overflow-wrap: anywhere; }
+.obs-failure-count { font-variant-numeric: tabular-nums; color: var(--accent-warning); font-weight: 600; }
+.obs-failure.is-stopped .obs-failure-count { color: var(--accent-danger); }
+.obs-failure-outcome { color: var(--text-muted); font-size: 13px; }
+.obs-failure.is-stopped .obs-failure-outcome { color: var(--accent-danger); }
+.obs-failure-why { margin: 6px 0 0; max-width: 72ch; }
+.obs-failure-meta { margin: 4px 0 0; color: var(--text-muted); font-size: 13px; }
+.obs-failure-meta a { margin-left: 6px; }
+.obs-failure-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 8px; }
+.obs-failure-actions .obs-tl-reveal + * { flex-basis: 100%; }
+.obs-tl-event:target .obs-tl-card { outline: 2px solid var(--accent-danger); outline-offset: 2px; }
+.obs-tl-event { scroll-margin-top: 72px; }
+#trace-timeline, #trace-insights, #trace-waterfall, #trace-lineage-inspectors, #trace-output-contracts { scroll-margin-top: 72px; }
+
+.trace-section-nav a.has-failures { color: var(--accent-danger); font-weight: 600; }
+.trace-section-nav a.has-failures span {
+    display: inline-block;
+    min-width: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: var(--accent-danger);
+    color: #15171a;
+    text-align: center;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
+.trace-section-nav a[data-current] { text-decoration: underline; text-underline-offset: 4px; }
+.trace-turn-picker { margin-left: auto; }
+.trace-turn-picker select { max-width: 280px; }
+
+a.trace-analysis-stat--link { color: inherit; text-decoration: none; }
+a.trace-analysis-stat--link:hover,
+a.trace-analysis-stat--link:focus-visible { border-color: var(--text-muted); }
+.trace-waterfall-failed { color: var(--accent-danger); font-weight: 600; }

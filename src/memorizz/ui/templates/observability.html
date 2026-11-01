@@ -188,13 +188,24 @@
 
 
 {% if selected_agent %}
-<nav class="trace-section-nav" aria-label="Selected incident sections">
-    <span>Root <code>{{ selected_root_trace_id or 'all loaded roots' }}</code>{% if selected_turn_id %} · Turn <code>{{ selected_turn_id }}</code>{% endif %}</span>
+<nav class="trace-section-nav" aria-label="Sections for this agent">
+    {% set nav_failures = (trace_timeline or {}).get('failures') or {} %}
+    {% if not coding_agent_label %}<a href="#trace-failures"{% if nav_failures.total %} class="has-failures"{% endif %}>Failures{% if nav_failures.total %} <span>{{ nav_failures.total }}</span>{% endif %}</a>{% endif %}
+    <a href="#trace-timeline">Timeline</a>
     {% if not coding_agent_label %}<a href="#trace-insights">Insights</a><a href="#trace-waterfall">Waterfall</a><a href="#trace-lineage-inspectors">Lineage</a><a href="#trace-output-contracts">Delivery</a>{% endif %}
-    <form method="get" action="/traces">
+    {% if trace_waterfall or selected_root_trace_id %}
+    <form method="get" action="/traces" class="trace-turn-picker">
         {% for key, value in selection_urls.params.items() %}{% if key not in ['root_trace_id', 'event_id', 'turn_id', 'task_id'] %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endif %}{% endfor %}
-        <label>Root <input name="root_trace_id" value="{{ selected_root_trace_id or '' }}" maxlength="240"></label><button class="btn btn-sm" type="submit">Select root</button>
+        <label>Turn <select name="root_trace_id" data-submit-on-change>
+            <option value="">All turns</option>
+            {% set listed = namespace(selected=false) %}
+            {% for group in trace_waterfall or [] %}{% if group.root_trace_id %}{% set failed = group.nodes|selectattr('status', 'in', ['error', 'partial'])|list|length %}{% if group.root_trace_id == selected_root_trace_id %}{% set listed.selected = true %}{% endif %}
+            <option value="{{ group.root_trace_id }}"{% if group.root_trace_id == selected_root_trace_id %} selected{% endif %}>{{ (group.turn_id or group.root_trace_id)|truncate(8, true, '') }}, {{ group.nodes|length }} step{{ '' if group.nodes|length == 1 else 's' }}{% if failed %}, {{ failed }} failed{% endif %}</option>{% endif %}{% endfor %}
+            {% if selected_root_trace_id and not listed.selected %}<option value="{{ selected_root_trace_id }}" selected>{{ selected_root_trace_id|truncate(16, true, '') }}</option>{% endif %}
+        </select></label>
+        <noscript><button class="btn btn-sm" type="submit">Show</button></noscript>
     </form>
+    {% endif %}
 </nav>
 <div class="agent-summary">
     <div class="summary-item">
@@ -232,6 +243,8 @@
     </div>
     {% endif %}
 </div>
+
+{% if not coding_agent_label %}{% include "trace_failures.html" %}{% endif %}
 
 {#- A coding agent's steps aren't in its saved turns, so counts here would
     read as zero; its notice links to the run that has them. -#}
@@ -271,36 +284,36 @@
         {% for missing in trace_analysis.coverage.missing_stages %}<p>Missing {{ missing.stage }} ({{ missing.profile }})</p>{% endfor %}
     </div>
     <div class="trace-analysis-grid" aria-label="Trace analysis summary">
-        <div class="trace-analysis-stat">
+        <a class="trace-analysis-stat trace-analysis-stat--link" href="#trace-timeline">
             <span class="trace-analysis-stat-kicker">Trace volume</span>
             <span class="trace-analysis-stat-value">{{ trace_analysis.summary.events_analyzed }}</span>
             <span class="trace-analysis-stat-label">Events analyzed</span>
             <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.threads_analyzed }} thread{% if trace_analysis.summary.threads_analyzed != 1 %}s{% endif %} · {{ trace_analysis.summary.context_provenance_events }} provenance events</span>
-        </div>
-        <div class="trace-analysis-stat {% if trace_analysis.summary.verified_outcome_failures %}trace-analysis-stat--warning{% endif %}">
+        </a>
+        <a class="trace-analysis-stat trace-analysis-stat--link {% if trace_analysis.summary.verified_outcome_failures %}trace-analysis-stat--warning{% endif %}" href="#trace-output-contracts">
             <span class="trace-analysis-stat-kicker">Verified outcomes</span>
             <span class="trace-analysis-stat-value">{% if trace_analysis.summary.verified_outcomes %}{{ trace_analysis.summary.verified_outcome_successes }}/{{ trace_analysis.summary.verified_outcomes }}{% else %}<span class="stat-empty">No recorded evidence</span>{% endif %}</span>
             <span class="trace-analysis-stat-label">Successful outcomes</span>
             <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.verified_outcome_failures }} failed · {{ trace_analysis.summary.verified_negative_feedback }} negative feedback</span>
-        </div>
+        </a>
         <div class="trace-analysis-stat {% if trace_analysis.summary.page_context_mismatches or trace_analysis.summary.missing_current_page_grounding or trace_analysis.summary.unverified_page_ownership %}trace-analysis-stat--critical{% endif %}">
             <span class="trace-analysis-stat-kicker">Context integrity</span>
             <span class="trace-analysis-stat-value">{{ trace_analysis.summary.page_context_mismatches }}</span>
             <span class="trace-analysis-stat-label">Page / thread mismatches</span>
             <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.missing_current_page_grounding }} missing grounding · {{ trace_analysis.summary.unverified_page_ownership }} unverified ownership</span>
         </div>
-        <div class="trace-analysis-stat {% if trace_analysis.summary.memory_degraded_turns %}trace-analysis-stat--warning{% endif %}">
+        <a class="trace-analysis-stat trace-analysis-stat--link {% if trace_analysis.summary.memory_degraded_turns %}trace-analysis-stat--warning{% endif %}" href="#trace-lineage-inspectors">
             <span class="trace-analysis-stat-kicker">Memory supply</span>
             <span class="trace-analysis-stat-value">{{ trace_analysis.summary.memory_supplied }}</span>
             <span class="trace-analysis-stat-label">Items supplied to the model</span>
             <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.memory_candidates }} retrieved candidates · {{ trace_analysis.summary.memory_explicit_references }} explicit references · {{ trace_analysis.summary.memory_degraded_turns }} degraded</span>
-        </div>
-        <div class="trace-analysis-stat {% if trace_analysis.summary.tool_failures %}trace-analysis-stat--warning{% endif %}">
+        </a>
+        <a class="trace-analysis-stat trace-analysis-stat--link {% if trace_analysis.summary.tool_failures %}trace-analysis-stat--warning{% endif %}" href="#trace-failures">
             <span class="trace-analysis-stat-kicker">Tool health</span>
             <span class="trace-analysis-stat-value">{% if trace_analysis.metric_states.tool_calls.state == 'unknown' %}Unknown{% else %}{{ trace_analysis.summary.tool_calls }}{% if trace_analysis.metric_states.tool_calls.state == 'partial' %}+{% endif %}{% endif %}</span>
             <span class="trace-analysis-stat-label">Tool calls</span>
             <span class="trace-analysis-stat-detail">{{ trace_analysis.summary.tool_failures }} failures · {{ trace_analysis.summary.tool_fallbacks }} fallback · {{ trace_analysis.summary.tool_degraded_results }} degraded</span>
-        </div>
+        </a>
         <div class="trace-analysis-stat">
             <span class="trace-analysis-stat-kicker">Semantic cache</span>
             <span class="trace-analysis-stat-value">{{ trace_analysis.summary.cache_hits }}</span>

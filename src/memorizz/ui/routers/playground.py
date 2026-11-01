@@ -783,6 +783,10 @@ def _parse_trace_bundle_payload(raw_content: Any) -> Optional[List[Dict[str, str
         }
         if trace_id:
             serialized_event["trace_id"] = trace_id
+        for key in ("root_trace_id", "turn_id", "thread_id"):
+            value = _to_text(event.get(key)).strip()
+            if value:
+                serialized_event[key] = value
         events.append(serialized_event)
 
     return events

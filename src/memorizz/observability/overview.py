@@ -41,10 +41,12 @@ TOOL_REASONS = {
     "tool_not_disclosed": "called before discover_tools disclosed it this turn",
     "unknown_tool": "no tool has that name",
     "invalid_arguments": "arguments did not match the tool's signature",
-    "tool_not_callable": "no callable is registered for it in this process",
+    "tool_not_callable": "the tool isn't available to this agent in this session",
     "invalid_tool_invocation": "rejected before running (not disclosed, bad "
     "arguments or no callable; newer versions report which)",
     "tool_log_not_found": "the referenced tool log does not exist",
+    "protocol_error": "the MCP server rejected the request",
+    "connection_error": "the MCP server could not be reached",
     "approval_required": "waiting for approval",
     "duplicate_tool_call": "the model repeated a call that had already "
     "succeeded this turn, so the repeat was skipped",

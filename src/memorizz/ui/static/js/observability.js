@@ -143,6 +143,19 @@
         all.dataset.shown = 'true';
         all.textContent = 'Hide all content';
     });
+    document.querySelectorAll('[data-submit-on-change]').forEach(field => {
+        field.addEventListener('change', () => field.form.submit());
+    });
+    // A section the nav jumped to stays marked, so a long page keeps its bearings.
+    const sectionLinks = [...document.querySelectorAll('.trace-section-nav a[href^="#"]')];
+    const sections = sectionLinks.map(link => document.querySelector(link.getAttribute('href'))).filter(Boolean);
+    if (sections.length && 'IntersectionObserver' in window) {
+        const seen = new IntersectionObserver(entries => entries.forEach(entry => {
+            if (!entry.isIntersecting) return;
+            sectionLinks.forEach(link => link.toggleAttribute('data-current', link.getAttribute('href') === '#' + entry.target.id));
+        }), {rootMargin: '-20% 0px -70% 0px'});
+        sections.forEach(section => seen.observe(section));
+    }
     const timelineEvents = [...document.querySelectorAll('.obs-tl-event')];
     function markRailEnds() {
         const visible = timelineEvents.filter(row => !row.hidden);
@@ -158,6 +171,10 @@
             day = date.dataset.tlDay;
         }
     }
+    document.getElementById('trace-show-errors')?.addEventListener('click', () => {
+        document.querySelector('[data-tl-filter="errors"]')?.click();
+        document.getElementById('trace-timeline')?.scrollIntoView();
+    });
     document.querySelectorAll('[data-tl-filter]').forEach(button => button.addEventListener('click', () => {
         const key = button.dataset.tlFilter;
         document.querySelectorAll('[data-tl-filter]').forEach(other => other.setAttribute('aria-pressed', String(other === button)));
@@ -182,6 +199,10 @@
     // The summary's range names the day once when it starts and ends on it.
     const range = [...document.querySelectorAll('time[data-tl-stamp]')].map(node => [node, parsed(node)]);
     range.forEach(([node, date]) => { if (date) node.textContent = stamp.format(date); });
+    document.querySelectorAll('time[data-failure-stamp]').forEach(node => {
+        const date = parsed(node);
+        if (date) node.textContent = stamp.format(date);
+    });
     if (range.length === 2 && range[0][1] && range[1][1] && range[0][1].toDateString() === range[1][1].toDateString()) {
         const minutes = new Intl.DateTimeFormat(undefined, {hour: '2-digit', minute: '2-digit'});
         const [start, end] = [minutes.format(range[0][1]), minutes.format(range[1][1])];

@@ -4,12 +4,30 @@
 
 ### Added
 
+- **The Observability page opens on what failed.** A new Failures panel groups
+  an agent's failures by what broke, with how often, how many turns, when it
+  last happened and whether the turn stopped or the agent carried on. Each one
+  links to its step, its turns and, for people allowed to read traces, the
+  actual error. Before, the errors were a filter thousands of pixels down the
+  page.
+- The Playground's Traces button opens the conversation on screen instead of
+  the agent's whole history, and a turn's activity lists what failed first, with
+  a jump to each failure and a link to that turn in Traces.
 - A new line in the chat prompt: Esc then Enter, or Shift, Option or Cmd+Enter
   where the terminal passes them on. Before, the prompt had no way to start one.
   Many terminals keep Cmd+Enter for themselves; the
   [CLI guide](docs/getting-started/cli.md) has the setting for Ghostty and cmux.
 - CLI chats save what each request sends to the model, so the UI's Context tab
   can show them, as Playground turns already did.
+
+### Changed
+
+- In Observability, the section bar shows the failure count and a turn picker
+  replaces the box for a root ID. The Trace volume, Verified outcomes, Memory
+  supply and Tool health cards link to the section they summarise, and the
+  Waterfall opens only the turns that failed.
+- A tool's raw stored-output digest no longer appears as a message in the
+  Playground; the turn's activity already shows the call.
 
 ### Fixed
 
@@ -28,6 +46,10 @@
 - A CLI chat could fail on `retrieve_tool_log_entry`: long tool output points the
   model at that tool, but chat mode removed it, so the model couldn't read what
   it had fetched and fetched it again.
+- The Context tab blamed "older turns" for a turn that was simply never saved,
+  including every CLI turn on a new agent.
+- An MCP failure now reads "the MCP server rejected the request" instead of a
+  bare code.
 
 ## 0.17.18 — 2026-11-01
 

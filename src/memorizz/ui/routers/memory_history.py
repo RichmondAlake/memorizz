@@ -326,7 +326,7 @@ async def context_turns(
         elif not group["calls"]:
             group[
                 "reason"
-            ] = "No captured request is available for this turn. Older turns were recorded before snapshots were enabled."
+            ] = "This turn's request wasn't saved. Playground turns and CLI chats on 0.17.19 or later save it."
     turns = sorted(
         groups.values(),
         key=lambda g: (str(g.get("timestamp") or ""), str(g["turn_id"])),

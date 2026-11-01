@@ -1,0 +1,40 @@
+{#- Failures first: what broke, how often, and whether the turn survived. Built
+    from the timeline's rows, so scoping and the content mode already apply; the
+    error text itself stays behind the same audited reveal as the timeline. -#}
+{% set failures = (trace_timeline or {}).get('failures') %}
+{% set can_reveal_failure = trace_permissions and trace_permissions['trace.reveal'] and trace_content_mode != 'metadata' %}
+{% if failures and (trace_timeline.rows or selected_root_trace_id) %}
+<section class="obs-failures{% if failures.total %} has-failures{% if failures.stopped %} has-stopped{% endif %}{% endif %}" id="trace-failures" aria-labelledby="trace-failures-title">
+    {% if failures.total %}
+    <header class="obs-failures-head">
+        <div>
+            <h2 id="trace-failures-title">{{ failures.total }} failure{{ '' if failures.total == 1 else 's' }} in {{ failures.turns }} turn{{ '' if failures.turns == 1 else 's' }}</h2>
+            <p>{% if failures.stopped %}{{ failures.stopped }} turn{{ ' was' if failures.stopped == 1 else 's were' }} stopped or did not finish.{% else %}The agent carried on and finished {{ 'it' if failures.turns == 1 else 'all of them' }}.{% endif %}</p>
+        </div>
+        <button class="btn btn-sm" type="button" id="trace-show-errors">Show in the timeline</button>
+    </header>
+    <ul class="obs-failure-list">
+        {% for group in failures.groups %}
+        <li class="obs-failure{% if group.stopped %} is-stopped{% endif %}">
+            <div class="obs-failure-what">
+                <strong>{{ group.name }}</strong>
+                <span class="obs-failure-count" title="{{ group.count }} time{{ '' if group.count == 1 else 's' }}">{{ group.count }}&times;</span>
+                <span class="obs-failure-outcome">{{ 'Stopped the turn' if group.stopped else 'Turn finished anyway' }}</span>
+            </div>
+            <p class="obs-failure-why">{{ group.why or group.code|replace('_', ' ') }}</p>
+            <p class="obs-failure-meta">Last at <time data-failure-stamp datetime="{{ group.row.timestamp }}">{{ group.last_date }} {{ group.last_clock }}</time>. Turn{{ '' if group.turns|length == 1 else 's' }}
+                {% for turn in group.turns[:6] %}<a href="/traces?{{ {'agent_id': selected_agent_id, 'thread_id': turn.thread_id or '', 'root_trace_id': turn.root_trace_id or '', 'turn_id': turn.turn_id or ''}|urlencode }}#trace-failures"><code>{{ turn.label }}</code></a>{% endfor %}{% if group.turns|length > 6 %} and {{ group.turns|length - 6 }} more{% endif %}
+            </p>
+            <div class="obs-failure-actions">
+                <a class="obs-tl-action" href="#{{ group.row.event.anchor }}">Go to this step</a>
+                {% if can_reveal_failure and group.row.has_content %}{% set event = group.row.event %}<button class="obs-tl-action obs-tl-reveal" type="button" aria-expanded="false" data-reveal-event="{{ event.event_id }}" data-agent-id="{{ event.agent_id }}" data-source-id="{{ selected_agent_id or '' }}" data-root-id="{{ event.root_trace_id or '' }}" data-thread-id="{{ event.thread_id or '' }}" data-turn-id="{{ event.turn_id or '' }}" data-run-id="{{ event.run_id or '' }}" data-label="Show the error"><span>Show the error</span></button><pre class="obs-tl-content" hidden></pre>{% endif %}
+            </div>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="obs-failures-clear" id="trace-failures-title">No failures in {{ trace_timeline.rows|length }} recorded event{{ '' if trace_timeline.rows|length == 1 else 's' }}{% if selected_root_trace_id %} for this turn{% endif %}.</p>
+    {% endif %}
+    {% if selected_root_trace_id %}<a class="obs-failures-all" href="/traces?{{ {'agent_id': selected_agent_id}|urlencode }}#trace-failures">Show every turn for this agent</a>{% endif %}
+</section>
+{% endif %}
