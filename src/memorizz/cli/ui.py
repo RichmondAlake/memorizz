@@ -32,28 +32,18 @@ from rich.text import Text
 
 from . import harness_session
 
-# The crest: a block "M" inside a shield. Each row is the same width so the
-# reveal animation keeps its shape.
+# The crest: a block "M". Each row is the same width so the reveal animation
+# keeps its shape.
 CREST_ROWS: Tuple[str, ...] = (
-    "╭─────────────────╮",
-    "│ ███╗       ███╗ │",
-    "│ ████╗     ████║ │",
-    "│ ██╔██╗   ██╔██║ │",
-    "│ ██║╚██╗ ██╔╝██║ │",
-    "│ ██║ ╚████╔╝ ██║ │",
-    "╲ ██║  ╚██╔╝  ██║ ╱",
-    " ╲╚═╝   ╚═╝   ╚═╝╱ ",
-    "  ╲             ╱  ",
-    "   ╲           ╱   ",
-    "    ╲         ╱    ",
-    "     ╲       ╱     ",
-    "      ╲     ╱      ",
-    "       ╲   ╱       ",
-    "        ╲ ╱        ",
-    "         V         ",
+    "███╗       ███╗",
+    "████╗     ████║",
+    "██╔██╗   ██╔██║",
+    "██║╚██╗ ██╔╝██║",
+    "██║ ╚████╔╝ ██║",
+    "██║  ╚██╔╝  ██║",
+    "╚═╝   ╚═╝   ╚═╝",
 )
 CREST_WIDTH = len(CREST_ROWS[0])
-_SHIELD_CHARS = set("╭╮╰╯─│╲╱V ")
 _PULSE_COLOURS = ("#ff3b3b", "#ff6b6b", "#ff3b3b", "#d7263d")
 HOTKEYS: Tuple[Tuple[str, str, str], ...] = (
     ("←", "/agents", "switch agent"),
@@ -244,23 +234,21 @@ def should_animate(console: Console, environ: Any = None) -> bool:
 
 
 def crest_text(progress: int | None = None, pulse: int = 0) -> Text:
-    """The crest as Rich text: shield in gold, the M in red.
+    """The crest as Rich text, in red.
 
     ``progress`` shows only the first N rows (the reveal); ``pulse`` picks the
-    M's colour for the glow frames.
+    colour for the glow frames.
     """
     shown = (
         len(CREST_ROWS) if progress is None else max(0, min(progress, len(CREST_ROWS)))
     )
-    m_colour = _PULSE_COLOURS[pulse % len(_PULSE_COLOURS)]
+    colour = _PULSE_COLOURS[pulse % len(_PULSE_COLOURS)]
     text = Text()
     for index, row in enumerate(CREST_ROWS):
         if index >= shown:
             text.append(" " * CREST_WIDTH)
         else:
-            for char in row:
-                style = "bold #fbbf24" if char in _SHIELD_CHARS else f"bold {m_colour}"
-                text.append(char, style=style)
+            text.append(row, style=f"bold {colour}")
         if index < len(CREST_ROWS) - 1:
             text.append("\n")
     return text

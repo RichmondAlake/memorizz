@@ -33,7 +33,9 @@ def test_crest_rows_share_one_width_and_draw_an_m():
     assert all(len(row) == ui.CREST_WIDTH for row in ui.CREST_ROWS)
     plain = ui.crest_text().plain
     assert plain.count("\n") == len(ui.CREST_ROWS) - 1
-    assert "███╗       ███╗" in plain and plain.strip().endswith("V")
+    assert plain.startswith("███╗       ███╗") and plain.endswith("╚═╝   ╚═╝   ╚═╝")
+    assert not set(plain) & set("╭╮╰╯─│╲╱V"), "just the M, with no shield around it"
+    assert {span.style for span in ui.crest_text().spans} == {"bold #ff3b3b"}
     partial = ui.crest_text(progress=3).plain.splitlines()
     assert partial[2].strip() and not partial[3].strip()
     assert ui.crest_text(None, pulse=7).plain == plain
@@ -58,7 +60,7 @@ def test_animate_crest_is_a_no_op_off_terminal_and_runs_on_one(monkeypatch):
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.setenv("TERM", "xterm-256color")
     assert ui.animate_crest(tty, frame_seconds=0) is True
-    assert "█" in out.getvalue() and "╭" in out.getvalue()  # styled per glyph
+    assert "███╗" in out.getvalue() and "╚═╝" in out.getvalue()
 
 
 def test_memory_label_and_toolbar(session):
