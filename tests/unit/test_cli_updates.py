@@ -170,7 +170,7 @@ def test_opt_out_skips_network_and_cache(release_api, monkeypatch, tmp_path, nam
 @pytest.mark.parametrize(
     ("marker", "command"),
     [
-        ("uv-receipt.toml", "uv tool upgrade memorizz"),
+        ("uv-receipt.toml", "uv tool upgrade --refresh-package memorizz memorizz"),
         ("pipx_metadata.json", "pipx upgrade memorizz"),
     ],
 )
@@ -401,6 +401,52 @@ def test_update_command_checks_now_and_reports(release_api, monkeypatch):
     assert get.call_count == 2  # force bypasses the cache
 
 
+def test_update_command_shows_the_extras_it_would_keep(
+    release_api, tmp_path, monkeypatch
+):
+    # Rich read "[mcp,ui,desktop,oracle]" as a style tag and printed none of it,
+    # so the command /update showed would have removed those extras.
+    import memorizz
+    from memorizz.cli import commands
+    from memorizz.cli.agent_factory import Session
+
+    monkeypatch.setattr(memorizz, "__version__", "0.9.0")
+    _uv_prefix(tmp_path, monkeypatch, RECEIPT)
+    output = StringIO()
+    session = Session(
+        agent=SimpleNamespace(),
+        provider=object(),
+        llm_config={"provider": "ollama", "model": "m"},
+        console=Console(file=output, color_system=None, width=160),
+    )
+    commands.dispatch("/update", session)
+    assert "'memorizz[mcp,ui,desktop,oracle]==0.10.0'" in output.getvalue()
+
+
+def test_memorizz_update_shows_the_whole_upgrade(release_api, tmp_path, monkeypatch):
+    monkeypatch.setattr(updates, "__version__", "0.9.0")
+    _uv_prefix(tmp_path, monkeypatch, RECEIPT)
+    result = CliRunner().invoke(app, ["update"])
+    assert result.exit_code == 0
+    assert "memorizz 0.9.0 → 0.10.0" in result.output
+    assert "'memorizz[mcp,ui,desktop,oracle]==0.10.0'" in result.output
+
+
+def test_memorizz_update_says_when_it_is_current(release_api, monkeypatch):
+    monkeypatch.setattr(updates, "__version__", "0.10.0")
+    result = CliRunner().invoke(app, ["update"])
+    assert result.exit_code == 0
+    assert "memorizz 0.10.0 is the latest release" in result.output
+
+
+def test_memorizz_update_says_when_checks_are_off(release_api, monkeypatch):
+    monkeypatch.setenv("MEMORIZZ_NO_UPDATE_CHECK", "1")
+    result = CliRunner().invoke(app, ["update"])
+    assert result.exit_code == 0
+    assert "Update checks are off" in result.output
+    assert "latest release" not in result.output
+
+
 def test_status_bar_shows_the_update_pill():
     from prompt_toolkit.formatted_text import to_plain_text
 
@@ -443,6 +489,8 @@ def test_a_pinned_uv_install_upgrades_with_the_same_extras(tmp_path, monkeypatch
         "tool",
         "install",
         "--force",
+        "--refresh-package",
+        "memorizz",
         "--python",
         "3.12",
         "memorizz[mcp,ui,desktop,oracle]==0.17.12",
@@ -455,7 +503,10 @@ def test_an_unpinned_uv_install_keeps_uv_tool_upgrade(tmp_path, monkeypatch):
         monkeypatch,
         RECEIPT.replace(', specifier = "==0.17.11"', ""),
     )
-    assert updates.upgrade_command("0.17.12") == "uv tool upgrade memorizz"
+    assert (
+        updates.upgrade_command("0.17.12")
+        == "uv tool upgrade --refresh-package memorizz memorizz"
+    )
 
 
 def test_the_receipt_reads_the_same_without_tomllib(tmp_path, monkeypatch):

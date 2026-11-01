@@ -2149,6 +2149,8 @@ def cmd_session(session, args: str):
 
 def cmd_update(session, args: str):
     """Check PyPI now and show how to upgrade; never installs anything."""
+    from rich.markup import escape
+
     from .. import __version__
     from . import updates
 
@@ -2164,7 +2166,7 @@ def cmd_update(session, args: str):
         session.update_notice = update
         console.print(
             f"[bold yellow]⬆ Update available:[/bold yellow] memorizz {__version__} → "
-            f"{update['latest']}\n  Upgrade: [cyan]{update['command']}[/cyan]"
+            f"{update['latest']}\n  Upgrade: [cyan]{escape(update['command'])}[/cyan]"
         )
         return
     session.update_notice = None

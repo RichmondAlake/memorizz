@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- `memorizz update` checks for a newer release and shows how to upgrade, like
+  `/update` in the chat. It doesn't install anything.
+
 ### Fixed
 
 - **Recall no longer ranks memories by the order they were written.** Recency
@@ -12,6 +17,16 @@
 - A model rating a memory 1 out of 10 ("purely mundane") gave it the maximum
   importance instead of 0.1. Ratings already stored stay as they are, because
   a stored 1.0 can't be told apart from a real 10.
+- `/update` and the startup banner left the extras out of the upgrade command
+  they showed: `memorizz[mcp,ui]==X` printed as `memorizz==X`, so following it
+  removed them. The notice shown during a session was right. This affected uv
+  installs pinned to a version with extras. **If yours is one, 0.17.17 and older
+  will still show the short command for this upgrade, so add your extras
+  yourself:** `uv tool install --force --refresh-package memorizz --python 3.12
+  'memorizz[mcp,ui]==0.17.18'`.
+- The upgrade command failed for a few minutes after each release with "no
+  version of memorizz==X", because uv's cached index didn't have it yet. It now
+  refreshes the package.
 
 ## 0.17.17 — 2026-11-01
 

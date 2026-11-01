@@ -39,9 +39,11 @@ the complete CLI surface.
 **Upgrading keeps your extras.** `uv tool upgrade memorizz` upgrades a uv
 install with the extras it has. It stays inside the version range you
 installed with, though, so an install pinned to a version (`memorizz==0.17.11`)
-doesn't move. For that install, the update notice and `/update` show a
-reinstall with the same extras and Python, such as
-`uv tool install --force --python 3.12 'memorizz[ui,oracle]==0.17.12'`.
+doesn't move. For that install, the update notice, `/update` and `memorizz
+update` show a reinstall with the same extras and Python, such as
+`uv tool install --force --refresh-package memorizz --python 3.12 'memorizz[ui,oracle]==0.17.12'`.
+`--refresh-package` is what makes it work right after a release, before uv's
+cached index has the new version.
 Reinstalling by hand with fewer extras removes the ones left out, `oracle`
 included.
 

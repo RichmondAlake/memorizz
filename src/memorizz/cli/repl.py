@@ -133,7 +133,7 @@ def _banner(console: Console, session) -> None:
         session.update_notice = update
         body += (
             f"\n[bold yellow]⬆ Update available:[/bold yellow] {__version__} → "
-            f"{update['latest']}   [yellow]{update['command']}[/yellow]"
+            f"{update['latest']}   [yellow]{escape(update['command'])}[/yellow]"
         )
     panel = Panel(body, expand=False, border_style="green")
     if ui.should_animate(console):

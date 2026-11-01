@@ -265,6 +265,19 @@ def doctor(
     raise typer.Exit(print_doctor(raw_json=raw_json))
 
 
+@app.command("update", help="Check for a newer release and show how to upgrade.")
+def update_check():
+    from . import updates
+
+    if updates._disabled():
+        typer.echo("Update checks are off (MEMORIZZ_NO_UPDATE_CHECK or CI is set).")
+        return
+    typer.echo(
+        updates.check_for_update(updates.__version__, force=True)
+        or f"memorizz {updates.__version__} is the latest release."
+    )
+
+
 @app.command(help="Set up ~/.memorizz (API keys or the local Ollama stack).")
 def init(
     local: bool = typer.Option(

@@ -152,7 +152,9 @@ def upgrade_command(latest: str | None = None) -> str:
     A uv tool install keeps its extras. ``uv tool upgrade`` stays inside the
     version range the tool was installed with, so for an install pinned to a
     version it would do nothing; that one is reinstalled with the same extras
-    and Python at ``latest``."""
+    and Python at ``latest``. Both refresh the package, because uv's cached
+    index doesn't know a release that just came out ("no version of
+    memorizz==X")."""
     if os.environ.get("MEMORIZZ_INSTALL_METHOD") == "npm":
         return "npm install -g memorizz@latest"
     prefix = Path(sys.prefix).resolve()
@@ -161,9 +163,9 @@ def upgrade_command(latest: str | None = None) -> str:
     if (prefix / "uv-receipt.toml").is_file():
         requirement = _uv_requirement(prefix / "uv-receipt.toml")
         if not requirement.get("specifier"):
-            return "uv tool upgrade memorizz"
+            return "uv tool upgrade --refresh-package memorizz memorizz"
         extras = ",".join(requirement.get("extras") or [])
-        args = ["uv", "tool", "install", "--force"]
+        args = ["uv", "tool", "install", "--force", "--refresh-package", "memorizz"]
         if requirement.get("python"):
             args += ["--python", str(requirement["python"])]
         args.append(
