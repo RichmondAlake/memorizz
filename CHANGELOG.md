@@ -50,6 +50,7 @@
 
 ### Changed
 
+- Agent harnesses sits right below Agents in the UI's side navigation.
 - The chat's startup crest is now just the red M, without the gold shield.
 - **`memorizz` opens on a new conversation** in the agent's memory, instead of
   resuming the last one; `/conversations` resumes an earlier one. A launch
