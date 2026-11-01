@@ -6,6 +6,7 @@ import logging
 import os
 from typing import Any, Dict, Generator, List, Optional
 
+from ..extras import install_command
 from ._hf_offline import enable_hf_offline_env, is_hf_offline
 from .llm_provider import LLMProvider, ResponseMetadataMixin
 from .local_chat import LocalChatMixin, chat_prompt
@@ -51,7 +52,7 @@ class HuggingFaceLLM(
         except ImportError as exc:
             raise ImportError(
                 "transformers is required for the Hugging Face LLM provider. "
-                "Install it via `pip install memorizz[huggingface]`."
+                f"Install it with `{install_command(['huggingface'])}`."
             ) from exc
 
         self.model = model

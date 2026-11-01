@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 
 from ..enums.memory_type import MemoryType
+from ..extras import install_command
 from .base import MemoryProvider, MemoryProviderCapabilities
 
 _DEFAULT_PROVIDER_LOCK = threading.Lock()
@@ -49,7 +50,7 @@ def _lazy_import_mongodb():
         return MongoDBProvider
     except ImportError as e:
         raise ImportError(
-            'MongoDB provider requires pymongo. Install with: pip install "memorizz[mongodb]"'
+            f"MongoDB provider requires pymongo. Install with: {install_command(['mongodb'])}"
         ) from e
 
 
@@ -61,7 +62,7 @@ def _lazy_import_oracle():
         return OracleProvider
     except ImportError as e:
         raise ImportError(
-            'Oracle provider requires oracledb. Install with: pip install "memorizz[oracle]"'
+            f"Oracle provider requires oracledb. Install with: {install_command(['oracle'])}"
         ) from e
 
 
@@ -85,7 +86,7 @@ def __getattr__(name):
         except ImportError as e:
             raise ImportError(
                 "Filesystem provider requires faiss-cpu for vector search. "
-                'Install with: pip install "memorizz[filesystem]"'
+                f"Install with: {install_command(['filesystem'])}"
             ) from e
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 

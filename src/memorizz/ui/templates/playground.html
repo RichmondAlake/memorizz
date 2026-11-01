@@ -274,7 +274,7 @@
                         title="{% if agent_is_favorite %}Remove from favorites{% else %}Add to favorites{% endif %}"
                         aria-label="{% if agent_is_favorite %}Remove from favorites{% else %}Add to favorites{% endif %}"><span aria-hidden="true">★</span></button>
                 </form>
-                <a class="btn btn-sm" href="/traces?agent_id={{ agent.agent_id }}">Traces</a>
+                <a class="btn btn-sm" id="pg-traces-link" href="/traces?agent_id={{ agent.agent_id }}#trace-failures">Traces</a>
                 <a class="btn btn-sm" href="/agents/{{ agent.agent_id }}/edit">Edit</a>
                 <button type="button" class="pg-icon-btn" id="context-panel-toggle" onclick="toggleContextPanel()" aria-controls="playground-context-panel" aria-expanded="true" title="Show or hide the inspector"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M15 4.5v15"/></svg></button>
             </div>
@@ -1409,7 +1409,7 @@ const pgLocalModels = window.MemorizzLocalModels.mount({
         refreshText: 'refresh',
         ollamaDownRefreshText: 'refresh this check',
         ollamaMissing: 'Sending a message will fail with a 404. Run {pull}, click the download icon below, or {browse}. Then {refresh}.',
-        huggingfaceUnavailable: 'Install it with <code>pip install memorizz[huggingface]</code>, then {refresh}.',
+        huggingfaceUnavailable: 'Install it with <code>' + {{ install_command(['huggingface'])|tojson }} + '</code>, then {refresh}.',
         huggingfaceMissing: 'Sending a message will trigger a download (a few hundred MB to several GB) and may stall. Click the download icon below, or pre-download with {download}, or {card}. Then {refresh}.',
     },
     manage: {
@@ -2154,12 +2154,15 @@ function renderThreadMessages(messages, memoryId) {
                     <div class="pg-trace-timeline">${traceRows}</div>
                 </details>
             `;
+            pgAddActivityHeader(traceMessage.querySelector('.pg-activity'), msg.trace_events);
+            pgPointTracesAt(msg.trace_events);
             container.appendChild(traceMessage);
             return;
         }
 
         const role = ((msg && msg.role) ? String(msg.role) : 'system').toLowerCase();
         const content = msg && (msg.content ?? msg.text) ? String(msg.content ?? msg.text) : '';
+        if (role === 'tool' && pgIsToolDigest(content)) return;
         const useMarkdown = (role === 'assistant' || role === 'system');
         const renderedContent = useMarkdown ? renderMarkdown(content) : escapeHtml(content);
         const mdClass = useMarkdown ? ' md-rendered' : '';
@@ -2464,6 +2467,7 @@ async function loadAgentPromptCache() {
 }
 
 // Plain-language reasons for the safe failure codes the stream reports.
+const PG_AGENT_ID = {{ (agent.agent_id if agent else '')|tojson }};
 const PG_TOOL_REASONS = {
     invalid_tool_invocation: 'not callable here: undisclosed, unregistered in this process, or bad arguments',
     tool_budget_exhausted: 'per-turn tool budget used up',
@@ -2473,6 +2477,9 @@ const PG_TOOL_REASONS = {
     tool_retry_limit: 'retry limit reached',
     approval_required: 'waiting for approval',
     provider_unavailable: 'tool provider unavailable',
+    tool_not_callable: 'not available to this agent right now',
+    protocol_error: 'the MCP server rejected the request',
+    connection_error: 'the MCP server could not be reached',
 };
 
 // Tool calls stream as short steps inside the reply, like chat assistants show.
@@ -3616,6 +3623,76 @@ function pgToolResultFailed(traceEvent) {
     } catch (_) {
         return false;
     }
+}
+
+// A long tool result is stored apart and leaves this digest for the model. The
+// turn's activity shows the call, so it isn't a message to read.
+function pgIsToolDigest(content) {
+    try {
+        const payload = JSON.parse(content);
+        return Boolean(payload && payload.offloaded === true && payload.tool_log_id);
+    } catch (_) {
+        return false;
+    }
+}
+
+function pgTraceUrl(ids) {
+    const params = new URLSearchParams({agent_id: PG_AGENT_ID});
+    ['thread_id', 'root_trace_id', 'turn_id'].forEach(function(key) {
+        if (ids && ids[key]) params.set(key, ids[key]);
+    });
+    return `/traces?${params}#trace-failures`;
+}
+
+// The header's Traces button follows the conversation on screen.
+function pgPointTracesAt(events) {
+    const link = document.getElementById('pg-traces-link');
+    const event = events.find(function(item) { return item && item.thread_id; });
+    if (link && event) link.href = pgTraceUrl({thread_id: event.thread_id});
+}
+
+function pgToolFailureText(event) {
+    try {
+        const payload = JSON.parse(String(event.content || ''));
+        return String(payload.error || PG_TOOL_REASONS[payload.error_code] || payload.error_code);
+    } catch (_) {
+        return 'The tool reported a failure.';
+    }
+}
+
+// A turn can run to a hundred rows, so what failed comes before them, and each
+// failure jumps to its row.
+function pgAddActivityHeader(details, events) {
+    const rows = details.querySelectorAll('.pg-trace-item');
+    const header = document.createElement('div');
+    header.className = 'pg-activity-header';
+    const failures = document.createElement('ul');
+    failures.className = 'pg-activity-failures';
+    events.forEach(function(event, index) {
+        const outcome = traceOutcomeMeta(event);
+        if (!outcome || outcome.status !== 'error' || !rows[index]) return;
+        const item = document.createElement('li');
+        const jump = document.createElement('button');
+        jump.type = 'button';
+        jump.textContent = String(event.title || 'Step').replace(/^Tool Result:\s*/, '');
+        jump.addEventListener('click', function() {
+            rows[index].scrollIntoView({block: 'center'});
+            rows[index].classList.add('is-focused');
+        });
+        const why = document.createElement('span');
+        why.textContent = pgToolFailureText(event);
+        item.append(jump, why);
+        failures.appendChild(item);
+    });
+    if (failures.children.length) header.appendChild(failures);
+    const ids = events.find(function(event) { return event && event.root_trace_id; });
+    if (ids) {
+        const link = document.createElement('a');
+        link.href = pgTraceUrl(ids);
+        link.textContent = 'Open this turn in Traces';
+        header.appendChild(link);
+    }
+    if (header.children.length) details.querySelector('.pg-trace-timeline').before(header);
 }
 
 // Summarise a turn by what a person cares about: tools used, failures, model calls.

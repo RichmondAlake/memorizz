@@ -629,3 +629,22 @@ def test_agent_new_is_offered_by_tab_completion_and_usage(provider):
     session = open_session(provider)
     commands.dispatch("/agent", session)
     assert "/agent new [model] [prompt]" in output(session)
+
+
+def test_chat_keeps_the_tool_its_prompts_point_at(provider):
+    # Long tool output is replaced by "use retrieve_tool_log_entry(...)". Taking
+    # the tool away made the model fail, then fetch the same page again.
+    tools = open_session(provider).agent.tool_manager.list_tools()
+    assert "retrieve_tool_log_entry" in tools
+    assert "list_recent_tool_logs" not in tools
+
+
+def test_a_chat_records_what_it_sends_to_the_model(provider):
+    assert open_session(provider).agent.capture_context_snapshots is True
+
+
+def test_recording_what_is_sent_is_not_saved_on_the_agent(provider):
+    pirate = saved_agent(provider)
+    cfg.set_active_agent(pirate)
+    open_session(provider).agent.save()
+    assert not getattr(record(provider, pirate), "capture_context_snapshots", False)

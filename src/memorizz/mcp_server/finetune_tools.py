@@ -12,6 +12,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Dict, List, Optional
 
+from ..extras import install_command
 from .auth import RequestIdentity
 from .config import EXECUTE_SCOPE, READ_SCOPE, WRITE_SCOPE
 
@@ -50,7 +51,7 @@ class FineTuneTools:
         except ImportError as exc:
             raise self._error(
                 "finetune_unavailable",
-                f'Fine-tuning needs its packages: pip install "memorizz[finetune]" ({exc.name})',
+                f"Fine-tuning needs its packages: {install_command(['finetune'])} ({exc.name})",
             ) from exc
 
     def _owner(self, identity: RequestIdentity) -> str:

@@ -228,8 +228,8 @@ LLM_MODEL_CATALOG: Dict[str, List[Dict[str, str]]] = {
     ],
     # MLX (Apple Silicon native). mlx-community/* repos ship pre-quantized
     # weights — Google explicitly recommends MLX for Gemma 4 on Macs.
-    # Requires a native arm64 Python — `pip install memorizz[mlx]` will
-    # fail under Rosetta. Custom repo IDs are still accepted.
+    # Requires a native arm64 Python: the mlx extra fails to install under
+    # Rosetta. Custom repo IDs are still accepted.
     "mlx": [
         # Google Gemma 4 (4-bit MLX quants — fast on Apple Silicon)
         {

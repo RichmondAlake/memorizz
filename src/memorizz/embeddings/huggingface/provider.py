@@ -7,6 +7,7 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
+from ...extras import install_command
 from ...llms._hf_offline import enable_hf_offline_env, is_hf_offline
 from .. import BaseEmbeddingProvider
 
@@ -123,7 +124,7 @@ class HuggingFaceEmbeddingProvider(BaseEmbeddingProvider):
         except ImportError as exc:
             raise ImportError(
                 "sentence-transformers is required for the Hugging Face embedding "
-                "provider. Install it via `pip install memorizz[huggingface]`."
+                f"provider. Install it with `{install_command(['huggingface'])}`."
             ) from exc
 
         kwargs: Dict[str, Any] = {

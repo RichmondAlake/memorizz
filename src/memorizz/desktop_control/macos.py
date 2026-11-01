@@ -28,16 +28,18 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
+from ..extras import install_command
+
 ACCESSIBILITY_HINT = (
     "macOS has not given the app running MemoRizz (your terminal) Accessibility "
     "access, so apps can be opened but not read or operated. Turn it on in System "
     "Settings > Privacy & Security > Accessibility (memorizz desktop doctor names "
     "the app), then try again."
 )
-INSTALL_HINT = (
-    "Desktop control needs pyobjc: pip install 'memorizz[desktop]' "
-    "(or uv tool install 'memorizz[desktop]')."
-)
+
+
+def _install_hint() -> str:
+    return f"Desktop control needs pyobjc: {install_command(['desktop'])}."
 
 
 class DesktopError(RuntimeError):
@@ -243,7 +245,7 @@ class _Accessibility:
         try:
             import ApplicationServices as ax
         except ImportError as exc:
-            raise DesktopError(INSTALL_HINT) from exc
+            raise DesktopError(_install_hint()) from exc
         self._ax = ax
 
     def trusted(self, prompt: bool = False) -> bool:
@@ -322,7 +324,7 @@ class _Input:
         try:
             import Quartz as quartz
         except ImportError as exc:
-            raise DesktopError(INSTALL_HINT) from exc
+            raise DesktopError(_install_hint()) from exc
         self._q = quartz
 
     def _post(self, event: Any, pid: Optional[int] = None) -> None:
@@ -386,7 +388,7 @@ class _Screen:
         try:
             import Quartz as quartz
         except ImportError as exc:
-            raise DesktopError(INSTALL_HINT) from exc
+            raise DesktopError(_install_hint()) from exc
         self._q = quartz
 
     def allowed(self, prompt: bool = False) -> bool:
@@ -428,7 +430,7 @@ class _Apps:
         try:
             import AppKit as appkit
         except ImportError as exc:
-            raise DesktopError(INSTALL_HINT) from exc
+            raise DesktopError(_install_hint()) from exc
         self._appkit = appkit
 
     @staticmethod

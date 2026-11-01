@@ -16,6 +16,7 @@ import sys
 from typing import List, Optional
 
 import typer
+from rich.markup import escape
 
 from .._env_io import env_bool, resolve_oracle_in_database_embedding_from_env
 from . import config as cfg
@@ -455,7 +456,7 @@ def _build_or_wizard(
             console, code_mode, browser_control=browser_control, resume=resume
         )
     except Exception as exc:
-        console.print(f"[red]Could not start agent:[/red] {exc}")
+        console.print(f"[red]Could not start agent:[/red] {escape(str(exc))}")
         return None
 
 
@@ -540,7 +541,7 @@ def _wizard(console, code_mode, depth: int = 0, browser_control=None, resume=Tru
             resume=resume,
         )
     except Exception as exc:
-        console.print(f"[red]Could not start agent:[/red] {exc}")
+        console.print(f"[red]Could not start agent:[/red] {escape(str(exc))}")
         return None
 
 
@@ -551,10 +552,10 @@ def _apply_session_harness(session, harness, console) -> None:
     try:
         result = harness_session.apply_harness(session, harness)
     except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from None
     console.print(
-        f"[green]Harness →[/green] {result['harness']} "
+        f"[green]Harness →[/green] {escape(str(result['harness']))} "
         "[dim](session only; memory, traces and approvals stay in MemoRizz)[/dim]"
     )
 
@@ -741,7 +742,7 @@ def _show_config():
             oracle_mode_error = str(exc)
 
     if oracle_mode_error:
-        console.print(f"  embedding:   [red]{oracle_mode_error}[/red]")
+        console.print(f"  embedding:   [red]{escape(str(oracle_mode_error))}[/red]")
     elif oracle_in_database:
         console.print("  embedding:   [green]Oracle in-database ONNX[/green]")
     elif embedding_provider:

@@ -6,6 +6,7 @@ import logging
 import os
 from typing import Any, Dict, List
 
+from ...extras import install_command
 from .. import BaseEmbeddingProvider, shorten_embedding
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ class OllamaEmbeddingProvider(BaseEmbeddingProvider):
         except ImportError:
             raise ImportError(
                 "The 'ollama' package is required for Ollama embeddings. Install "
-                "it with: pip install ollama (or: pip install memorizz[ollama])"
+                f"it with: {install_command(['ollama'])}"
             )
 
         client_kwargs: Dict[str, Any] = {"host": self.base_url}

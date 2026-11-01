@@ -9,6 +9,7 @@ from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
+from ..extras import install_command
 from .llm_provider import LLMProvider, ResponseMetadataMixin
 from .message_roles import developer_messages_to_system
 from .tool_metadata import JsonPromptToolMetadataMixin
@@ -217,7 +218,7 @@ class OllamaLLM(JsonPromptToolMetadataMixin, ResponseMetadataMixin, LLMProvider)
         except ImportError:
             raise ImportError(
                 "The ollama package is required for the Ollama provider. "
-                'Install it with: pip install "memorizz[ollama]"'
+                f"Install it with: {install_command(['ollama'])}"
             )
 
         if host is None:

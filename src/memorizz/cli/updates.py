@@ -24,7 +24,7 @@ from rich.text import Text
 
 from .. import __version__
 from .._env_io import env_bool
-from ..extras import uv_requirement
+from ..extras import tool_requirement, uv_requirement
 from . import config as cfg
 
 PYPI_URL = "https://pypi.org/pypi/memorizz/json"
@@ -125,13 +125,13 @@ def upgrade_command(latest: str | None = None) -> str:
         requirement = uv_requirement(prefix / "uv-receipt.toml")
         if not requirement.get("specifier"):
             return "uv tool upgrade --refresh-package memorizz memorizz"
-        extras = ",".join(requirement.get("extras") or [])
         args = ["uv", "tool", "install", "--force", "--refresh-package", "memorizz"]
         if requirement.get("python"):
             args += ["--python", str(requirement["python"])]
         args.append(
-            f"memorizz{f'[{extras}]' if extras else ''}"
-            + (f"=={latest}" if latest else "")
+            tool_requirement(
+                requirement.get("extras") or [], f"=={latest}" if latest else ""
+            )
         )
         return shlex.join(args)
     if (prefix / "pipx_metadata.json").is_file():

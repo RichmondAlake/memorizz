@@ -12,6 +12,8 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from ..extras import install_command
+
 # Anchor that points at the installed package dir (``src/memorizz``), matching the
 # original ``Path(__file__).parent`` when this code lived in ``memorizz/cli.py``.
 _PKG_DIR = Path(__file__).resolve().parent.parent
@@ -80,7 +82,7 @@ def setup_oracle():
     except ImportError as e:
         print(f"✗ Failed to import setup module: {e}")
         print("\nPlease ensure memorizz[oracle] is installed:")
-        print("  pip install memorizz[oracle]")
+        print(f"  {install_command(['oracle'])}")
         return False
 
 
@@ -93,7 +95,7 @@ def setup_oracle_schema():
     except ImportError as e:
         print(f"✗ Failed to import setup module: {e}")
         print("\nPlease ensure memorizz[oracle] is installed:")
-        print("  pip install memorizz[oracle]")
+        print(f"  {install_command(['oracle'])}")
         return False
 
 
@@ -264,7 +266,7 @@ def run_local(
         print(f"✗ Failed to import UI module: {e}")
         print("\n" + (missing_extra_message(e) or "The UI needs the ui extra:"))
         if not missing_extra_message(e):
-            print("  pip install 'memorizz[ui]'")
+            print(f"  {install_command(['ui'])}")
         return False
     try:
         run_server(host=host, port=port, startup_connect=startup_connect)

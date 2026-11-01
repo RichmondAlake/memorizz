@@ -42,8 +42,10 @@ installed with, though, so an install pinned to a version (`memorizz==0.17.11`)
 doesn't move. For that install, the update notice, `/update` and `memorizz
 update` show a reinstall with the same extras and Python, such as
 `uv tool install --force --refresh-package memorizz --python 3.12 'memorizz[ui,oracle]==0.17.12'`.
-`--refresh-package` is what makes it work right after a release, before uv's
-cached index has the new version.
+`--refresh-package` gets past uv's cached index right after a release. PyPI can
+take a minute or two to catch up too, so if uv still finds no such version, try
+again shortly. The space in `memorizz[ ui,oracle]`, which you'll see in these
+commands, is deliberate and valid.
 Reinstalling by hand with fewer extras removes the ones left out, `oracle`
 included.
 
@@ -330,6 +332,10 @@ Running `memorizz` with no arguments launches the interactive loop:
 - **Ctrl-C** during a reply aborts just that reply (you stay in the REPL).
 - **Ctrl-C** at the prompt, **Ctrl-D**, or `/exit` saves the agent and quits.
 - Press **Tab** to autocomplete slash commands.
+- **Esc then Enter** starts a new line in the prompt, and so does **Shift**,
+  **Option** or **Cmd+Enter** where your terminal passes them on. Many terminals
+  keep Cmd+Enter for themselves; in Ghostty and cmux, add
+  `keybind = super+enter=text:\x1b\r` to `~/.config/ghostty/config`.
 - **Arrow keys on an empty line** are shortcuts: **←** opens the agent
   picker (`/agents`), **→** the harness picker (`/harnesses`), **↓** the quick
   actions menu (`/menu`). With text in the line they edit as usual, and **↑**

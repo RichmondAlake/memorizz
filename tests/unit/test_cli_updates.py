@@ -420,7 +420,7 @@ def test_update_command_shows_the_extras_it_would_keep(
         console=Console(file=output, color_system=None, width=160),
     )
     commands.dispatch("/update", session)
-    assert "'memorizz[mcp,ui,desktop,oracle]==0.10.0'" in output.getvalue()
+    assert "'memorizz[ mcp,ui,desktop,oracle]==0.10.0'" in output.getvalue()
 
 
 def test_memorizz_update_shows_the_whole_upgrade(release_api, tmp_path, monkeypatch):
@@ -429,7 +429,7 @@ def test_memorizz_update_shows_the_whole_upgrade(release_api, tmp_path, monkeypa
     result = CliRunner().invoke(app, ["update"])
     assert result.exit_code == 0
     assert "memorizz 0.9.0 → 0.10.0" in result.output
-    assert "'memorizz[mcp,ui,desktop,oracle]==0.10.0'" in result.output
+    assert "'memorizz[ mcp,ui,desktop,oracle]==0.10.0'" in result.output
 
 
 def test_memorizz_update_says_when_it_is_current(release_api, monkeypatch):
@@ -493,7 +493,7 @@ def test_a_pinned_uv_install_upgrades_with_the_same_extras(tmp_path, monkeypatch
         "memorizz",
         "--python",
         "3.12",
-        "memorizz[mcp,ui,desktop,oracle]==0.17.12",
+        "memorizz[ mcp,ui,desktop,oracle]==0.17.12",
     ]
 
 

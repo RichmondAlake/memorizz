@@ -2,13 +2,18 @@
 
 import asyncio
 import json
+import re
 import shlex
 import sys
+from io import StringIO
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
+import memorizz
 from memorizz import extras
 from memorizz.cli.app import app as cli_app
 
@@ -188,23 +193,23 @@ def test_a_uv_tool_adds_an_extra_to_the_ones_it_has(uv_tool):
         "memorizz",
         "--python",
         "3.12",
-        "memorizz[ui,oracle,mcp]==0.17.11",
+        "memorizz[ ui,oracle,mcp]==0.17.11",
     ]
 
 
 def test_a_uv_tool_does_not_repeat_an_extra_it_has(uv_tool):
     uv_tool()
-    assert "memorizz[ui,oracle]==0.17.11" in extras.install_command(["oracle"])
+    assert "memorizz[ ui,oracle]==0.17.11" in extras.install_command(["oracle"])
 
 
 def test_an_unpinned_uv_tool_stays_unpinned(uv_tool):
     uv_tool(UV_RECEIPT.replace(', specifier = "==0.17.11"', ""))
-    assert extras.install_command(["mcp"]).endswith("'memorizz[ui,oracle,mcp]'")
+    assert extras.install_command(["mcp"]).endswith("'memorizz[ ui,oracle,mcp]'")
 
 
 def test_a_uv_tool_with_no_extras_gains_the_one_it_needs(uv_tool):
     uv_tool(UV_RECEIPT.replace('extras = ["ui", "oracle"], ', ""))
-    assert extras.install_command(["mcp"]).endswith("'memorizz[mcp]==0.17.11'")
+    assert extras.install_command(["mcp"]).endswith("'memorizz[ mcp]==0.17.11'")
 
 
 def test_a_uv_tool_is_not_sent_to_pip(uv_tool):
@@ -222,7 +227,7 @@ def test_doctor_gives_a_uv_tool_one_command(uv_tool, tmp_path, monkeypatch):
     monkeypatch.setattr(extras, "_importable", lambda module: module != "oracledb")
     result = CliRunner().invoke(cli_app, ["doctor", "--json"])
     report = json.loads(result.output)
-    assert "memorizz[ui,oracle]==0.17.11" in report["backend"]["install"]
+    assert "memorizz[ ui,oracle]==0.17.11" in report["backend"]["install"]
     assert "pip install" not in report["backend"]["install"]
 
 
@@ -249,7 +254,7 @@ def test_an_mcp_connection_tells_a_uv_tool_how_to_add_the_extra(uv_tool, monkeyp
 
     with pytest.raises(MCPConfigurationError) as error:
         asyncio.run(connect())
-    assert "memorizz[ui,oracle,mcp]==0.17.11" in str(error.value)
+    assert "memorizz[ ui,oracle,mcp]==0.17.11" in str(error.value)
     assert "pip install" not in str(error.value)
 
 
@@ -262,4 +267,46 @@ def test_encrypted_credentials_tell_a_uv_tool_how_to_add_the_extra(
     monkeypatch.setattr(credentials, "Fernet", None)
     with pytest.raises(MCPConfigurationError) as error:
         credentials._require_cryptography()
-    assert "memorizz[ui,oracle,mcp]==0.17.11" in str(error.value)
+    assert "memorizz[ ui,oracle,mcp]==0.17.11" in str(error.value)
+
+
+def test_rich_cannot_delete_the_extras_from_a_uv_hint(uv_tool):
+    # Printed without escaping, "[ui,oracle,mcp]" would be read as a style tag.
+    # What was left would reinstall the tool with no extras and remove them.
+    uv_tool()
+    command = extras.install_command(["mcp"])
+    output = StringIO()
+    Console(file=output, color_system=None, width=200).print(f"Install: {command}")
+    assert command in output.getvalue()
+
+
+def test_no_install_hint_is_written_out_by_hand():
+    # Only install_command knows how this install adds an extra.
+    written_out = re.compile(r"(pip install|uv tool install)\W*(--force\W*)?memorizz\[")
+    package = Path(memorizz.__file__).parent
+    found = [
+        str(path.relative_to(package))
+        for path in package.rglob("*")
+        if path.suffix in {".py", ".html", ".js"}
+        and path != package / "extras.py"
+        and written_out.search(path.read_text(encoding="utf-8"))
+    ]
+    assert found == []
+
+
+def test_fine_tuning_reports_how_to_add_its_extra(uv_tool):
+    from memorizz.finetune.service import environment
+
+    uv_tool()
+    assert "memorizz[ ui,oracle,finetune]==0.17.11" in environment()["install"]
+
+
+def test_pages_can_show_how_to_add_an_extra(uv_tool):
+    from memorizz.ui.state import templates
+
+    uv_tool()
+    page = templates.env.from_string(
+        "{{ install_command(['huggingface'])|tojson }}"
+    ).render()
+    assert "memorizz[ ui,oracle,huggingface]==0.17.11" in page
+    assert "'" not in page  # it sits inside a script's string

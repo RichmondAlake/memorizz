@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from rich.markup import escape
+
 FINAL_STATES = {
     "succeeded",
     "failed",
@@ -434,7 +436,9 @@ def report_pending_approvals(session, console) -> int:
         proposal_id = row.get("proposal_id") or row.get("id") or "?"
         tool = row.get("tool_name") or row.get("operation") or ""
         reason = row.get("policy_reason") or row.get("reason") or ""
-        console.print(f"  [cyan]{proposal_id}[/cyan]  {tool}  [dim]{reason}[/dim]")
+        console.print(
+            f"  [cyan]{proposal_id}[/cyan]  {tool}  [dim]{escape(str(reason))}[/dim]"
+        )
     console.print(
         "  Approve with [cyan]/approvals approve <proposal-id> <your-name>[/cyan], "
         "reject with [cyan]/approvals reject <proposal-id> <your-name>[/cyan], "

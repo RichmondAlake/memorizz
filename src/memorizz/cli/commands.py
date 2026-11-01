@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+from rich.markup import escape
+
 from . import agent_factory
 from . import config as cfg
 from . import conversations, ollama_probe
@@ -208,16 +210,16 @@ def cmd_ollama(session, args: str):
     result = ollama_probe.probe()
     if not result["reachable"]:
         console.print(
-            f"[red]Ollama not reachable[/red] at {result['host']}: {result['error']}"
+            f"[red]Ollama not reachable[/red] at {escape(str(result['host']))}: {escape(str(result['error']))}"
         )
         return
     models = result["models"] or []
     if not models:
         console.print(
-            f"Ollama is up at {result['host']} but has no models. Try /ollama pull llama3.1"
+            f"Ollama is up at {escape(str(result['host']))} but has no models. Try /ollama pull llama3.1"
         )
         return
-    console.print(f"[bold]Ollama models[/bold] ({result['host']}):")
+    console.print(f"[bold]Ollama models[/bold] ({escape(str(result['host']))}):")
     for m in models:
         console.print(f"  • {m}")
 
@@ -248,7 +250,7 @@ def cmd_web(session, args: str):
             agent.with_internet_access_provider(None)
             console.print("[yellow]Internet access OFF[/yellow]")
         except Exception as exc:
-            console.print(f"[red]Failed:[/red] {exc}")
+            console.print(f"[red]Failed:[/red] {escape(str(exc))}")
         return
 
     if sub == "open":
@@ -278,7 +280,7 @@ def cmd_web(session, args: str):
             console.print(f"[bold]{title or rest}[/bold]")
             console.print(str(content or page)[:1500])
         except Exception as exc:
-            console.print(f"[red]Could not open page:[/red] {exc}")
+            console.print(f"[red]Could not open page:[/red] {escape(str(exc))}")
         return
 
     try:
@@ -302,7 +304,9 @@ def cmd_web(session, args: str):
         name = agent.get_internet_access_provider_name() or sub
         console.print(f"[green]Internet access →[/green] {name}")
     except Exception as exc:
-        console.print(f"[red]Could not enable internet access:[/red] {exc}")
+        console.print(
+            f"[red]Could not enable internet access:[/red] {escape(str(exc))}"
+        )
         console.print("Add a key first with /login tavily (or /login firecrawl).")
 
 
@@ -341,7 +345,7 @@ def cmd_browser(session, args: str):
         if configured:
             console.print_json(json.dumps(configured, default=str))
         if error:
-            console.print(f"[yellow]Configuration error:[/yellow] {error}")
+            console.print(f"[yellow]Configuration error:[/yellow] {escape(str(error))}")
         console.print(
             "Usage: /browser on | off | status | run <task>  "
             "[dim](model calls still require durable approval)[/dim]"
@@ -382,7 +386,9 @@ def cmd_browser(session, args: str):
             "durable host approval before every model-initiated task.[/dim]"
         )
     except Exception as exc:
-        console.print(f"[red]Could not enable browser control:[/red] {exc}")
+        console.print(
+            f"[red]Could not enable browser control:[/red] {escape(str(exc))}"
+        )
 
 
 def cmd_desktop(session, args: str):
@@ -550,7 +556,7 @@ def cmd_memory(session, args: str):
         )
     except Exception as exc:
         console.print(
-            f"[green]Switched to memory[/green] {mid}  (history unavailable: {exc})"
+            f"[green]Switched to memory[/green] {mid}  (history unavailable: {escape(str(exc))})"
         )
     try:
         if session.thread_id:
@@ -581,7 +587,7 @@ def cmd_history(session, args: str):
     try:
         messages = _thread_messages(session, session.memory_id, session.thread_id)
     except Exception as exc:
-        console.print(f"[red]Could not load history:[/red] {exc}")
+        console.print(f"[red]Could not load history:[/red] {escape(str(exc))}")
         return
     if not messages:
         console.print("[dim]No conversation history yet.[/dim]")
@@ -647,7 +653,6 @@ def _print_transcript(
 
 def cmd_conversations(session, args: str):
     """Search saved conversation threads and resume the selected pair."""
-    from rich.markup import escape
 
     console = _con(session)
     agent = session.agent
@@ -774,7 +779,7 @@ def cmd_agents(session, args: str):
     try:
         agents = session.provider.list_memagents() or []
     except Exception as exc:
-        console.print(f"[red]Could not list agents:[/red] {exc}")
+        console.print(f"[red]Could not list agents:[/red] {escape(str(exc))}")
         return
     if not agents:
         console.print("[dim]No saved agents. /agent new makes one.[/dim]")
@@ -818,7 +823,6 @@ def cmd_agents(session, args: str):
 def _switch_agent(session, agent) -> None:
     """Put ``agent`` in this session on a new conversation, set up as a launch
     sets it up, and make it the agent `memorizz` opens next."""
-    from rich.markup import escape
 
     from . import harness_session
 
@@ -926,7 +930,6 @@ def _agent_name_from(prompt: str) -> str:
 
 def _new_agent(session, text: str) -> None:
     """``/agent new [model] [prompt]``: make an agent and switch to it."""
-    from rich.markup import escape
 
     from ..llms.llm_factory import create_llm_provider
     from . import harness_session, ui
@@ -1050,7 +1053,6 @@ def refresh_agent_name(session) -> None:
 
 def cmd_name(session, args: str):
     """Show or set the active agent's name; it is saved with the agent."""
-    from rich.markup import escape
 
     from . import ui
 
@@ -1152,7 +1154,7 @@ def cmd_persona_reset(session, args: str):
     try:
         agent.set_persona(None)
     except Exception as exc:
-        console.print(f"[red]Failed to clear persona:[/red] {exc}")
+        console.print(f"[red]Failed to clear persona:[/red] {escape(str(exc))}")
         return
 
     # Best-effort: drop the saved persona doc and persist the cleared state.
@@ -1200,7 +1202,7 @@ def cmd_tools(session, args: str):
     try:
         tools = manager.list_tools() or []
     except Exception as exc:
-        console.print(f"[red]Could not list tools:[/red] {exc}")
+        console.print(f"[red]Could not list tools:[/red] {escape(str(exc))}")
         return
     if not tools:
         console.print("[dim]No tools registered.[/dim]")
@@ -1292,7 +1294,7 @@ def cmd_ui(session, args: str):
             stderr=subprocess.DEVNULL,
         )
     except Exception as exc:
-        console.print(f"[red]Failed to launch UI:[/red] {exc}")
+        console.print(f"[red]Failed to launch UI:[/red] {escape(str(exc))}")
         return
     session.ui_proc = proc
     console.print(
@@ -1337,7 +1339,9 @@ def _login_ollama(console) -> None:
     try:
         result = subprocess.run(["ollama", "signin"])
     except Exception as exc:  # pragma: no cover - environment dependent
-        console.print(f"[yellow]Could not run 'ollama signin':[/yellow] {exc}")
+        console.print(
+            f"[yellow]Could not run 'ollama signin':[/yellow] {escape(str(exc))}"
+        )
         return
     if result.returncode == 0:
         console.print(
@@ -1415,7 +1419,7 @@ def cmd_login(session, args: str):
     err = cfg.apply_env_updates({key_name: value})
     if err:
         console.print(
-            f"[yellow]Set for this session, but failed to persist:[/yellow] {err}"
+            f"[yellow]Set for this session, but failed to persist:[/yellow] {escape(str(err))}"
         )
     else:
         console.print(f"Saved {key_name} → {cfg.resolve_env_file()}", markup=False)
@@ -1454,7 +1458,6 @@ def cmd_config(session, args: str):
     from dotenv import dotenv_values
 
     provider_type = type(session.provider).__name__ if session.provider else "(none)"
-    from rich.markup import escape
 
     from . import ui
 
@@ -1655,7 +1658,7 @@ def cmd_harnesses(session, args: str):
             rows = harness_session.list_harness_status(session)
             defaults = _harness_defaults(session, rows)
     except Exception as exc:
-        console.print(f"[red]Could not list harnesses:[/red] {exc}")
+        console.print(f"[red]Could not list harnesses:[/red] {escape(str(exc))}")
         return
     if not rows:
         console.print(
@@ -1804,16 +1807,16 @@ def cmd_harness(session, args: str):
         with ui.busy(console, f"Starting {name}…"):
             result = harness_session.apply_harness(session, name, model=model)
     except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]")
         return
     except Exception as exc:
-        console.print(f"[red]Could not attach harness:[/red] {exc}")
+        console.print(f"[red]Could not attach harness:[/red] {escape(str(exc))}")
         return
     if result["harness"] == harness_session.DELEGATE:
         _print_delegate_mode(console, session, result)
         return
     console.print(
-        f"[green]Harness →[/green] {result['harness']}  "
+        f"[green]Harness →[/green] {escape(str(result['harness']))}  "
         "[dim](this session only; /harness off to return to native execution)[/dim]"
     )
     if result["harness"] == "auto":
@@ -1856,17 +1859,19 @@ def _harness_model(session, console, name) -> None:
         try:
             result = harness_session.set_harness_model(session, name)
         except ValueError as exc:
-            console.print(f"[red]{exc}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]")
             return
         console.print(
-            f"[green]Model →[/green] {result['model']} on {result['harness']}"
+            f"[green]Model →[/green] {escape(str(result['model']))} on {escape(str(result['harness']))}"
         )
         return
     try:
         with ui.busy(console, f"Reading {active}'s models…"):
             choices = harness_session.harness_model_choices(session, active)
     except Exception as exc:
-        console.print(f"[red]Could not read {active}'s models:[/red] {exc}")
+        console.print(
+            f"[red]Could not read {active}'s models:[/red] {escape(str(exc))}"
+        )
         return
     models = list(choices.get("models") or [])
     current = harness_session.harness_model_label(session)
@@ -1883,7 +1888,7 @@ def _harness_model(session, console, name) -> None:
             return
         result = harness_session.set_harness_model(session, str(chosen))
         console.print(
-            f"[green]Model →[/green] {result['model']} on {result['harness']}"
+            f"[green]Model →[/green] {escape(str(result['model']))} on {escape(str(result['harness']))}"
         )
         return
     console.print(_harness_model_line(session))
@@ -1951,7 +1956,7 @@ def cmd_compare(session, args: str):
         console.print(str(exc))
         return
     except Exception as exc:
-        console.print(f"[red]Could not read the harness list:[/red] {exc}")
+        console.print(f"[red]Could not read the harness list:[/red] {escape(str(exc))}")
         return
     console.print(
         f"[bold]Comparing[/bold] {' vs '.join(names)} on: {task}\n"
@@ -1971,16 +1976,15 @@ def cmd_compare(session, args: str):
                 **options,
             )
     except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]")
         return
     except Exception as exc:
-        console.print(f"[red]Comparison failed:[/red] {exc}")
+        console.print(f"[red]Comparison failed:[/red] {escape(str(exc))}")
         return
     _print_compare_report(console, report)
 
 
 def _print_compare_report(console, report) -> None:
-    from rich.markup import escape
     from rich.table import Table
 
     table = Table(title=f"Comparison {report['workflow_id']} · {report.get('status')}")
@@ -2028,7 +2032,9 @@ def cmd_sessions(session, args: str):
         console.print(str(exc))
         return
     except Exception as exc:
-        console.print(f"[red]Could not read the harness ledger:[/red] {exc}")
+        console.print(
+            f"[red]Could not read the harness ledger:[/red] {escape(str(exc))}"
+        )
         return
     if not rows:
         what = f"{harness} " if harness else ""
@@ -2038,7 +2044,6 @@ def cmd_sessions(session, args: str):
             "as it runs.[/dim]"
         )
         return
-    from rich.markup import escape
     from rich.table import Table
 
     from . import picker
@@ -2094,7 +2099,6 @@ def cmd_sessions(session, args: str):
 
 def cmd_session(session, args: str):
     """Show one recorded coding-agent session: header and its last turns."""
-    from rich.markup import escape
 
     from . import harness_session
 
@@ -2111,10 +2115,10 @@ def cmd_session(session, args: str):
     try:
         view = harness_session.session_turns(session, parts[0], last=last)
     except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]")
         return
     except Exception as exc:
-        console.print(f"[red]Could not read the session:[/red] {exc}")
+        console.print(f"[red]Could not read the session:[/red] {escape(str(exc))}")
         return
     console.print(
         f"[bold]{view['harness']}[/bold] session [cyan]{view['run_id'][:8]}[/cyan] · "
@@ -2149,7 +2153,6 @@ def cmd_session(session, args: str):
 
 def cmd_update(session, args: str):
     """Check PyPI now and show how to upgrade; never installs anything."""
-    from rich.markup import escape
 
     from .. import __version__
     from . import updates
@@ -2175,7 +2178,6 @@ def cmd_update(session, args: str):
 
 def cmd_menu(session, args: str):
     """Quick actions: the hotkeys and the commands people reach for most."""
-    from rich.markup import escape
     from rich.table import Table
 
     from . import harness_session, ui
@@ -2247,8 +2249,6 @@ def cmd_menu(session, args: str):
 
 
 def cmd_help(session, args: str):
-    from rich.markup import escape
-
     from . import ui
 
     console = _con(session)
@@ -2307,7 +2307,7 @@ def _automation_run_job(console, store, agent, job):
                 f"{ds.get('failed', 0)} failed[/dim]"
             )
     except Exception as exc:
-        console.print(f"[red]Automation failed:[/red] {exc}")
+        console.print(f"[red]Automation failed:[/red] {escape(str(exc))}")
         if run is not None:
             try:
                 store.finish_run(
@@ -2352,7 +2352,7 @@ def cmd_automation(session, args: str):
     try:
         jobs = store.list_jobs(agent_id=agent_id, enabled=None)
     except Exception as exc:
-        console.print(f"[red]Could not read automations:[/red] {exc}")
+        console.print(f"[red]Could not read automations:[/red] {escape(str(exc))}")
         return
 
     if sub == "run":
@@ -2618,6 +2618,6 @@ def dispatch(line: str, session) -> bool:
     try:
         result = cmd.handler(session, args)
     except Exception as exc:
-        console.print(f"[red]/{name} failed:[/red] {exc}")
+        console.print(f"[red]/{name} failed:[/red] {escape(str(exc))}")
         return True
     return result is not False

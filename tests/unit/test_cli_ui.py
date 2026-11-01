@@ -1,6 +1,7 @@
 """Look and feel of the chat: crest animation, status bar, prompt and arrow hotkeys."""
 
 from io import StringIO
+from types import SimpleNamespace
 
 import pytest
 from prompt_toolkit import PromptSession
@@ -254,3 +255,33 @@ def test_picker_rows_can_be_coloured_pieces():
     assert picker._plain(pieces) == "/agents  switch agent"
     assert picker._plain("plain row") == "plain row"
     assert picker._pieces("plain row") == [("", "plain row")]
+
+
+def _typed(*keys):
+    """What the prompt returns for these keystrokes, read as a terminal sends them."""
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    ui.read_modified_enter()
+    with create_pipe_input() as pipe:
+        session = PromptSession(
+            input=pipe,
+            output=DummyOutput(),
+            key_bindings=ui.key_bindings(SimpleNamespace()),
+        )
+        pipe.send_text("".join(keys))
+        return session.prompt()
+
+
+@pytest.mark.parametrize(
+    "new_line",
+    ["\x1b\r", "\x1b[13;2u", "\x1b[13;3u", "\x1b[13;9u", "\x1b[27;9;13~"],
+    ids=["esc-enter", "shift", "option", "cmd", "cmd-modify-other-keys"],
+)
+def test_enter_with_a_modifier_starts_a_new_line(new_line):
+    assert _typed("first", new_line, "second", "\r") == "first\nsecond"
+
+
+def test_plain_enter_still_sends_the_message():
+    assert _typed("just this", "\r") == "just this"

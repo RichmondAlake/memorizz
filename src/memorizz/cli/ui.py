@@ -28,6 +28,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.live import Live
+from rich.markup import escape
 from rich.text import Text
 
 from . import harness_session
@@ -153,6 +154,14 @@ STYLE = Style.from_dict(
 
 FOCUS_REPORTS = ("\x1b[I", "\x1b[O")
 
+# Enter with Shift, Option, Ctrl or Cmd, as terminals report it: the CSI u form
+# and xterm's modifyOtherKeys form.
+MODIFIED_ENTER = tuple(
+    sequence
+    for modifier in (2, 3, 5, 6, 9, 10)
+    for sequence in (f"\x1b[13;{modifier}u", f"\x1b[27;{modifier};13~")
+)
+
 
 def ignore_focus_reports() -> None:
     """Treat terminal focus reports as no-ops.
@@ -169,6 +178,18 @@ def ignore_focus_reports() -> None:
 
     for sequence in FOCUS_REPORTS:
         ANSI_SEQUENCES.setdefault(sequence, Keys.Ignore)
+
+
+def read_modified_enter() -> None:
+    """Read Enter with a modifier as Esc then Enter, which starts a new line.
+
+    Idempotent; the CLI owns the terminal, so changing the shared table is safe.
+    """
+    from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
+    from prompt_toolkit.keys import Keys
+
+    for sequence in MODIFIED_ENTER:
+        ANSI_SEQUENCES[sequence] = (Keys.Escape, Keys.ControlM)
 
 
 @contextmanager
@@ -206,7 +227,7 @@ def busy(console: Console, message: str):
     keys kept from echoing over it. Plain (no spinner) off a terminal."""
     with quiet_keys():
         if console.is_terminal and not console.is_dumb_terminal:
-            with console.status(f"[dim]{message}[/dim]", spinner="dots"):
+            with console.status(f"[dim]{escape(str(message))}[/dim]", spinner="dots"):
                 yield
         else:
             yield
@@ -471,6 +492,11 @@ def key_bindings(
             return handler
 
         bindings.add(key_name, filter=line_is_empty)(_make(command))
+
+    @bindings.add("escape", "enter")
+    def new_line(event: Any) -> None:
+        event.current_buffer.insert_text("\n")
+
     return bindings
 
 
@@ -503,6 +529,7 @@ __all__ = [
     "prompt_fragments",
     "prompt_message",
     "provider_colour",
+    "read_modified_enter",
     "should_animate",
     "toolbar",
     "update_fragment",

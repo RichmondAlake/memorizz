@@ -25,6 +25,7 @@ Constraints:
 import logging
 from typing import Any, Dict, Generator, List, Optional
 
+from ..extras import install_command
 from .llm_provider import LLMProvider, ResponseMetadataMixin
 from .local_chat import LocalChatMixin, chat_prompt
 from .tool_metadata import SchemaPromptToolMetadataMixin
@@ -58,8 +59,8 @@ class MLXLLM(
             from mlx_lm import load
         except ImportError as exc:
             raise ImportError(
-                "mlx-lm is required for the MLX LLM provider. Install it via "
-                "`pip install memorizz[mlx]` on a native arm64 Apple Silicon "
+                "mlx-lm is required for the MLX LLM provider. Install it with "
+                f"`{install_command(['mlx'])}` on a native arm64 Apple Silicon "
                 "Python (Rosetta x86_64 envs cannot install mlx)."
             ) from exc
 

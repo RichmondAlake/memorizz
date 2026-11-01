@@ -17,6 +17,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
+from ...extras import install_command
 from ..security import ui_read_only
 from ..state import _state, templates
 from ..trace_access import current_principal
@@ -63,7 +64,7 @@ async def _run(function, *args, **kwargs):
     except ImportError as exc:
         raise HTTPException(
             503,
-            f'Fine-tuning needs its packages: pip install "memorizz[finetune]" ({exc.name})',
+            f"Fine-tuning needs its packages: {install_command(['finetune'])} ({exc.name})",
         ) from exc
 
 

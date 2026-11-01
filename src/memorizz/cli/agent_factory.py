@@ -504,7 +504,9 @@ def make_browser_control_config(
 # (and loop on, hitting the tool-iteration cap). Memory — conversation history
 # AND knowledge base — is injected into the prompt by MemAgent._build_context, so
 # dropping these for plain chat keeps recall intact while preventing tool loops.
-# Code mode keeps its full tool set.
+# Code mode keeps its full tool set. retrieve_tool_log_entry stays: long tool
+# output is replaced by a pointer to it, so without it the model can't read what
+# it fetched.
 _CHAT_NOISE_TOOLS = (
     "knowledge_base_lookup",
     "entity_memory_lookup",
@@ -513,7 +515,6 @@ _CHAT_NOISE_TOOLS = (
     "list_summary_registry_tool",
     "expand_summary",
     "summarize_conversation",
-    "retrieve_tool_log_entry",
     "list_recent_tool_logs",
 )
 
@@ -650,6 +651,10 @@ def prepare_agent(
             agent.instruction = cfg.MEMORY_ASSISTANT_INSTRUCTION
     except Exception:
         pass
+
+    # 2b. Record what each request sends, for the UI's Context tab. Not saved on
+    # the agent.
+    agent.capture_context_snapshots = True
 
     # 3. Coding tools track the requested mode deterministically.
     agent.with_self_aware(

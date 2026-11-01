@@ -309,7 +309,7 @@
             copy: {
                 refreshText: 'refresh this check',
                 ollamaMissing: 'Run {pull} in a terminal, or {browse}. Then {refresh}.',
-                huggingfaceUnavailable: 'Install the SDK with <code>pip install memorizz[huggingface]</code>, then {refresh}.',
+                huggingfaceUnavailable: 'Install the SDK with <code>' + {{ install_command(['huggingface'])|tojson }} + '</code>, then {refresh}.',
                 huggingfaceMissing: 'It will be downloaded the first time the agent loads (a few hundred MB to several GB). You can pre-download with {download}, or {card}. Then {refresh}.',
             },
             manage: {

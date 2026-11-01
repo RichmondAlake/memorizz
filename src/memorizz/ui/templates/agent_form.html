@@ -277,7 +277,7 @@
                 }
             } else if (provider === 'mlx') {
                 hint = 'In-process MLX requires memorizz to run on a native arm64 '
-                    + 'Apple Silicon Python — <code>pip install memorizz[mlx]</code> '
+                    + 'Apple Silicon Python — <code>' + {{ install_command(['mlx'])|tojson }} + '</code> '
                     + 'will fail under Rosetta. If your memorizz env is x86_64, use '
                     + '<strong>Local OpenAI-compatible</strong> with an '
                     + '<code>mlx-community/*</code> model instead — it runs MLX in a '
@@ -422,7 +422,7 @@
                 warningPrefix: 'Pre-flight: ',
                 refreshText: 'refresh',
                 ollamaMissing: 'Saving this agent is fine, but the first chat will fail with a 404. Run {pull}, pull from <a href="/settings#local-models">Settings → Local models</a>, or {browse}. Then {refresh}.',
-                huggingfaceUnavailable: 'Install it with <code>pip install memorizz[huggingface]</code>, then {refresh}.',
+                huggingfaceUnavailable: 'Install it with <code>' + {{ install_command(['huggingface'])|tojson }} + '</code>, then {refresh}.',
                 huggingfaceMissing: 'First chat will trigger a multi-GB download and may stall. Pre-download with {download}, pull from <a href="/settings#local-models">Settings → Local models</a>, or {card}. Then {refresh}.',
             },
         });

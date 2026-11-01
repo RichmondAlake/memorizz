@@ -28,8 +28,9 @@ PAGES = {
         "refreshAttr: 'data-local-refresh'",
         "refreshText: 'refresh this check'",
         "ollamaMissing: 'Run {pull} in a terminal, or {browse}. Then {refresh}.'",
-        "huggingfaceUnavailable: 'Install the SDK with <code>pip install "
-        "memorizz[huggingface]</code>, then {refresh}.'",
+        "huggingfaceUnavailable: 'Install the SDK with <code>' + "
+        "{{ install_command(['huggingface'])|tojson }} + "
+        "'</code>, then {refresh}.'",
         "huggingfaceMissing: 'It will be downloaded the first time the agent loads "
         "(a few hundred MB to several GB). You can pre-download with {download}, "
         "or {card}. Then {refresh}.'",
@@ -46,8 +47,9 @@ PAGES = {
         "ollamaDownRefreshText: 'refresh this check'",
         "ollamaMissing: 'Sending a message will fail with a 404. Run {pull}, click "
         "the download icon below, or {browse}. Then {refresh}.'",
-        "huggingfaceUnavailable: 'Install it with <code>pip install "
-        "memorizz[huggingface]</code>, then {refresh}.'",
+        "huggingfaceUnavailable: 'Install it with <code>' + "
+        "{{ install_command(['huggingface'])|tojson }} + "
+        "'</code>, then {refresh}.'",
         "huggingfaceMissing: 'Sending a message will trigger a download (a few "
         "hundred MB to several GB) and may stall. Click the download icon below, "
         "or pre-download with {download}, or {card}. Then {refresh}.'",
@@ -64,8 +66,9 @@ PAGES = {
         "ollamaMissing: 'Saving this agent is fine, but the first chat will fail "
         'with a 404. Run {pull}, pull from <a href="/settings#local-models">'
         "Settings → Local models</a>, or {browse}. Then {refresh}.'",
-        "huggingfaceUnavailable: 'Install it with <code>pip install "
-        "memorizz[huggingface]</code>, then {refresh}.'",
+        "huggingfaceUnavailable: 'Install it with <code>' + "
+        "{{ install_command(['huggingface'])|tojson }} + "
+        "'</code>, then {refresh}.'",
         "huggingfaceMissing: 'First chat will trigger a multi-GB download and may "
         "stall. Pre-download with {download}, pull from "
         '<a href="/settings#local-models">Settings → Local models</a>, or {card}. '

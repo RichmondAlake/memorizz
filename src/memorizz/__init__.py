@@ -168,8 +168,11 @@ def __getattr__(name):
         try:
             from .memory_provider.mongodb.provider import MongoDBConfig
         except ImportError as exc:
+            from .extras import install_command
+
             raise ImportError(
-                'MongoDB support requires pymongo. Install with: pip install "memorizz[mongodb]"'
+                "MongoDB support requires pymongo. Install with: "
+                + install_command(["mongodb"])
             ) from exc
         return MongoDBConfig
 

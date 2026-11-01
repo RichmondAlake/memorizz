@@ -38,6 +38,8 @@ import os
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
+from ...extras import install_command
+
 logger = logging.getLogger(__name__)
 
 
@@ -97,7 +99,7 @@ def extract_plaintext(raw: bytes) -> str:
 def extract_pdf(raw: bytes) -> str:
     """Extract text from a PDF using ``pypdf``.
 
-    Optional dependency: ``pip install 'memorizz[ingest-pdf]'``. Raises
+    Optional dependency: the ``ingest-pdf`` extra. Raises
     :class:`MissingExtractorDependency` if pypdf isn't importable.
     """
     try:
@@ -105,7 +107,7 @@ def extract_pdf(raw: bytes) -> str:
     except ImportError as exc:  # pragma: no cover - environment-dependent
         raise MissingExtractorDependency(
             "PDF ingestion requires `pypdf`. Install it with: "
-            "pip install 'memorizz[ingest-pdf]'"
+            f"{install_command(['ingest-pdf'])}"
         ) from exc
 
     try:

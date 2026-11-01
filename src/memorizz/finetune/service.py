@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ..enums.memory_type import MemoryType
+from ..extras import install_command
 from .bases import base_models, default_base, describe_format, resolve_base
 from .formats import default_format, render, to_jsonl, unsloth_bundle
 from .models import (
@@ -152,7 +153,7 @@ def environment() -> Dict[str, Any]:
         else {"available": False, "reason": "PyTorch is not installed"}
     )
     info["ready"] = not info["missing"]
-    info["install"] = 'pip install "memorizz[finetune]"'
+    info["install"] = install_command(["finetune"])
     return info
 
 

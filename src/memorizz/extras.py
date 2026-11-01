@@ -253,6 +253,17 @@ def uv_requirement(receipt: Path) -> Dict[str, Any]:
     }
 
 
+def tool_requirement(extras: Iterable[str], specifier: str = "") -> str:
+    """The requirement for a uv tool command: ``memorizz[ mcp,ui]==1.2.3``.
+
+    The space is deliberate and valid. Printed through Rich without escaping,
+    ``[mcp,ui]`` would be read as a style tag and deleted, and the command left
+    would reinstall the tool with no extras, which removes them.
+    """
+    names = ",".join(dict.fromkeys(extras))
+    return f"memorizz{f'[ {names}]' if names else ''}{specifier}"
+
+
 def _own_uv_receipt() -> Optional[Path]:
     """This install's uv tool receipt, or None when it isn't the person's own
     uv tool. The npm launcher's runtime has one, but isn't theirs to reinstall."""
@@ -274,11 +285,11 @@ def install_command(extras: Iterable[str]) -> str:
         names = ",".join(dict.fromkeys(extras))
         return f"pip install 'memorizz[{names}]'"
     requirement = uv_requirement(receipt)
-    names = ",".join(dict.fromkeys([*(requirement.get("extras") or []), *extras]))
     args = ["uv", "tool", "install", "--force", "--refresh-package", "memorizz"]
     if requirement.get("python"):
         args += ["--python", str(requirement["python"])]
-    args.append(f"memorizz[{names}]{requirement.get('specifier') or ''}")
+    wanted = [*(requirement.get("extras") or []), *extras]
+    args.append(tool_requirement(wanted, requirement.get("specifier") or ""))
     return shlex.join(args)
 
 
@@ -392,6 +403,7 @@ __all__ = [
     "install_command",
     "missing_extra_message",
     "missing_module",
+    "tool_requirement",
     "uv_command",
     "uv_requirement",
 ]

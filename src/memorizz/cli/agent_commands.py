@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import typer
+from rich.markup import escape
 
 from . import config as cfg
 
@@ -142,7 +143,7 @@ def _print_payload(payload: Dict[str, Any], *, raw_json: bool) -> None:
                 "[yellow]No LLM configured.[/yellow] Configure one before running the agent."
             )
         for warning in payload.get("warnings") or []:
-            console.print(f"[yellow]{warning}[/yellow]")
+            console.print(f"[yellow]{escape(str(warning))}[/yellow]")
         return
     console.print_json(data=payload)
 

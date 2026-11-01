@@ -289,6 +289,7 @@ def run_repl(session) -> None:
 
     cfg.ensure_home()
     ui.ignore_focus_reports()
+    ui.read_modified_enter()
     ptk = ui.FramedPromptSession(
         history=SafeFileHistory(str(cfg.history_file())),
         completer=SlashCompleter(commands.command_completions()),

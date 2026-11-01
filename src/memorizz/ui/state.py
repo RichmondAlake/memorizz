@@ -20,6 +20,7 @@ from typing import Any, Dict, Iterator, Optional
 from fastapi.templating import Jinja2Templates
 
 from .. import __version__
+from ..extras import install_command
 
 # Paths
 UI_DIR = Path(__file__).parent
@@ -139,6 +140,7 @@ templates = CompatibleJinja2Templates(directory=str(TEMPLATES_DIR))
 
 # The running version, shown under the name in the sidebar.
 templates.env.globals["memorizz_version"] = __version__
+templates.env.globals["install_command"] = install_command
 
 
 def _connection_header() -> Dict[str, Any]:

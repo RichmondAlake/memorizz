@@ -25,6 +25,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from ..extras import install_command
+
 DATASET = "terminal-bench/terminal-bench@4.0.0"
 TASK_ORG = "terminal-bench"
 AGENTS = {
@@ -129,7 +131,7 @@ def environment_status(memory_root: Optional[str] = None) -> Dict[str, Any]:
             "detail": (
                 f"Harbor {harbor_version}"
                 if harbor_ok
-                else "Install the benchmark extra: pip install 'memorizz[terminal-bench]'"
+                else f"Install the benchmark extra: {install_command(['terminal-bench'])}"
             ),
         },
         "docker": docker,

@@ -12,6 +12,7 @@ import sys
 from typing import Optional, Tuple
 
 import typer
+from rich.markup import escape
 
 desktop_app = typer.Typer(
     help="Let agents open, read and operate the apps on this Mac (MCP).",
@@ -106,7 +107,7 @@ def doctor(
     try:
         status = MacDesktop().permissions(prompt=ask)
     except DesktopError as exc:
-        console.print(f"[red]{exc}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1)
     if not _report(console, status):
         raise typer.Exit(1)
@@ -222,7 +223,6 @@ def chat_command(session, args: str) -> None:
     ``on`` attaches the desktop tools to the running agent and saves them
     with it, so no restart is needed. Each action asks in the chat first.
     """
-    from rich.markup import escape
 
     from . import connect
 

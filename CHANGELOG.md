@@ -2,12 +2,32 @@
 
 ## Unreleased
 
+### Added
+
+- A new line in the chat prompt: Esc then Enter, or Shift, Option or Cmd+Enter
+  where the terminal passes them on. Before, the prompt had no way to start one.
+  Many terminals keep Cmd+Enter for themselves; the
+  [CLI guide](docs/getting-started/cli.md) has the setting for Ghostty and cmux.
+- CLI chats save what each request sends to the model, so the UI's Context tab
+  can show them, as Playground turns already did.
+
 ### Fixed
 
 - **Importance no longer outranks a better match over a small gap.** One point
   on a ten-point rating took the whole importance range, so 0.55 against 0.65
   scored as 0 against 1. Ratings under half the scale apart now share only part
   of that range; wider gaps rank as before.
+- Every missing-package message now shows how to add the extra to this install.
+  About 20 of them, for LLM providers, embeddings, memory stores and fine-tuning,
+  still said `pip install`, which misses a uv tool.
+- **An install hint can't lose its extras in the terminal.** Rich read
+  `[mcp,ui]` as a style tag and deleted it wherever an error was printed
+  unescaped, and the command left would have removed those extras. These commands
+  now print as `memorizz[ mcp,ui]`; the space is deliberate and valid. Errors in
+  the chat also keep square brackets now.
+- A CLI chat could fail on `retrieve_tool_log_entry`: long tool output points the
+  model at that tool, but chat mode removed it, so the model couldn't read what
+  it had fetched and fetched it again.
 
 ## 0.17.18 — 2026-11-01
 

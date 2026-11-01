@@ -5,7 +5,7 @@
 """HuggingFace model-cache endpoints (pull / delete / list installed).
 
 Extracted verbatim from ui/app.py — behavior is unchanged. These use
-``huggingface_hub`` (an optional dependency: ``pip install memorizz[huggingface]``)
+``huggingface_hub`` (an optional dependency: the ``huggingface`` extra)
 and degrade gracefully when the SDK isn't installed in the current env.
 """
 
@@ -14,6 +14,8 @@ from typing import List
 from fastapi import APIRouter, Form
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
+
+from ...extras import install_command
 
 router = APIRouter(prefix="/api/huggingface", tags=["huggingface"])
 
@@ -101,7 +103,7 @@ async def huggingface_installed():
                 "available": False,
                 "error": (
                     "huggingface_hub not installed — run "
-                    "`pip install memorizz[huggingface]` to enable cache scanning."
+                    f"`{install_command(['huggingface'])}` to enable cache scanning."
                 ),
                 "detail": str(exc),
             }

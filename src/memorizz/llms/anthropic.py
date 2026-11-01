@@ -9,6 +9,7 @@ import os
 from types import SimpleNamespace
 from typing import Any, Dict, Generator, List, Optional
 
+from ..extras import install_command
 from .llm_provider import LLMProvider, ResponseMetadataMixin
 from .tool_metadata import JsonPromptToolMetadataMixin
 
@@ -94,7 +95,7 @@ class Anthropic(JsonPromptToolMetadataMixin, ResponseMetadataMixin, LLMProvider)
         except ImportError:
             raise ImportError(
                 "The anthropic package is required for the Anthropic provider. "
-                'Install it with: pip install "memorizz[anthropic]"'
+                f"Install it with: {install_command(['anthropic'])}"
             )
 
         if api_key is None:
