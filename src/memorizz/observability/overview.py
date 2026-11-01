@@ -18,6 +18,7 @@ from .normalization import timestamp
 
 # Window key -> (span, bucket size) for the activity series.
 WINDOWS = {
+    "1h": (timedelta(hours=1), timedelta(minutes=5)),
     "24h": (timedelta(hours=24), timedelta(hours=1)),
     "7d": (timedelta(days=7), timedelta(hours=6)),
     "30d": (timedelta(days=30), timedelta(days=1)),

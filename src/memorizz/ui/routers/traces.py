@@ -37,6 +37,8 @@ from ...observability.normalization import (
     query_trace_events,
     select_trace_events,
 )
+from ...observability.normalization import timestamp as normalized_timestamp
+from ...observability.overview import resolve_window
 from ...observability.pricing import DEFAULT_PRICING
 from ...observability.tags import (
     format_tag_filter,
@@ -70,6 +72,9 @@ from ..trace_access import current_principal, scoped_trace_filters
 from .trace_tools import trace_capabilities
 
 logger = logging.getLogger(__name__)
+
+# The ranges an agent's Failures panel offers.
+FAILURE_RANGES = {"1h": "1 hour", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
 
 router = APIRouter(tags=["traces"])
 
@@ -170,7 +175,7 @@ def _selection_urls(request, **selection):
     selection.update(
         {
             k: request.query_params[k]
-            for k in ("start_time", "end_time", "run_id")
+            for k in ("start_time", "end_time", "run_id", "window")
             if k in request.query_params
         }
     )
@@ -731,12 +736,15 @@ async def traces_page(
             "selected_thread_memory_id": selected_thread_memory_id,
             "selected_thread_row": selected_thread_row,
             "trace_events": display_trace_events,
-            "trace_timeline": observability_view.trace_timeline(
-                display_trace_events,
-                agent_label=_timeline_agent_label(selected_agent),
-                content_event_ids=content_event_ids,
-                previews_indexed=_previews_indexed(),
-                outcomes=turn_outcomes,
+            "trace_timeline": _timeline_with_range(
+                observability_view.trace_timeline(
+                    display_trace_events,
+                    agent_label=_timeline_agent_label(selected_agent),
+                    content_event_ids=content_event_ids,
+                    previews_indexed=_previews_indexed(),
+                    outcomes=turn_outcomes,
+                ),
+                request,
             ),
             "tag_filter": format_tag_filter(tag_filter),
             "clear_tag_url": "/traces?"
@@ -779,6 +787,38 @@ async def traces_page(
             "error": error,
         },
     )
+
+
+def _timeline_with_range(timeline: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    """Narrow a timeline's failures to a range and offer the others. The
+    timeline stays whole, so a failure's step is always there to jump to."""
+    window = request.query_params.get("window", "")
+    if window not in FAILURE_RANGES:
+        window = ""
+    kept = [
+        (key, value) for key, value in request.query_params.items() if key != "window"
+    ]
+    timeline["failure_ranges"] = [
+        {
+            "label": label,
+            "current": key == window,
+            "href": "/traces?"
+            + urlencode(kept + ([("window", key)] if key else []))
+            + "#trace-failures",
+        }
+        for key, label in (("", "All loaded"), *FAILURE_RANGES.items())
+    ]
+    timeline["failure_phrase"] = ""
+    if window:
+        span = resolve_window(window)
+        rows = []
+        for row in timeline["rows"]:
+            stamp = normalized_timestamp(row["timestamp"])
+            if stamp and span["start"] <= datetime.fromisoformat(stamp) <= span["end"]:
+                rows.append(row)
+        timeline["failures"] = observability_view.failure_summary(rows)
+        timeline["failure_phrase"] = observability_view.window_phrase(window)
+    return timeline
 
 
 def _timeline_agent_label(agent: Any) -> str:

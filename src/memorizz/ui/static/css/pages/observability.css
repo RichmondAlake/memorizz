@@ -1501,7 +1501,7 @@ body.theme-light #trace-timeline {
     }
 }
 
-/* Failures come first. Amber when the agent carried on, red when a turn stopped. */
+/* Failures come first. The count and its label carry the severity. */
 .obs-failures {
     margin: 16px 0;
     padding: 12px 16px;
@@ -1509,11 +1509,7 @@ body.theme-light #trace-timeline {
     border-radius: 10px;
     scroll-margin-top: 72px;
 }
-.obs-failures.has-failures {
-    padding: 18px 20px;
-    border-left: 3px solid var(--accent-warning);
-}
-.obs-failures.has-stopped { border-left-color: var(--accent-danger); }
+.obs-failures.has-failures { padding: 18px 20px; }
 .obs-failures-clear { margin: 0; color: var(--text-secondary); }
 .obs-failures-all { display: inline-block; margin-top: 10px; font-size: 13px; }
 .obs-failures-head {
@@ -1562,3 +1558,19 @@ a.trace-analysis-stat--link { color: inherit; text-decoration: none; }
 a.trace-analysis-stat--link:hover,
 a.trace-analysis-stat--link:focus-visible { border-color: var(--text-muted); }
 .trace-waterfall-failed { color: var(--accent-danger); font-weight: 600; }
+
+/* Failures across agents, and the rules that watch them. */
+.obs-fleet-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: 16px 0; }
+.obs-failures-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; }
+.obs-failure-ranges { font-size: 13px; }
+.obs-alert-rules { display: grid; margin: 12px 0; padding: 0; list-style: none; }
+.obs-alert-rule { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--border-color); }
+.obs-alert-rule p { margin: 4px 0 0; }
+.obs-alert-actions { display: flex; gap: 8px; }
+.is-bad { color: var(--accent-danger); }
+.obs-alert-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin-top: 16px; }
+.obs-alert-form .form-group { margin: 0; }
+.obs-alert-form #alert-threshold { width: 96px; }
+.obs-alert-form #alert-agent { max-width: 220px; }
+.obs-alert-url { flex: 1 1 280px; }
+.obs-alert-url input { width: 100%; }

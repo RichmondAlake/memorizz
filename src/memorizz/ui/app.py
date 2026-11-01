@@ -841,7 +841,18 @@ async def lifespan(app: FastAPI):
         if getattr(app.state, "announce_startup", False):
             _announce_startup_connection(error)
 
+    # Failure alerts are checked here, so they reach people who aren't looking.
+    from .failure_alerts import watch as watch_failure_alerts
+
+    failure_alerts_stop = threading.Event()
+    threading.Thread(
+        target=watch_failure_alerts,
+        args=(failure_alerts_stop,),
+        name="memorizz-failure-alerts",
+        daemon=True,
+    ).start()
     yield
+    failure_alerts_stop.set()
 
     # Stop WhatsApp worker on shutdown
     if _state.get("whatsapp_worker_stop_event"):
@@ -1088,6 +1099,11 @@ def create_app(
     app.include_router(huggingface_router)
     app.include_router(oracle_docker_router)
     app.include_router(agents_api_router)
+    from .failure_alerts import router as failure_alerts_router
+    from .routers.failures import router as failures_router
+
+    app.include_router(failures_router)
+    app.include_router(failure_alerts_router)
     app.include_router(traces_router)
     from .routers.memory_history import router as memory_history_router
 

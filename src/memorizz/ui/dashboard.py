@@ -502,6 +502,9 @@ def build_dashboard_context(
     budget = budget_attention(request, now=now)
     if budget:
         overview["attention"].insert(0, budget)
+    from .failure_alerts import failure_attention
+
+    overview["attention"][:0] = failure_attention()
     link_attention(overview["attention"], context["agent_names"])
     return context
 

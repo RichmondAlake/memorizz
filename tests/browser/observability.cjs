@@ -42,6 +42,12 @@ const {chromium} = require(process.env.MEMORIZZ_PLAYWRIGHT_MODULE || 'playwright
         await page.locator('a.trace-analysis-stat--link[href="#trace-timeline"]').click();
         assert.equal(new URL(page.url()).hash, '#trace-timeline');
         assert(await page.locator('.trace-turn-picker select').count());
+        // Failures across agents is a tab, with a range and a copy to take away.
+        const fromTraces = page.url();
+        await page.locator('#trace-failures-link').click();
+        await page.locator('#fleet-title').waitFor();
+        assert(await page.locator('.obs-fleet-tools .range-picker').count());
+        await page.goto(fromTraces);
         await page.locator('#trace-category').selectOption('delivery');
         assert(await page.locator('[data-waterfall-kind="output_contract"]:visible').count());
         await page.locator('#trace-category').selectOption('all');

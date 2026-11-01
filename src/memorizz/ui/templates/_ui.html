@@ -48,6 +48,7 @@
 {% set urls = urls or {} %}
 {{ page_tabs([
     (urls.get('traces') or '/traces', 'Traces', 'traces', 'trace-traces-link'),
+    ('/traces/failures', 'Failures', 'failures', 'trace-failures-link'),
     (urls.get('health') or '/traces/health', 'Health', 'health', 'trace-health-link'),
     (urls.get('compare') or '/traces/compare', 'Compare traces', 'compare', 'trace-compare-link'),
     (urls.get('usage') or '/traces/usage', 'Usage & cost', 'usage', 'trace-usage-link'),

@@ -406,6 +406,89 @@ def failure_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+WINDOW_PHRASES = {
+    "1h": "the last hour",
+    "24h": "the last 24 hours",
+    "7d": "the last 7 days",
+    "30d": "the last 30 days",
+    "90d": "the last 90 days",
+}
+
+
+def window_phrase(window: str) -> str:
+    return WINDOW_PHRASES.get(window, "this range")
+
+
+def fleet_failures(
+    events: Iterable[Mapping[str, Any]],
+    names: Optional[Mapping[str, str]] = None,
+) -> Dict[str, Any]:
+    """Failures across agents: the worst agent first, and one failure as one
+    line however many agents hit it. Names, codes and counts only, so it can
+    leave the process. Each agent is summarised the way its own page does."""
+    names = names or {}
+    by_agent: Dict[str, List[Mapping[str, Any]]] = {}
+    for event in events:
+        by_agent.setdefault(str(event.get("agent_id") or ""), []).append(event)
+    agents: List[Dict[str, Any]] = []
+    merged: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for agent_id, agent_events in by_agent.items():
+        failures = trace_timeline(agent_events)["failures"]
+        if not failures["total"]:
+            continue
+        top = failures["groups"][0]
+        last = max(
+            (group["last_date"], group["last_clock"]) for group in failures["groups"]
+        )
+        agents.append(
+            {
+                "agent_id": agent_id,
+                "name": names.get(agent_id) or agent_id or "Unknown agent",
+                "total": failures["total"],
+                "turns": failures["turns"],
+                "stopped": failures["stopped"],
+                "top": {key: top[key] for key in ("name", "code", "why", "count")},
+                "last_date": last[0],
+                "last_clock": last[1],
+            }
+        )
+        for group in failures["groups"]:
+            line = merged.setdefault(
+                (group["name"], group["code"]),
+                {
+                    "name": group["name"],
+                    "code": group["code"],
+                    "why": group["why"],
+                    "count": 0,
+                    "turns": 0,
+                    "stopped": False,
+                    "agents": [],
+                    "last_date": "",
+                    "last_clock": "",
+                },
+            )
+            line["count"] += group["count"]
+            line["turns"] += len(group["turns"])
+            line["stopped"] = line["stopped"] or group["stopped"]
+            line["agents"].append(agent_id)
+            line["last_date"], line["last_clock"] = max(
+                (line["last_date"], line["last_clock"]),
+                (group["last_date"], group["last_clock"]),
+            )
+    agents.sort(key=lambda row: (-row["stopped"], -row["total"], row["agent_id"]))
+    return {
+        "total": sum(row["total"] for row in agents),
+        "turns": sum(row["turns"] for row in agents),
+        "stopped": sum(row["stopped"] for row in agents),
+        "agents_failing": len(agents),
+        "agents_seen": len([agent_id for agent_id in by_agent if agent_id]),
+        "agents": agents,
+        "groups": sorted(
+            merged.values(), key=lambda row: (not row["stopped"], -row["count"])
+        ),
+    }
+
+
 def _turn_story(rows: List[Dict[str, Any]], result: Mapping[str, Any]) -> str:
     """What a turn that didn't finish had done before it stopped."""
     turn = result.get("turn_id")

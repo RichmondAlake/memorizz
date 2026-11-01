@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Added
+
+- **Failures across agents.** A new Failures tab in Observability lists what
+  failed in a time range, from the last hour to 90 days or a custom range: agents
+  worst first, and one line per failure however many agents hit it. Agents that
+  stopped a turn come before agents that carried on. Download it as CSV, or read
+  `/traces/failures.json`. An account limited to one application or user sees
+  only that scope. Guide: [Failures and alerts](docs/guides/failures-and-alerts.md).
+- **Failure alerts.** Admins can set a limit on failures, or on turns that stopped,
+  in the last hour, 24 hours or 7 days, for one agent or any agent. A rule that
+  fires shows on the Overview, and a webhook gets one message when it fires and
+  one when it clears, with a retry if delivery fails. Messages hold names, codes
+  and counts, never conversation content. Webhooks must be public https addresses,
+  and the address is shown only as its host. Rules are checked while the MemoRizz
+  UI is running.
+- An agent's Failures panel has its own time range, and the Overview's range
+  picker has a last-hour option.
+
+### Changed
+
+- The Failures panel no longer has a coloured edge.
+
 ### Fixed
 
 - **A CLI chat can save what you tell it.** Chat mode removed

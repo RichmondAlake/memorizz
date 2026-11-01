@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}Failures - Memorizz{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/observability.css?v=5">{% endblock %}
+{% block content %}
+{% from '_ui.html' import page_header, observability_tabs %}
+{% from '_run_health.html' import range_picker with context %}
+{{ page_header('Failures', 'What failed across your agents, whether the turn survived, and who to look at first.', 'Operations', nav=observability_tabs('failures')) }}
+<div class="obs-fleet-tools">
+    {{ range_picker('/traces/failures', window, windows, span) }}
+    {% if not deferred %}<a class="btn btn-sm" href="/traces/failures.csv?{{ {'window': window, 'start': request.query_params.get('start', ''), 'end': request.query_params.get('end', '')}|urlencode }}">Download CSV</a>{% endif %}
+</div>
+
+{% if deferred %}
+<div class="obs-failures">
+    <p class="obs-failures-clear">This store is read on request, so failures load when you ask.</p>
+    <a class="btn btn-sm" href="/traces/failures?{{ {'window': window, 'load': 1}|urlencode }}">Load failures</a>
+</div>
+{% else %}
+<section class="obs-failures{% if fleet.total %} has-failures{% endif %}" aria-labelledby="fleet-title">
+    {% if fleet.total %}
+    <header class="obs-failures-head">
+        <div>
+            <h2 id="fleet-title">{{ fleet.total }} failure{{ '' if fleet.total == 1 else 's' }} on {{ fleet.agents_failing }} of {{ fleet.agents_seen }} agent{{ '' if fleet.agents_seen == 1 else 's' }}</h2>
+            <p>{% if fleet.stopped %}{{ fleet.stopped }} turn{{ ' was' if fleet.stopped == 1 else 's were' }} stopped or did not finish in {{ phrase }}.{% else %}Every turn finished anyway in {{ phrase }}.{% endif %}</p>
+        </div>
+    </header>
+    {% else %}
+    <p class="obs-failures-clear" id="fleet-title">No failures on {{ fleet.agents_seen }} agent{{ '' if fleet.agents_seen == 1 else 's' }} in {{ phrase }}.</p>
+    {% endif %}
+    {% if truncated %}<p class="obs-failure-meta">Not every record in this range was read, so these counts may be low.</p>{% endif %}
+</section>
+
+{% if fleet.agents %}
+<div class="detail-section observability-section">
+    <h2>Agents</h2>
+    <div class="table-scroll">
+    <table class="traces-agents-table obs-table">
+        <thead><tr><th>Agent</th><th class="num">Failures</th><th class="num">Turns</th><th class="num">Stopped</th><th>Most often</th><th>Last</th></tr></thead>
+        <tbody>
+            {% for agent in fleet.agents %}
+            <tr>
+                <td><a href="/traces?{{ {'agent_id': agent.agent_id, 'window': window if window != 'custom' else ''}|urlencode }}#trace-failures">{{ agent.name }}</a></td>
+                <td class="num">{{ agent.total }}</td>
+                <td class="num">{{ agent.turns }}</td>
+                <td class="num"><span class="{{ 'is-bad' if agent.stopped else '' }}">{{ agent.stopped }}</span></td>
+                <td>{{ agent.top.name }} <small>{{ agent.top.code|replace('_', ' ') }}</small></td>
+                <td>{{ agent.last_date }} {{ agent.last_clock }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+<div class="detail-section observability-section">
+    <h2>What is failing</h2>
+    <ul class="obs-failure-list">
+        {% for group in fleet.groups %}
+        <li class="obs-failure{% if group.stopped %} is-stopped{% endif %}">
+            <div class="obs-failure-what">
+                <strong>{{ group.name }}</strong>
+                <span class="obs-failure-count">{{ group.count }}&times;</span>
+                <span class="obs-failure-outcome">{{ group.turns }} turn{{ '' if group.turns == 1 else 's' }}, {{ group.agents|length }} agent{{ '' if group.agents|length == 1 else 's' }}{% if group.stopped %}, stopped a turn{% endif %}</span>
+            </div>
+            <p class="obs-failure-why">{{ group.why or group.code|replace('_', ' ') }}</p>
+        </li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
+{% endif %}
+
+{% if rules is not none %}
+<div class="detail-section observability-section" id="alerts">
+    <h2>Alerts</h2>
+    <p class="obs-lede">Rules are checked every minute while the MemoRizz UI is running. A rule that crosses its limit shows on the Overview, and with a webhook it sends a message when it fires and when it clears. Messages hold names, codes and counts, never conversation content.</p>
+    {% if alert_notice %}<p class="form-success" role="status">{{ alert_notice }}</p>{% endif %}
+    {% if alert_error %}<p class="error-message" role="alert">{{ alert_error }}</p>{% endif %}
+    {% if rules %}
+    <ul class="obs-alert-rules">
+        {% for rule in rules %}
+        <li class="obs-alert-rule{% if rule.firing %} is-firing{% endif %}">
+            <div>
+                <strong>{{ rule.threshold }} or more {{ 'stopped turns' if rule.stopped_only else 'failures' }} in {{ rule.window_phrase }}, on {{ rule.agent }}</strong>
+                <p class="obs-failure-meta">
+                    {% if rule.firing %}<span class="is-bad">Firing</span>: {{ rule.count }} now.{% elif rule.checked_at %}Under the limit: {{ rule.count }} now.{% else %}Not checked yet.{% endif %}
+                    {% if rule.webhook_host %}Sends to {{ rule.webhook_host }}.{% else %}Shows on the Overview only.{% endif %}
+                </p>
+                {% if rule.delivery_error %}<p class="error-message">{{ rule.delivery_error }}. It will try again at the next check.</p>{% endif %}
+            </div>
+            {% if can_edit_rules %}
+            <div class="obs-alert-actions">
+                {% if rule.webhook_host %}<form method="post" action="/traces/failures/alerts/{{ rule.id }}/test"><button class="btn btn-sm" type="submit">Send a test</button></form>{% endif %}
+                <form method="post" action="/traces/failures/alerts/{{ rule.id }}/delete"><button class="btn btn-sm" type="submit">Remove</button></form>
+            </div>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% elif not can_edit_rules %}
+    <p class="obs-failures-clear">No rules yet. An admin can add one here.</p>
+    {% endif %}
+    {% if can_edit_rules %}
+    <form method="post" action="/traces/failures/alerts" class="obs-alert-form">
+        <div class="form-group"><label for="alert-threshold">Alert at</label><input id="alert-threshold" name="threshold" type="number" min="1" max="1000000" value="5" required></div>
+        <div class="form-group"><label for="alert-kind">Count</label><select id="alert-kind" name="stopped_only"><option value="">Failures</option><option value="on">Turns that stopped</option></select></div>
+        <div class="form-group"><label for="alert-window">In</label><select id="alert-window" name="window">{% for key, label in alert_windows %}<option value="{{ key }}"{% if key == '1h' %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+        <div class="form-group"><label for="alert-agent">Agent</label><select id="alert-agent" name="agent_id"><option value="">Any agent</option>{% for agent_id, name in agent_choices %}<option value="{{ agent_id }}">{{ name }}</option>{% endfor %}</select></div>
+        <div class="form-group obs-alert-url"><label for="alert-webhook">Webhook</label><input id="alert-webhook" name="webhook_url" type="url" placeholder="https://hooks.slack.com/services/…" autocomplete="off"></div>
+        <button class="btn btn-primary" type="submit">Add rule</button>
+    </form>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}

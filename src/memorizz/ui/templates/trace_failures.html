@@ -3,15 +3,21 @@
     error text itself stays behind the same audited reveal as the timeline. -#}
 {% set failures = (trace_timeline or {}).get('failures') %}
 {% set can_reveal_failure = trace_permissions and trace_permissions['trace.reveal'] and trace_content_mode != 'metadata' %}
+{% set during = (' in ' ~ trace_timeline.failure_phrase) if trace_timeline.failure_phrase else '' %}
+{% macro failure_ranges() -%}
+<nav class="segmented obs-failure-ranges" aria-label="Failures from">
+    {% for range in trace_timeline.failure_ranges or [] %}<a class="segmented-item" href="{{ range.href }}"{% if range.current %} aria-current="page"{% endif %}>{{ range.label }}</a>{% endfor %}
+</nav>
+{%- endmacro %}
 {% if failures and (trace_timeline.rows or selected_root_trace_id) %}
 <section class="obs-failures{% if failures.total %} has-failures{% if failures.stopped %} has-stopped{% endif %}{% endif %}" id="trace-failures" aria-labelledby="trace-failures-title">
     {% if failures.total %}
     <header class="obs-failures-head">
         <div>
-            <h2 id="trace-failures-title">{{ failures.total }} failure{{ '' if failures.total == 1 else 's' }} in {{ failures.turns }} turn{{ '' if failures.turns == 1 else 's' }}</h2>
+            <h2 id="trace-failures-title">{{ failures.total }} failure{{ '' if failures.total == 1 else 's' }} in {{ failures.turns }} turn{{ '' if failures.turns == 1 else 's' }}{{ during }}</h2>
             <p>{% if failures.stopped %}{{ failures.stopped }} turn{{ ' was' if failures.stopped == 1 else 's were' }} stopped or did not finish.{% else %}The agent carried on and finished {{ 'it' if failures.turns == 1 else 'all of them' }}.{% endif %}</p>
         </div>
-        <button class="btn btn-sm" type="button" id="trace-show-errors">Show in the timeline</button>
+        <div class="obs-failures-tools">{{ failure_ranges() }}<button class="btn btn-sm" type="button" id="trace-show-errors">Show in the timeline</button></div>
     </header>
     <ul class="obs-failure-list">
         {% for group in failures.groups %}
@@ -33,7 +39,10 @@
         {% endfor %}
     </ul>
     {% else %}
-    <p class="obs-failures-clear" id="trace-failures-title">No failures in {{ trace_timeline.rows|length }} recorded event{{ '' if trace_timeline.rows|length == 1 else 's' }}{% if selected_root_trace_id %} for this turn{% endif %}.</p>
+    <div class="obs-failures-head">
+        <p class="obs-failures-clear" id="trace-failures-title">{% if trace_timeline.failure_phrase %}No failures in {{ trace_timeline.failure_phrase }}{% else %}No failures in {{ trace_timeline.rows|length }} recorded event{{ '' if trace_timeline.rows|length == 1 else 's' }}{% if selected_root_trace_id %} for this turn{% endif %}{% endif %}.</p>
+        <div class="obs-failures-tools">{{ failure_ranges() }}</div>
+    </div>
     {% endif %}
     {% if selected_root_trace_id %}<a class="obs-failures-all" href="/traces?{{ {'agent_id': selected_agent_id}|urlencode }}#trace-failures">Show every turn for this agent</a>{% endif %}
 </section>
