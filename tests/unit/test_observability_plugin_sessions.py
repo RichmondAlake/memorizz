@@ -191,10 +191,11 @@ def clock_near_the_fixtures(monkeypatch):
 
     from memorizz.observability import overview
     from memorizz.ui import dashboard
-    from memorizz.ui.routers import traces
+    from memorizz.ui.routers import traces, usage
 
     monkeypatch.setattr(dashboard, "datetime", FrozenDatetime)
     monkeypatch.setattr(overview, "datetime", FrozenDatetime)
+    monkeypatch.setattr(usage, "datetime", FrozenDatetime)
     monkeypatch.setattr(traces.time, "time", lambda: frozen.timestamp())
     return frozen
 
