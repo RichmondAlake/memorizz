@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 import json
+import shutil
 import sys
 from io import StringIO
 from types import SimpleNamespace
@@ -49,6 +50,23 @@ def provider(tmp_path, monkeypatch):
         lambda manager, *a, **k: setattr(manager, "cache_instance", object()),
     )
     return FileSystemProvider(FileSystemConfig(root_path=str(tmp_path / "memory")))
+
+
+@pytest.fixture
+def browser_use(monkeypatch):
+    """Browser Use switches on only with its command, the Python behind that
+    command, and a key to hand; CI has none of them."""
+    which = shutil.which
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("MEMORIZZ_BROWSER_USE_PYTHON_COMMAND", sys.executable)
+    monkeypatch.setattr(
+        "memorizz.browser_control.providers.browser_use.shutil.which",
+        lambda command, **options: (
+            "/isolated/bin/browser-use"
+            if command == "browser-use"
+            else which(command, **options)
+        ),
+    )
 
 
 def open_session(provider, terminal=False, **options):
@@ -187,9 +205,8 @@ def test_opening_a_configured_agent_keeps_a_saved_self_aware_setting(provider):
 
 
 def test_a_launch_setting_for_the_browser_is_not_saved_on_the_agent(
-    provider, monkeypatch
+    provider, monkeypatch, browser_use
 ):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")  # Browser Use asks for it
     pirate = saved_agent(provider)
     stored = record(provider, pirate).browser_control
     cfg.set_active_agent(pirate)
@@ -202,8 +219,7 @@ def test_a_launch_setting_for_the_browser_is_not_saved_on_the_agent(
     assert record(provider, pirate).browser_control == stored
 
 
-def test_browser_on_and_off_are_saved_on_a_configured_agent(provider, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")  # Browser Use asks for it
+def test_browser_on_and_off_are_saved_on_a_configured_agent(provider, browser_use):
     pirate = saved_agent(provider)
     cfg.set_active_agent(pirate)
     session = open_session(provider)
