@@ -1,6 +1,9 @@
 """Missing optional extras become instructions, and ``memorizz doctor`` lists them."""
 
+import asyncio
 import json
+import shlex
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -154,3 +157,109 @@ def test_doctor_lists_extras_and_checks_the_backend(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "Optional extras" in result.output
     assert "Memory backend: oracle (MEMORIZZ_BACKEND)" in result.output
+
+
+UV_RECEIPT = """[tool]
+requirements = [{ name = "memorizz", extras = ["ui", "oracle"], specifier = "==0.17.11" }]
+python = "3.12"
+"""
+
+
+@pytest.fixture
+def uv_tool(tmp_path, monkeypatch):
+    """Run as a uv tool: a receipt beside the interpreter, as uv writes it."""
+    monkeypatch.delenv("MEMORIZZ_INSTALL_METHOD", raising=False)
+
+    def install(receipt=UV_RECEIPT):
+        (tmp_path / "uv-receipt.toml").write_text(receipt)
+        monkeypatch.setattr(sys, "prefix", str(tmp_path))
+
+    return install
+
+
+def test_a_uv_tool_adds_an_extra_to_the_ones_it_has(uv_tool):
+    uv_tool()
+    assert shlex.split(extras.install_command(["mcp"])) == [
+        "uv",
+        "tool",
+        "install",
+        "--force",
+        "--refresh-package",
+        "memorizz",
+        "--python",
+        "3.12",
+        "memorizz[ui,oracle,mcp]==0.17.11",
+    ]
+
+
+def test_a_uv_tool_does_not_repeat_an_extra_it_has(uv_tool):
+    uv_tool()
+    assert "memorizz[ui,oracle]==0.17.11" in extras.install_command(["oracle"])
+
+
+def test_an_unpinned_uv_tool_stays_unpinned(uv_tool):
+    uv_tool(UV_RECEIPT.replace(', specifier = "==0.17.11"', ""))
+    assert extras.install_command(["mcp"]).endswith("'memorizz[ui,oracle,mcp]'")
+
+
+def test_a_uv_tool_with_no_extras_gains_the_one_it_needs(uv_tool):
+    uv_tool(UV_RECEIPT.replace('extras = ["ui", "oracle"], ', ""))
+    assert extras.install_command(["mcp"]).endswith("'memorizz[mcp]==0.17.11'")
+
+
+def test_a_uv_tool_is_not_sent_to_pip(uv_tool):
+    uv_tool()
+    message = extras.missing_extra_message(ImportError("No module named 'oracledb'"))
+    assert message.startswith("Oracle needs the oracle extra: uv tool install --force")
+    assert "pip install" not in message and "(or " not in message
+
+
+def test_doctor_gives_a_uv_tool_one_command(uv_tool, tmp_path, monkeypatch):
+    uv_tool(UV_RECEIPT.replace('"ui", "oracle"', '"ui"'))
+    monkeypatch.setenv("MEMORIZZ_HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MEMORIZZ_BACKEND", "oracle")
+    monkeypatch.setattr(extras, "_importable", lambda module: module != "oracledb")
+    result = CliRunner().invoke(cli_app, ["doctor", "--json"])
+    report = json.loads(result.output)
+    assert "memorizz[ui,oracle]==0.17.11" in report["backend"]["install"]
+    assert "pip install" not in report["backend"]["install"]
+
+
+def test_an_npm_install_keeps_the_pip_hint(uv_tool, monkeypatch):
+    # The launcher's runtime has a receipt, but it isn't the person's own tool.
+    uv_tool()
+    monkeypatch.setenv("MEMORIZZ_INSTALL_METHOD", "npm")
+    assert extras.install_command(["mcp"]) == "pip install 'memorizz[mcp]'"
+
+
+def test_an_mcp_connection_tells_a_uv_tool_how_to_add_the_extra(uv_tool, monkeypatch):
+    from memorizz.mcp import MCPClientManager, MCPConfigurationError
+
+    uv_tool()
+    monkeypatch.setitem(sys.modules, "mcp", None)
+    manager = MCPClientManager(
+        owner_id="agent-1",
+        servers=[{"name": "notion", "transport": "stdio", "command": "x"}],
+    )
+
+    async def connect():
+        async with manager._client(manager._servers["notion"]):
+            pass
+
+    with pytest.raises(MCPConfigurationError) as error:
+        asyncio.run(connect())
+    assert "memorizz[ui,oracle,mcp]==0.17.11" in str(error.value)
+    assert "pip install" not in str(error.value)
+
+
+def test_encrypted_credentials_tell_a_uv_tool_how_to_add_the_extra(
+    uv_tool, monkeypatch
+):
+    from memorizz.mcp import MCPConfigurationError, credentials
+
+    uv_tool()
+    monkeypatch.setattr(credentials, "Fernet", None)
+    with pytest.raises(MCPConfigurationError) as error:
+        credentials._require_cryptography()
+    assert "memorizz[ui,oracle,mcp]==0.17.11" in str(error.value)

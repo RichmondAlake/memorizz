@@ -24,6 +24,13 @@
   will still show the short command for this upgrade, so add your extras
   yourself:** `uv tool install --force --refresh-package memorizz --python 3.12
   'memorizz[mcp,ui]==0.17.18'`.
+- A uv tool missing an extra was told to run `pip install 'memorizz[mcp]'`, which
+  installs into whichever Python is active, not the tool: the error stayed, and
+  on an older Python pip found a very old MemoRizz. `memorizz doctor`, the MCP
+  errors and the missing-driver messages now show a reinstall of the tool with
+  the extras it already has plus the new one.
+- Warnings at startup lost anything in square brackets, including the extra in
+  an install hint.
 - The upgrade command failed for a few minutes after each release with "no
   version of memorizz==X", because uv's cached index didn't have it yet. It now
   refreshes the package.

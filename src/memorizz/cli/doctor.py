@@ -43,10 +43,7 @@ def doctor_report() -> Dict[str, Any]:
         "required": backend in {"oracle", "mongodb"},
     }
     if row and not row["installed"]:
-        backend_check["install"] = (
-            f"{extras_module.install_command([needed])} "
-            f"(or {extras_module.uv_command(['ui', needed])})"
-        )
+        backend_check["install"] = extras_module.install_advice(needed)
     return {"extras": rows, "backend": backend_check, "other_checks": OTHER_CHECKS}
 
 

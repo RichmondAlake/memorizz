@@ -18,7 +18,10 @@ pymongo, …) into an instruction: which extra to install and the command.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
+import shlex
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -212,14 +215,85 @@ def _importable(module: str) -> bool:
         return False
 
 
+def uv_requirement(receipt: Path) -> Dict[str, Any]:
+    """The memorizz requirement a uv tool receipt records: its extras, its
+    version specifier and the tool's Python. Empty when unreadable."""
+    try:
+        text = receipt.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        import tomllib
+    except ImportError:  # Python 3.10
+        tomllib = None
+    if tomllib is not None:
+        try:
+            tool = tomllib.loads(text).get("tool") or {}
+        except ValueError:
+            return {}
+        requirement = next(
+            (
+                item
+                for item in tool.get("requirements") or []
+                if isinstance(item, dict) and item.get("name") == "memorizz"
+            ),
+            {},
+        )
+        return {**requirement, "python": tool.get("python")}
+    line = re.search(r'\{[^}]*name = "memorizz"[^}]*\}', text)
+    if not line:
+        return {}
+    extras = re.search(r"extras = \[([^\]]*)\]", line.group(0))
+    specifier = re.search(r'specifier = "([^"]*)"', line.group(0))
+    python = re.search(r'^python = "([^"]*)"', text, re.M)
+    return {
+        "extras": re.findall(r'"([^"]+)"', extras.group(1)) if extras else [],
+        "specifier": specifier.group(1) if specifier else "",
+        "python": python.group(1) if python else None,
+    }
+
+
+def _own_uv_receipt() -> Optional[Path]:
+    """This install's uv tool receipt, or None when it isn't the person's own
+    uv tool. The npm launcher's runtime has one, but isn't theirs to reinstall."""
+    if os.environ.get("MEMORIZZ_INSTALL_METHOD") == "npm":
+        return None
+    receipt = Path(sys.prefix).resolve() / "uv-receipt.toml"
+    return receipt if receipt.is_file() else None
+
+
 def install_command(extras: Iterable[str]) -> str:
-    names = ",".join(dict.fromkeys(extras))
-    return f"pip install 'memorizz[{names}]'"
+    """How to add ``extras`` to this install.
+
+    A uv tool is reinstalled with the extras it has plus these, at the same
+    version range and Python. ``pip install`` would go to whichever Python is
+    active instead of the tool, and on an old one finds a very old MemoRizz.
+    """
+    receipt = _own_uv_receipt()
+    if receipt is None:
+        names = ",".join(dict.fromkeys(extras))
+        return f"pip install 'memorizz[{names}]'"
+    requirement = uv_requirement(receipt)
+    names = ",".join(dict.fromkeys([*(requirement.get("extras") or []), *extras]))
+    args = ["uv", "tool", "install", "--force", "--refresh-package", "memorizz"]
+    if requirement.get("python"):
+        args += ["--python", str(requirement["python"])]
+    args.append(f"memorizz[{names}]{requirement.get('specifier') or ''}")
+    return shlex.join(args)
 
 
 def uv_command(extras: Iterable[str]) -> str:
     names = ",".join(dict.fromkeys(extras))
     return f"uv tool install --force 'memorizz[{names}]'"
+
+
+def install_advice(extra: str, *, with_ui: bool = True) -> str:
+    """What to run to add ``extra``; a uv tool has only one right answer."""
+    command = install_command([extra])
+    if _own_uv_receipt() is not None:
+        return command
+    uv_extras = ["ui", extra] if with_ui and extra != "ui" else [extra]
+    return f"{command} (or {uv_command(uv_extras)})"
 
 
 def extras_report(*, include_hidden: bool = False) -> List[Dict[str, Any]]:
@@ -305,11 +379,7 @@ def missing_extra_message(exc: BaseException, *, with_ui: bool = True) -> Option
     if not extra:
         return None
     label = EXTRA_LABELS.get(extra, extra)
-    uv_extras = ["ui", extra] if with_ui and extra != "ui" else [extra]
-    return (
-        f"{label} needs the {extra} extra: {install_command([extra])} "
-        f"(or {uv_command(uv_extras)})"
-    )
+    return f"{label} needs the {extra} extra: {install_advice(extra, with_ui=with_ui)}"
 
 
 __all__ = [
@@ -318,8 +388,10 @@ __all__ = [
     "extra_for_module",
     "extras_report",
     "import_name",
+    "install_advice",
     "install_command",
     "missing_extra_message",
     "missing_module",
     "uv_command",
+    "uv_requirement",
 ]

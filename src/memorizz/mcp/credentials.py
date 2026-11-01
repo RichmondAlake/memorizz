@@ -28,9 +28,11 @@ from .errors import MCPConfigurationError
 
 def _require_cryptography() -> None:
     if Fernet is None:
+        from ..extras import install_command
+
         raise MCPConfigurationError(
             "Encrypted MCP credentials require the optional MCP dependencies. "
-            "Install them with `pip install 'memorizz[mcp]'`."
+            f"Install them with `{install_command(['mcp'])}`."
         )
 
 

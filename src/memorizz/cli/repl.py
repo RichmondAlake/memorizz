@@ -141,7 +141,7 @@ def _banner(console: Console, session) -> None:
     else:
         console.print(panel)
     for warning in session.warnings or []:
-        console.print(f"[yellow]![/yellow] {warning}")
+        console.print(f"[yellow]![/yellow] {escape(warning)}")
 
 
 def _stream_turn(session, query: str) -> None:

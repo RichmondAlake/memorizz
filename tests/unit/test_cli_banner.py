@@ -56,3 +56,22 @@ def test_banner_shows_the_upgrade_command_with_its_extras(monkeypatch):
     repl._banner(console, session)
 
     assert command in output.getvalue()
+
+
+@pytest.mark.unit
+def test_banner_warnings_keep_their_square_brackets():
+    hint = "Oracle needs the oracle extra: pip install 'memorizz[oracle]'"
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=160)
+    session = SimpleNamespace(
+        code_mode=False,
+        provider=SimpleNamespace(root_path="/tmp/memorizz-memory"),
+        provider_name="ollama",
+        model_name="qwen2.5:7b",
+        agent=SimpleNamespace(continual_learning_manager=None),
+        warnings=[hint],
+    )
+
+    repl._banner(console, session)
+
+    assert hint in output.getvalue()

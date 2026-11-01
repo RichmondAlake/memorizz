@@ -633,9 +633,11 @@ class MCPClientManager:
             from mcp.client.stdio import stdio_client
             from mcp.client.streamable_http import streamable_http_client
         except ImportError as exc:
+            from ..extras import install_command
+
             raise MCPConfigurationError(
                 "MCP connections require the optional MCP dependencies. "
-                "Install them with `pip install 'memorizz[mcp]'`."
+                f"Install them with `{install_command(['mcp'])}`."
             ) from exc
 
         transport = None

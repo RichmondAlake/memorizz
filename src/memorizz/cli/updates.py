@@ -24,6 +24,7 @@ from rich.text import Text
 
 from .. import __version__
 from .._env_io import env_bool
+from ..extras import uv_requirement
 from . import config as cfg
 
 PYPI_URL = "https://pypi.org/pypi/memorizz/json"
@@ -106,46 +107,6 @@ def _fetch_latest_version() -> str | None:
     return str(version)
 
 
-def _uv_requirement(receipt: Path) -> dict:
-    """The memorizz requirement a uv tool receipt records: its extras, its
-    version specifier and the tool's Python. Empty when unreadable."""
-    try:
-        text = receipt.read_text(encoding="utf-8")
-    except OSError:
-        return {}
-    try:
-        import tomllib
-    except ImportError:  # Python 3.10
-        tomllib = None
-    if tomllib is not None:
-        try:
-            tool = tomllib.loads(text).get("tool") or {}
-        except ValueError:
-            return {}
-        requirement = next(
-            (
-                item
-                for item in tool.get("requirements") or []
-                if isinstance(item, dict) and item.get("name") == "memorizz"
-            ),
-            {},
-        )
-        return {**requirement, "python": tool.get("python")}
-    import re
-
-    line = re.search(r'\{[^}]*name = "memorizz"[^}]*\}', text)
-    if not line:
-        return {}
-    extras = re.search(r"extras = \[([^\]]*)\]", line.group(0))
-    specifier = re.search(r'specifier = "([^"]*)"', line.group(0))
-    python = re.search(r'^python = "([^"]*)"', text, re.M)
-    return {
-        "extras": re.findall(r'"([^"]+)"', extras.group(1)) if extras else [],
-        "specifier": specifier.group(1) if specifier else "",
-        "python": python.group(1) if python else None,
-    }
-
-
 def upgrade_command(latest: str | None = None) -> str:
     """Use the owning installer, including the npm wrapper's pinned runtime.
 
@@ -161,7 +122,7 @@ def upgrade_command(latest: str | None = None) -> str:
     if "Cellar" in prefix.parts and "memorizz" in prefix.parts:
         return "brew upgrade memorizz"
     if (prefix / "uv-receipt.toml").is_file():
-        requirement = _uv_requirement(prefix / "uv-receipt.toml")
+        requirement = uv_requirement(prefix / "uv-receipt.toml")
         if not requirement.get("specifier"):
             return "uv tool upgrade --refresh-package memorizz memorizz"
         extras = ",".join(requirement.get("extras") or [])
