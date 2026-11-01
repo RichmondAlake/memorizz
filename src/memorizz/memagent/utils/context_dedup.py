@@ -76,6 +76,10 @@ _RECENCY_DECAY_PER_HOUR = 0.995
 # range, so the order a batch was written in would decide its ranking.
 _MIN_RECENCY_SPAN_HOURS = 1.0
 
+# Ratings share one fixed 0..1 scale, so a small gap is a small difference, not
+# the whole range. Only a gap of half the scale or more uses all of it.
+_MIN_IMPORTANCE_SPAN = 0.5
+
 _WORKFLOW_SOURCE_LABELS = frozenset(
     {
         "workflow",
@@ -160,7 +164,8 @@ class RetrievalScoring:
     ``score = alpha_recency * recency + alpha_importance * importance
     + alpha_relevance * relevance`` where each term is min-max normalised over
     the candidate set when ``normalize`` is true; candidates under an hour
-    apart share only part of the recency range. Recency is an exponential
+    apart share only part of the recency range, and ratings under half the
+    scale apart only part of the importance range. Recency is an exponential
     decay per hour since the memory was *last accessed* (falls back to its
     creation time when no access has been recorded), importance is the
     stored 0..1 rating (``default_importance`` when a record has none) and
@@ -333,6 +338,11 @@ def _minmax(values: List[float]) -> List[float]:
     return [(value - low) / (high - low) for value in values]
 
 
+def _minmax_share(values: List[float], share: float) -> List[float]:
+    """Min-max using only ``share`` of the range; the top stays at 1.0."""
+    return [1.0 - share * (1.0 - value) for value in _minmax(values)]
+
+
 def _normalized_recency(
     raw: List[float], anchors: List[Optional[float]], now: float
 ) -> List[float]:
@@ -344,8 +354,13 @@ def _normalized_recency(
     """
     ages = [0.0 if anchor is None else max(0.0, now - anchor) for anchor in anchors]
     span_hours = (max(ages) - min(ages)) / 3600.0
-    share = min(1.0, span_hours / _MIN_RECENCY_SPAN_HOURS)
-    return [1.0 - share * (1.0 - value) for value in _minmax(raw)]
+    return _minmax_share(raw, min(1.0, span_hours / _MIN_RECENCY_SPAN_HOURS))
+
+
+def _normalized_importance(raw: List[float]) -> List[float]:
+    """Min-max importance, scaled by how far apart the ratings are."""
+    span = max(raw) - min(raw)
+    return _minmax_share(raw, min(1.0, span / _MIN_IMPORTANCE_SPAN))
 
 
 def score_candidates(
@@ -386,7 +401,7 @@ def score_candidates(
     relevance_raw = [float(cand.get("_raw_relevance") or 0.0) for cand in kept]
     if scoring.normalize and len(kept) > 1:
         recency = _normalized_recency(recency_raw, anchors, now)
-        importance = _minmax(importance_raw)
+        importance = _normalized_importance(importance_raw)
         relevance = _minmax(relevance_raw)
     else:
         recency, importance, relevance = recency_raw, importance_raw, relevance_raw

@@ -18,9 +18,11 @@ score      = (a_recency * recency + a_importance * importance + a_relevance * re
 ```
 
 Each term is min-max normalised over the candidate set, as in the paper, and
-the weights default to 1, 1, 1. One difference: memories under an hour apart
+the weights default to 1, 1, 1. Two differences: memories under an hour apart
 share only part of the recency range, because that decay barely separates them
-and a batch written together shouldn't rank by write order. Recency is anchored
+and a batch written together shouldn't rank by write order. Ratings less than
+half the scale apart share only part of the importance range, so one point on a
+ten-point rating doesn't outweigh a better match. Recency is anchored
 on the memory's **last access** (`last_accessed_at`) and falls back to its
 creation time, so a memory that keeps being recalled decays slowly and one that
 is never used sinks. Diversity selection (maximal marginal relevance) runs afterwards.

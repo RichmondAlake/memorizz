@@ -260,3 +260,72 @@ def test_a_memory_with_no_timestamp_is_not_penalised():
     ]
     score_candidates(kept, scoring=RetrievalScoring(), now=now)
     assert [cand["_scoring"]["recency"] for cand in kept] == [1.0, 0.0]
+
+
+def _importance_of(*ratings):
+    now = time.time()
+    kept = [
+        {"timestamp": now, "importance": rating, "_raw_relevance": 0.5}
+        for rating in ratings
+    ]
+    score_candidates(kept, scoring=RetrievalScoring(), now=now)
+    return [cand["_scoring"]["importance"] for cand in kept]
+
+
+@pytest.mark.unit
+def test_a_small_importance_gap_stays_small():
+    assert _importance_of(0.55, 0.65) == pytest.approx([0.8, 1.0])
+
+
+@pytest.mark.unit
+def test_a_wide_importance_gap_uses_the_whole_range():
+    assert _importance_of(0.2, 0.9) == pytest.approx([0.0, 1.0])
+    assert _importance_of(0.3, 0.8) == pytest.approx([0.0, 1.0])
+
+
+@pytest.mark.unit
+def test_equal_importance_is_no_penalty():
+    assert _importance_of(0.5, 0.5) == pytest.approx([1.0, 1.0])
+
+
+@pytest.mark.unit
+def test_one_point_of_importance_does_not_outrank_a_better_match():
+    rows = [
+        (
+            "semantic",
+            _row(
+                "best_match",
+                "the deadline is Friday",
+                created_hours_ago=1,
+                importance=0.55,
+                embedding=[0.9, 0.4359, 0.0, 0.0],
+            ),
+        ),
+        (
+            "semantic",
+            _row(
+                "one_point_higher",
+                "the launch owner is Mira",
+                created_hours_ago=1,
+                importance=0.65,
+                embedding=[0.8, 0.0, 0.6, 0.0],
+            ),
+        ),
+        (
+            "semantic",
+            _row(
+                "weak_match",
+                "the office has a new coffee machine",
+                created_hours_ago=1,
+                importance=0.55,
+                embedding=[0.7, 0.0, 0.0, 0.7141],
+            ),
+        ),
+    ]
+    selected = dedupe_and_select(
+        rows,
+        query_embedding=[1.0, 0.0, 0.0, 0.0],
+        max_items=1,
+        scoring=RetrievalScoring(),
+    )
+    assert [item["id"] for item in selected] == ["best_match"]

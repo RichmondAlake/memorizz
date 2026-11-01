@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Importance no longer outranks a better match over a small gap.** One point
+  on a ten-point rating took the whole importance range, so 0.55 against 0.65
+  scored as 0 against 1. Ratings under half the scale apart now share only part
+  of that range; wider gaps rank as before.
+
 ## 0.17.18 — 2026-11-01
 
 ### Added
