@@ -53,8 +53,8 @@ const {chromium} = require(process.env.MEMORIZZ_PLAYWRIGHT_MODULE || 'playwright
         await input.fill('Fixture approver');
         const card = input.locator('..');
         await card.locator('[data-decision=reject]').click();
-        await page.locator('#hx-region-approvals .harness-approver').first().waitFor();
-        assert.equal(await page.locator('#hx-region-approvals .harness-approver').first().inputValue(),'Fixture approver');
+        // The remaining cards get the name when the page refreshes after the decision.
+        await page.waitForFunction(()=>document.querySelector('#hx-region-approvals .harness-approver')?.value==='Fixture approver');
         const remaining=(await (await page.request.get(base+'/api/harness-orchestrations/'+first.orchestration_id)).json()).runs;
         assert(remaining.some(run=>run.status==='pending_approval'));
         // A new run with no approval navigates to its own workflow despite
