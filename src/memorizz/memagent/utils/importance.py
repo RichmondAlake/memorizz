@@ -91,7 +91,12 @@ _DECISION_WORDS = (
 
 
 def clamp_importance(value: Any) -> Optional[float]:
-    """Normalise a rating to [0, 1]; integers 1..10 are mapped to the GA scale."""
+    """Normalise a stored rating to [0, 1]; values above 1 are on the GA scale.
+
+    A 1 stays 1.0: stored ratings are 0..1, and verified outcomes are saved at
+    the maximum. A rating straight from a model goes through
+    ``rating_to_importance`` instead.
+    """
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -103,12 +108,21 @@ def clamp_importance(value: Any) -> Optional[float]:
     return min(1.0, max(0.0, number))
 
 
+def rating_to_importance(rating: Any) -> Optional[float]:
+    """A model's 1..10 rating as 0..1, where 1 (purely mundane) is 0.1."""
+    try:
+        number = float(rating)
+    except (TypeError, ValueError):
+        return None
+    return 0.1 if number == 1.0 else clamp_importance(number)
+
+
 def parse_rating(text: Any) -> Optional[float]:
     """Extract the first integer 1..10 from a model answer and map it to 0..1."""
     match = _RATING_RE.search(str(text or ""))
     if not match:
         return None
-    return clamp_importance(int(match.group(1)))
+    return rating_to_importance(int(match.group(1)))
 
 
 def heuristic_importance(
@@ -330,10 +344,10 @@ class ImportanceRater:
                     except ValueError:
                         continue
                     if 0 <= position < len(items):
-                        ratings[position] = clamp_importance(value)
+                        ratings[position] = rating_to_importance(value)
                 return ratings
         # Fallback: one rating per line in order.
-        found = [clamp_importance(int(m)) for m in _RATING_RE.findall(answer)]
+        found = [rating_to_importance(int(m)) for m in _RATING_RE.findall(answer)]
         for index in range(min(len(found), len(items))):
             ratings[index] = found[index]
         return ratings
@@ -347,4 +361,5 @@ __all__ = [
     "clamp_importance",
     "heuristic_importance",
     "parse_rating",
+    "rating_to_importance",
 ]

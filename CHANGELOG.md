@@ -9,6 +9,9 @@
   written milliseconds apart scored from 0 to 1, and the best match could drop
   out of recall. Memories under an hour apart now share only part of that
   range; an hour or more apart ranks as before.
+- A model rating a memory 1 out of 10 ("purely mundane") gave it the maximum
+  importance instead of 0.1. Ratings already stored stay as they are, because
+  a stored 1.0 can't be told apart from a real 10.
 
 ## 0.17.17 — 2026-11-01
 

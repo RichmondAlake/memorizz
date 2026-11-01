@@ -26,6 +26,32 @@ def test_clamp_and_parse_map_the_paper_scale_to_unit_interval():
 
 
 @pytest.mark.unit
+def test_a_rating_of_one_is_the_bottom_of_the_scale_not_the_top():
+    assert parse_rating("1") == 0.1
+    assert parse_rating("Rating: 1 (purely mundane)") == 0.1
+    assert parse_rating("Rating: 2") == 0.2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("answer", [json.dumps({"1": 1, "2": 10}), "1\n10"])
+def test_batch_ratings_of_one_are_the_bottom_of_the_scale(answer):
+    rater = ImportanceRater(ImportanceConfig(mode="llm"), generate=lambda _: answer)
+    results = rater.rate_many(
+        [
+            {"text": "ok, thanks for that", "role": "assistant"},
+            {"text": "We must ship by Friday", "role": "user"},
+        ]
+    )
+    assert results == [(0.1, "llm"), (1.0, "llm")]
+
+
+@pytest.mark.unit
+def test_a_stored_importance_of_one_stays_the_maximum():
+    # Stored values are on the 0..1 scale; verified outcomes are saved as 1.0.
+    assert clamp_importance(1.0) == 1.0
+
+
+@pytest.mark.unit
 def test_heuristic_orders_kinds_sensibly():
     assert heuristic_importance("x", verified=True) == 1.0
     host = heuristic_importance("The owner is Mira", host_asserted=True)
