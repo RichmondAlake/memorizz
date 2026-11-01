@@ -17,11 +17,13 @@ relevance  = cosine to the query, or the provider score
 score      = (a_recency * recency + a_importance * importance + a_relevance * relevance) / (sum of weights)
 ```
 
-Each term is min-max normalised over the candidate set, exactly as in the
-paper, and the weights default to 1, 1, 1. Recency is anchored on the memory's
-**last access** (`last_accessed_at`) and falls back to its creation time, so a
-memory that keeps being recalled decays slowly and one that is never used
-sinks. Diversity selection (maximal marginal relevance) runs afterwards.
+Each term is min-max normalised over the candidate set, as in the paper, and
+the weights default to 1, 1, 1. One difference: memories under an hour apart
+share only part of the recency range, because that decay barely separates them
+and a batch written together shouldn't rank by write order. Recency is anchored
+on the memory's **last access** (`last_accessed_at`) and falls back to its
+creation time, so a memory that keeps being recalled decays slowly and one that
+is never used sinks. Diversity selection (maximal marginal relevance) runs afterwards.
 Selected memories carry a `scoring` block with the normalised and raw
 components, which retrieval diagnostics expose.
 

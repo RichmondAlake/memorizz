@@ -71,6 +71,11 @@ _MIN_BUDGET_SLICE_CHARS = 120
 # (Generative-Agents style scoring, adapted from per-game-hour to wall-clock).
 _RECENCY_DECAY_PER_HOUR = 0.995
 
+# Memories under an hour apart are close to equally recent by that decay.
+# Min-max alone would stretch even a gap of milliseconds across the whole 0..1
+# range, so the order a batch was written in would decide its ranking.
+_MIN_RECENCY_SPAN_HOURS = 1.0
+
 _WORKFLOW_SOURCE_LABELS = frozenset(
     {
         "workflow",
@@ -154,7 +159,8 @@ class RetrievalScoring:
 
     ``score = alpha_recency * recency + alpha_importance * importance
     + alpha_relevance * relevance`` where each term is min-max normalised over
-    the candidate set when ``normalize`` is true. Recency is an exponential
+    the candidate set when ``normalize`` is true; candidates under an hour
+    apart share only part of the recency range. Recency is an exponential
     decay per hour since the memory was *last accessed* (falls back to its
     creation time when no access has been recorded), importance is the
     stored 0..1 rating (``default_importance`` when a record has none) and
@@ -327,6 +333,21 @@ def _minmax(values: List[float]) -> List[float]:
     return [(value - low) / (high - low) for value in values]
 
 
+def _normalized_recency(
+    raw: List[float], anchors: List[Optional[float]], now: float
+) -> List[float]:
+    """Min-max recency, scaled by how far apart the candidates are in time.
+
+    An hour or more apart uses the whole range. A shorter gap gets its share,
+    so candidates written together all score about 1.0 (no penalty). A missing
+    timestamp counts as now, as it does in ``_recency_score``.
+    """
+    ages = [0.0 if anchor is None else max(0.0, now - anchor) for anchor in anchors]
+    span_hours = (max(ages) - min(ages)) / 3600.0
+    share = min(1.0, span_hours / _MIN_RECENCY_SPAN_HOURS)
+    return [1.0 - share * (1.0 - value) for value in _minmax(raw)]
+
+
 def score_candidates(
     kept: List[Dict[str, Any]],
     *,
@@ -364,7 +385,7 @@ def score_candidates(
     ]
     relevance_raw = [float(cand.get("_raw_relevance") or 0.0) for cand in kept]
     if scoring.normalize and len(kept) > 1:
-        recency = _minmax(recency_raw)
+        recency = _normalized_recency(recency_raw, anchors, now)
         importance = _minmax(importance_raw)
         relevance = _minmax(relevance_raw)
     else:

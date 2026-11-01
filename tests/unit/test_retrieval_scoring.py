@@ -6,7 +6,11 @@ import time
 
 import pytest
 
-from memorizz.memagent.utils.context_dedup import RetrievalScoring, dedupe_and_select
+from memorizz.memagent.utils.context_dedup import (
+    RetrievalScoring,
+    dedupe_and_select,
+    score_candidates,
+)
 
 HOUR = 3600.0
 QUERY = [1.0, 0.0, 0.0]
@@ -177,3 +181,82 @@ def test_scoring_from_env_and_mapping(monkeypatch):
     assert merged.alpha_relevance == 0.5
     assert merged.recency_anchor == "created"  # invalid values keep the base
     assert merged.alpha_importance == 2.0
+
+
+def _recency_of(*hours_ago):
+    now = time.time()
+    kept = [
+        {"timestamp": now - hours * HOUR, "_raw_relevance": 0.5} for hours in hours_ago
+    ]
+    score_candidates(kept, scoring=RetrievalScoring(), now=now)
+    return [cand["_scoring"]["recency"] for cand in kept]
+
+
+@pytest.mark.unit
+def test_memories_written_together_rank_on_relevance_not_write_order():
+    millisecond = 0.001 / HOUR
+    rows = [
+        (
+            "semantic",
+            _row(
+                "best_match",
+                "the deadline is Friday",
+                created_hours_ago=3 * millisecond,
+                embedding=[0.9, 0.4359, 0.0, 0.0],
+            ),
+        ),
+        (
+            "semantic",
+            _row(
+                "close_match",
+                "the launch owner is Mira",
+                created_hours_ago=2 * millisecond,
+                embedding=[0.89, 0.0, 0.456, 0.0],
+            ),
+        ),
+        (
+            "semantic",
+            _row(
+                "written_last",
+                "the office has a new coffee machine",
+                created_hours_ago=millisecond,
+                embedding=[0.7, 0.0, 0.0, 0.7141],
+            ),
+        ),
+    ]
+    selected = dedupe_and_select(
+        rows,
+        query_embedding=[1.0, 0.0, 0.0, 0.0],
+        max_items=1,
+        scoring=RetrievalScoring(),
+    )
+    assert [item["id"] for item in selected] == ["best_match"]
+
+
+@pytest.mark.unit
+def test_memories_written_together_are_equally_recent():
+    assert _recency_of(0.003 / HOUR, 0.001 / HOUR) == pytest.approx(
+        [1.0, 1.0], abs=1e-3
+    )
+
+
+@pytest.mark.unit
+def test_an_hour_or_more_apart_uses_the_whole_recency_range():
+    assert _recency_of(1, 0) == pytest.approx([0.0, 1.0])
+    assert _recency_of(240, 24, 0)[0] == pytest.approx(0.0)
+
+
+@pytest.mark.unit
+def test_a_gap_under_an_hour_gets_its_share_of_the_range():
+    assert _recency_of(0.5, 0) == pytest.approx([0.5, 1.0], abs=1e-3)
+
+
+@pytest.mark.unit
+def test_a_memory_with_no_timestamp_is_not_penalised():
+    now = time.time()
+    kept = [
+        {"timestamp": None, "_raw_relevance": 0.5},
+        {"timestamp": now - 2 * HOUR, "_raw_relevance": 0.5},
+    ]
+    score_candidates(kept, scoring=RetrievalScoring(), now=now)
+    assert [cand["_scoring"]["recency"] for cand in kept] == [1.0, 0.0]

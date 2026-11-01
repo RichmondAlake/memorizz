@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Recall no longer ranks memories by the order they were written.** Recency
+  was stretched across the whole 0 to 1 range whatever the gap, so chunks
+  written milliseconds apart scored from 0 to 1, and the best match could drop
+  out of recall. Memories under an hour apart now share only part of that
+  range; an hour or more apart ranks as before.
+
 ## 0.17.17 — 2026-11-01
 
 ### Added
