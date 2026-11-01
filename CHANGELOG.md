@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A CLI chat can save what you tell it.** Chat mode removed
+  `entity_memory_upsert`, the tool that saves a fact, so told "my name is Richmond"
+  the model looked for it, found nothing, and said it would remember anyway, with
+  nothing stored. Facts now reach the Entities panel. Anything you said before this
+  is still in the conversation but not in Entities, so say it again to save it.
+
 ## 0.17.19 — 2026-11-01
 
 ### Added

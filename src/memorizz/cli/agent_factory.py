@@ -504,13 +504,13 @@ def make_browser_control_config(
 # (and loop on, hitting the tool-iteration cap). Memory — conversation history
 # AND knowledge base — is injected into the prompt by MemAgent._build_context, so
 # dropping these for plain chat keeps recall intact while preventing tool loops.
-# Code mode keeps its full tool set. retrieve_tool_log_entry stays: long tool
-# output is replaced by a pointer to it, so without it the model can't read what
-# it fetched.
+# Code mode keeps its full tool set. Two stay because taking them breaks what the
+# model is told it can do: retrieve_tool_log_entry, since long tool output is
+# replaced by a pointer to it, and entity_memory_upsert, the only way to save a
+# fact, without which it says "I'll remember that" and nothing is stored.
 _CHAT_NOISE_TOOLS = (
     "knowledge_base_lookup",
     "entity_memory_lookup",
-    "entity_memory_upsert",
     "context_window_stats_tool",
     "list_summary_registry_tool",
     "expand_summary",

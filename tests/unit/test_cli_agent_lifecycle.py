@@ -648,3 +648,11 @@ def test_recording_what_is_sent_is_not_saved_on_the_agent(provider):
     cfg.set_active_agent(pirate)
     open_session(provider).agent.save()
     assert not getattr(record(provider, pirate), "capture_context_snapshots", False)
+
+
+def test_chat_can_save_what_it_is_told(provider):
+    # Without this tool the model looked for it, found nothing, and still said
+    # "I'll remember your name".
+    tools = open_session(provider).agent.tool_manager.list_tools()
+    assert "entity_memory_upsert" in tools
+    assert "entity_memory_lookup" not in tools  # recall is already in the prompt
