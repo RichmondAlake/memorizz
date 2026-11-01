@@ -42,6 +42,7 @@ __all__ = [
     "load_state",
     "save_state",
     "clear_state",
+    "set_active_agent",
 ]
 
 # --- Provider defaults (all overridable via MEMORIZZ_DEFAULT_LLM_MODEL etc.) ---
@@ -119,3 +120,10 @@ def clear_state(keys):
     if changed:
         ensure_home()
         state_file().write_text(json.dumps(state, indent=2))
+
+
+def set_active_agent(agent_id):
+    """Make ``agent_id`` the agent `memorizz` opens. The memory and thread in
+    the state file were the previous agent's, so they go with it."""
+    clear_state(["memory_id", "thread_id"])
+    save_state({"agent_id": agent_id})

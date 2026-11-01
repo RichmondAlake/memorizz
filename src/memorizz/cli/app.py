@@ -412,6 +412,7 @@ def _build_or_wizard(
     model=None,
     console=None,
     browser_control=None,
+    resume=True,
 ):
     from . import agent_factory
 
@@ -422,6 +423,7 @@ def _build_or_wizard(
             code_mode=code_mode,
             llm_config=llm_config,
             browser_control_enabled=browser_control,
+            resume=resume,
         )
         session.console = console
         return session
@@ -432,15 +434,19 @@ def _build_or_wizard(
         console.print(
             f"Run:  [cyan]ollama pull {cfg.DEFAULT_OLLAMA_LLM}[/cyan]  then try again."
         )
-        return _wizard(console, code_mode, browser_control=browser_control)
+        return _wizard(
+            console, code_mode, browser_control=browser_control, resume=resume
+        )
     except agent_factory.NoProviderConfigured:
-        return _wizard(console, code_mode, browser_control=browser_control)
+        return _wizard(
+            console, code_mode, browser_control=browser_control, resume=resume
+        )
     except Exception as exc:
         console.print(f"[red]Could not start agent:[/red] {exc}")
         return None
 
 
-def _wizard(console, code_mode, depth: int = 0, browser_control=None):
+def _wizard(console, code_mode, depth: int = 0, browser_control=None, resume=True):
     from rich.panel import Panel
 
     from . import agent_factory, ollama_probe
@@ -503,6 +509,7 @@ def _wizard(console, code_mode, depth: int = 0, browser_control=None):
         session = agent_factory.build_session_agent(
             code_mode=code_mode,
             browser_control_enabled=browser_control,
+            resume=resume,
         )
         session.console = console
         return session
@@ -517,6 +524,7 @@ def _wizard(console, code_mode, depth: int = 0, browser_control=None):
             code_mode,
             depth + 1,
             browser_control=browser_control,
+            resume=resume,
         )
     except Exception as exc:
         console.print(f"[red]Could not start agent:[/red] {exc}")
@@ -547,12 +555,14 @@ def _launch_repl(
 ):
     _load_env()
     console = _make_console()
+    # The chat opens on a new conversation; /conversations resumes an old one.
     session = _build_or_wizard(
         code_mode,
         provider,
         model,
         console,
         browser_control,
+        resume=False,
     )
     if session is None:
         raise typer.Exit(1)

@@ -49,6 +49,8 @@ class Session:
     user_id: Optional[str] = None
     console: Any = None
     warnings: Optional[List[str]] = None
+    # The launch's --browser-control choice, applied to each agent opened.
+    browser_control: Optional[bool] = None
     # Session-scoped harness routing (``/harness``); never saved on the agent.
     harness: Optional[str] = None
     harness_backup: Optional[Dict[str, Any]] = None
@@ -533,76 +535,119 @@ def _slim_chat_tools(agent) -> None:
                 pass
 
 
-def build_session_agent(
+# What a launch changes on a loaded agent for the session. The CLI's own
+# assistant saves these; any other agent keeps what it was given.
+_SESSION_ONLY_FIELDS = (
+    "browser_control",
+    "internet_access_config",
+    "internet_access_provider",
+    "self_aware",
+    "self_aware_config",
+    "tools",
+)
+_MODEL_FIELDS = ("context_window_source", "context_window_tokens", "llm_config")
+
+
+def _has_cli_instruction(agent) -> bool:
+    opening = cfg.MEMORY_ASSISTANT_INSTRUCTION.splitlines()[0]
+    return str(getattr(agent, "instruction", None) or "").startswith(opening)
+
+
+def _is_cli_assistant(agent) -> bool:
+    """True for the assistant the CLI built for itself: nobody named it or gave
+    it a prompt, so each launch brings it up to date."""
+    name = getattr(agent, "name", None)
+    return not (isinstance(name, str) and name.strip()) and _has_cli_instruction(agent)
+
+
+def _own_llm_config(agent) -> Optional[Dict[str, Any]]:
+    config = getattr(agent, "llm_config", None)
+    return dict(config) if isinstance(config, dict) and config.get("provider") else None
+
+
+def use_agent_model(
+    agent,
+    default_llm: Dict[str, Any],
+    warnings: List[str],
+    explicit: bool = False,
+) -> Dict[str, Any]:
+    """Put ``agent`` on the model this session runs on and return its config.
+
+    An agent keeps the model it was given. The CLI's assistant follows
+    ``default_llm``, re-pointed here because the saved llm_config may be stale
+    or omit secrets. ``explicit`` (``--model``) borrows ``default_llm`` for the
+    session, and so does an agent whose own model can't be set up here.
+    """
+    from ..llms.llm_factory import create_llm_provider
+    from ..memagent.persistence import keep_stored_fields
+
+    own = None if _is_cli_assistant(agent) else _own_llm_config(agent)
+    if own:
+        usable = getattr(agent, "model", None) is not None and not getattr(
+            agent, "_llm_init_error", None
+        )
+        if usable and not explicit:
+            return own
+        if not explicit:
+            warnings.append(
+                f"{own.get('provider')}/{own.get('model')} is not available here; "
+                f"this session uses {default_llm.get('provider')}/"
+                f"{default_llm.get('model') or default_llm.get('deployment_name')}."
+            )
+        keep_stored_fields(agent, *_MODEL_FIELDS)
+    try:
+        agent.model = create_llm_provider(default_llm)
+        agent.llm_config = dict(default_llm)
+        agent._context_window_tokens = agent._initialize_context_window_tokens(
+            None, default_llm
+        )
+        agent._llm_init_error = None
+    except Exception as exc:
+        agent._llm_init_error = f"{type(exc).__name__}: {exc}"
+    return default_llm
+
+
+def build_agent(
+    provider: Any, llm_config: Dict[str, Any], instruction: Optional[str] = None
+):
+    """A new agent on the CLI's defaults; the caller saves it."""
+    from ..memagent.builders.agent_builder import MemAgentBuilder
+
+    return (
+        MemAgentBuilder()
+        .with_instruction(instruction or cfg.MEMORY_ASSISTANT_INSTRUCTION)
+        .with_application_mode("assistant")
+        .with_llm_config(llm_config)
+        .with_memory_provider(provider)
+        .with_max_steps(20)
+        .build()
+    )
+
+
+def prepare_agent(
+    agent,
+    warnings: List[str],
     code_mode: bool = False,
-    llm_config: Optional[Dict[str, Any]] = None,
-    memory_provider: Optional[Any] = None,
     instruction: Optional[str] = None,
     fresh: bool = False,
     browser_control_enabled: Optional[bool] = None,
-) -> Session:
-    """Detect config and return a ready-to-run :class:`Session`.
+    adopt_bootstrap_mcp: bool = False,
+) -> None:
+    """Set ``agent`` up for a CLI session. A launch and ``/agent`` both come
+    through here, so an agent behaves the same however it was opened."""
+    from ..memagent.persistence import keep_stored_fields
 
-    Reuses ONE persistent MemAgent across launches: the default agent id and the
-    active memory/thread pair are stored in ``~/.memorizz/state.json`` so the
-    exact conversation carries over between `memorizz` invocations. Pass
-    ``fresh=True`` to ignore saved state and start a brand-new agent + memory.
-    """
-    from ..memagent import MemAgent
-    from ..memagent.builders.agent_builder import MemAgentBuilder
+    if not _is_cli_assistant(agent):
+        keep_stored_fields(agent, *_SESSION_ONLY_FIELDS)
 
-    warnings: List[str] = []
-    resolved_llm = llm_config or detect_llm_config()
-    provider = memory_provider or detect_memory_provider(resolved_llm, warnings)
-
-    state = {} if fresh else cfg.load_state()
-    agent = None
-
-    # 1. Reuse the persistent default agent if one was saved.
-    saved_agent_id = state.get("agent_id")
-    if saved_agent_id:
-        try:
-            agent = MemAgent.load(saved_agent_id, memory_provider=provider)
-        except Exception:
-            agent = None  # not found / unreadable -> create a fresh one below
-
-    if agent is not None:
-        # Re-point the loaded agent at the currently-detected provider/model;
-        # the saved llm_config may be stale or omit secrets.
-        try:
-            from ..llms.llm_factory import create_llm_provider
-
-            agent.model = create_llm_provider(resolved_llm)
-            agent.llm_config = dict(resolved_llm)
-            agent._context_window_tokens = agent._initialize_context_window_tokens(
-                None, resolved_llm
-            )
-            agent._llm_init_error = None
-        except Exception as exc:
-            agent._llm_init_error = f"{type(exc).__name__}: {exc}"
-    else:
-        # 2. First run (or fresh): build and persist a new default agent.
-        agent = (
-            MemAgentBuilder()
-            .with_instruction(instruction or cfg.MEMORY_ASSISTANT_INSTRUCTION)
-            .with_application_mode("assistant")
-            .with_llm_config(resolved_llm)
-            .with_memory_provider(provider)
-            .with_max_steps(20)
-            .build()
-        )
-        if not fresh:
-            try:
-                agent.save()
-            except Exception:
-                pass
-            cfg.save_state({"agent_id": getattr(agent, "agent_id", None)})
-
-    # Keep the assistant instruction current — a loaded agent may carry an older
+    # Keep the CLI's own instruction current — a loaded agent may carry an older
     # one. The guidance steers even small models to use memory and chain web
     # tools (search -> open_web_page) instead of guessing.
     try:
-        agent.instruction = instruction or cfg.MEMORY_ASSISTANT_INSTRUCTION
+        if instruction:
+            agent.instruction = instruction
+        elif _has_cli_instruction(agent):
+            agent.instruction = cfg.MEMORY_ASSISTANT_INSTRUCTION
     except Exception:
         pass
 
@@ -668,12 +713,10 @@ def build_session_agent(
     try:
         from . import mcp_config
 
-        owner_id = str(
-            getattr(agent, "agent_id", None) or saved_agent_id or "cli-default"
-        )
+        owner_id = str(getattr(agent, "agent_id", None) or "cli-default")
         config_owner = owner_id
         if (
-            not saved_agent_id
+            adopt_bootstrap_mcp
             and not mcp_config.has_server_config(owner_id)
             and mcp_config.has_server_config("cli-default")
         ):
@@ -696,12 +739,81 @@ def build_session_agent(
     except Exception as exc:
         warnings.append(f"MCP configuration could not be loaded: {exc}")
 
+
+def build_session_agent(
+    code_mode: bool = False,
+    llm_config: Optional[Dict[str, Any]] = None,
+    memory_provider: Optional[Any] = None,
+    instruction: Optional[str] = None,
+    fresh: bool = False,
+    browser_control_enabled: Optional[bool] = None,
+    resume: bool = True,
+) -> Session:
+    """Detect config and return a ready-to-run :class:`Session`.
+
+    Reuses ONE persistent MemAgent across launches: the default agent id and the
+    active memory/thread pair are stored in ``~/.memorizz/state.json``. With
+    ``resume`` the exact conversation carries over between `memorizz` invocations;
+    ``resume=False`` opens a new conversation in the same memory, and the saved
+    one stays in place until the first message replaces it. Pass ``fresh=True``
+    to ignore saved state and start a brand-new agent + memory.
+    """
+    from ..memagent import MemAgent
+
+    warnings: List[str] = []
+    resolved_llm = llm_config or detect_llm_config()
+    provider = memory_provider or detect_memory_provider(resolved_llm, warnings)
+
+    state = {} if fresh else cfg.load_state()
+    agent = None
+
+    # 1. Reuse the persistent default agent if one was saved.
+    saved_agent_id = state.get("agent_id")
+    if saved_agent_id:
+        try:
+            agent = MemAgent.load(saved_agent_id, memory_provider=provider)
+        except Exception:
+            agent = None  # not found / unreadable -> create a fresh one below
+
+    if agent is not None:
+        resolved_llm = use_agent_model(
+            agent, resolved_llm, warnings, explicit=bool(llm_config)
+        )
+    else:
+        # 2. First run (or fresh): build and persist a new default agent.
+        agent = build_agent(provider, resolved_llm, instruction)
+        if not fresh:
+            try:
+                agent.save()
+            except Exception:
+                pass
+            if saved_agent_id:
+                # The saved agent is gone, and its conversation with it.
+                cfg.set_active_agent(getattr(agent, "agent_id", None))
+                state = {}
+            else:
+                cfg.save_state({"agent_id": getattr(agent, "agent_id", None)})
+
+    prepare_agent(
+        agent,
+        warnings,
+        code_mode=code_mode,
+        instruction=instruction,
+        fresh=fresh,
+        browser_control_enabled=browser_control_enabled,
+        adopt_bootstrap_mcp=not saved_agent_id,
+    )
+
     # 4. Reuse the exact rolling conversation so a relaunch resumes the same
     # memory/thread pair. Older state files only stored memory_id; migrate
     # those to the most recently active stored thread when possible.
     memory_id = None if fresh else state.get("memory_id")
-    thread_id = None if fresh else state.get("thread_id")
-    if memory_id and not thread_id:
+    thread_id = None if fresh or not resume else state.get("thread_id")
+    agent_memories = [str(m) for m in getattr(agent, "memory_ids", None) or []]
+    if memory_id and agent_memories and str(memory_id) not in agent_memories:
+        # Another agent's conversation, left by a switch before switches saved.
+        memory_id = thread_id = None
+    if resume and memory_id and not thread_id:
         try:
             from .conversations import latest_thread_id
 
@@ -728,4 +840,5 @@ def build_session_agent(
         memory_id=memory_id,
         thread_id=thread_id,
         warnings=warnings,
+        browser_control=browser_control_enabled,
     )

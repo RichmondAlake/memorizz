@@ -144,6 +144,20 @@ do not silently treat an unavailable primary provider as a normal success.
 
 ## Create and inspect agents
 
+In the chat, `/agent new` makes an agent and switches to it. What comes after
+`new` is read as a model if it names one, and otherwise as the agent's prompt:
+
+| You type | You get |
+|---|---|
+| `/agent new` | A model picker, then a line for the prompt (Enter keeps the default). |
+| `/agent new gpt-6-luna` | An agent on that model, from any provider you have a key for. `anthropic:claude-opus-5-5` names the provider as well. |
+| `/agent new You are a careful code reviewer.` | An agent with that prompt, on the model you are using now. |
+| `/agent new claude-opus-5-5 You are a careful code reviewer.` | Both. |
+
+The agent gets its own memory and is named after its prompt or model (`/name`
+changes that). `memorizz` opens it next time. One word that isn't a model is
+refused as a likely typo, so a prompt needs at least two words.
+
 Create a persisted agent without entering the REPL:
 
 ```bash
@@ -166,7 +180,8 @@ The command uses the configured memory provider and therefore defaults to the
 filesystem store under `~/.memorizz/memory`. LLM settings are auto-detected;
 pass `--llm-provider openai --model gpt-6-luna` to select one explicitly, or
 `--no-llm` to create a configuration that will be completed later in the SDK or
-UI. `--set-default` makes the new agent the one opened by `memorizz chat`.
+UI. `--set-default` makes the new agent the one opened by `memorizz chat`, with
+none of the previous agent's conversation.
 
 ### Headless use
 
@@ -365,8 +380,9 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/harnesses` | List the external harnesses (Codex, Claude Code, OpenHands, pi, Hermes, ...) and whether each is ready. |
 | `/harness <name [model]\|model [name]\|auto\|delegate\|off>` | Run the following turns on that harness with MemoRizz memory, traces and approvals; `auto` lets MemoRizz pick, `delegate` keeps your model in charge and lets it hand parts to its harness delegates, `off` returns to native execution. Session only. |
 | `/compare <harness> <harness> <task>` | Run one read-only task on two or more harnesses side by side and print each verdict; saved as a workflow. |
-| `/agents` | List saved agents. |
-| `/agent <id>` | Load a saved agent by id. |
+| `/agents` | Switch to a saved agent, on a new conversation. `memorizz` opens that agent next time. |
+| `/agent <id>` | Switch to a saved agent by id. |
+| `/agent new [model] [prompt]` | Make an agent and switch to it. See [Create and inspect agents](#create-and-inspect-agents). |
 | `/name [new name]` | Show or change the agent's name (`/rename` works too). The name shows in the banner, the status bar and the UI's chat header, where you can also click it to rename the agent. |
 | `/connect [notion\|gmail\|google-calendar\|server]` | Without a name, list what the agent can reach and how to connect the rest (`/mcp` works too). With one, attach that connector to the agent and sign in in the browser; the agent gets its tools straight away. When you ask for something the agent isn't connected to, such as "search my Notion", the CLI offers this after the answer. Gmail and Google Calendar need your own Google OAuth client first; `/connect gmail` explains the step. |
 | `/persona [name \| goals \| background]` | Show or set the agent's persona. |
@@ -601,12 +617,25 @@ a 7B+ model for reliable multi-step web use.
 
 ## Persistent agent & memory
 
-Unlike a stateless chat, the CLI reuses **one** persistent agent across launches.
-The default agent id and active memory/thread pair are stored in
-`~/.memorizz/state.json`, so the selected conversation resumes after relaunch.
+Unlike a stateless chat, the CLI keeps your agent and its memory across launches.
+`memorizz` opens the agent you used last, on a new conversation in that agent's
+memory, and `/conversations` takes you back to an earlier one. A launch where you
+type nothing leaves no empty conversation behind. `memorizz run` carries on the
+last conversation, so scripts keep their thread. The agent id and active
+memory/thread pair are stored in `~/.memorizz/state.json`.
+
+Opening an agent never changes what is saved on it: its prompt, model and
+settings stay as you set them, and `--model` and `--browser-control` apply to
+that launch only (`/browser on` and `off` are saved). If an
+agent's model can't start here, say because its key is gone, the CLI tells you
+and uses your default model for the session. The one exception is the unnamed
+assistant the CLI makes on first run, which follows your default model and the
+CLI's current instructions.
 
 | Action | Command | Effect |
 |---|---|---|
+| New agent | `/agent new [model] [prompt]` | Makes an agent with its own memory and switches to it. |
+| Switch agent | `/agents` | Opens a saved agent on a new conversation. |
 | New conversation, keep long-term memory | `/new` | Starts a fresh thread; past facts still recalled semantically. |
 | Resume a previous conversation | `/conversations` | Search by title, preview, memory ID, or thread ID; select with ↑/↓ and Enter. |
 | Forget one memory | `/forget <id>` | Deletes a single stored entry. |

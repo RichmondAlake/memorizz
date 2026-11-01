@@ -12,6 +12,7 @@ the REPL (any other value continues).
 
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -316,6 +317,14 @@ def _save_live_agent(session) -> None:
         agent.save()
 
 
+def _save_browser_choice(session) -> None:
+    """A launch's browser setting lasts for the session; /browser is meant to stay."""
+    from ..memagent.persistence import release_stored_fields
+
+    release_stored_fields(session.agent, "browser_control")
+    _save_live_agent(session)
+
+
 def cmd_browser(session, args: str):
     """Configure or directly invoke the governed Browser Use provider."""
     console = _con(session)
@@ -341,7 +350,7 @@ def cmd_browser(session, args: str):
 
     if sub in {"off", "false", "no", "0"}:
         agent.with_browser_control(None)
-        _save_live_agent(session)
+        _save_browser_choice(session)
         console.print("[yellow]Browser control OFF[/yellow]")
         return
 
@@ -363,7 +372,7 @@ def cmd_browser(session, args: str):
         if config is None:
             raise ValueError("Browser-control provider is disabled")
         agent.with_browser_control(config)
-        _save_live_agent(session)
+        _save_browser_choice(session)
         console.print(
             "[green]Browser control →[/green] "
             f"{agent.get_browser_control_provider_name()}"
@@ -768,7 +777,7 @@ def cmd_agents(session, args: str):
         console.print(f"[red]Could not list agents:[/red] {exc}")
         return
     if not agents:
-        console.print("[dim]No saved agents.[/dim]")
+        console.print("[dim]No saved agents. /agent new makes one.[/dim]")
         return
     if args.strip() != "list" and picker.picker_available(console):
         current = getattr(session.agent, "agent_id", None)
@@ -806,23 +815,189 @@ def cmd_agents(session, args: str):
         console.print(f"  {fav}{agent_id}  [cyan]{name}[/cyan] [dim]{mode}[/dim]")
 
 
+def _switch_agent(session, agent) -> None:
+    """Put ``agent`` in this session on a new conversation, set up as a launch
+    sets it up, and make it the agent `memorizz` opens next."""
+    from rich.markup import escape
+
+    from . import harness_session
+
+    console = _con(session)
+    warnings: List[str] = []
+    try:
+        default_llm = agent_factory.detect_llm_config()
+    except (agent_factory.NoProviderConfigured, agent_factory.NeedsOllamaPull):
+        default_llm = dict(session.llm_config)
+    llm_config = agent_factory.use_agent_model(agent, default_llm, warnings)
+    agent_factory.prepare_agent(
+        agent,
+        warnings,
+        code_mode=session.code_mode,
+        browser_control_enabled=session.browser_control,
+    )
+    session.llm_config = llm_config
+    session.memory_id = None
+    session.thread_id = None
+    cfg.set_active_agent(agent.agent_id)
+    try:
+        harness_session.replace_agent(session, agent)
+    except ValueError as exc:
+        console.print(f"[yellow]Harness not kept:[/yellow] {escape(str(exc))}")
+    for warning in warnings:
+        console.print(f"[yellow]{escape(warning)}[/yellow]")
+
+
+def _named_model(session, word: str) -> Optional[Dict[str, object]]:
+    """The llm_config of a model named on a command line, or None when ``word``
+    isn't one. Any provider's model counts, not just the current provider's."""
+    from ..llms.model_catalog import LLM_MODEL_CATALOG
+    from .memory_upkeep import LLM_PROVIDERS, llm_config_for
+
+    if word.partition(":")[0].lower() in LLM_PROVIDERS:
+        return llm_config_for(session, word)
+    if any(m["value"] == word for m in _model_choices(session.provider_name)):
+        return llm_config_for(session, word)
+    for provider in LLM_PROVIDERS:
+        if any(m["value"] == word for m in LLM_MODEL_CATALOG.get(provider, [])):
+            return llm_config_for(session, f"{provider}:{word}")
+    if word in (ollama_probe.list_models() or []):
+        return llm_config_for(session, f"ollama:{word}")
+    return None
+
+
+def _parse_new_agent(session, text: str) -> tuple:
+    """``[model] [prompt]`` as (llm_config or None, prompt). One unknown word
+    is a mistyped model, not a prompt."""
+    from .memory_upkeep import LLM_PROVIDERS
+
+    first, *rest = text.split(maxsplit=1)
+    # "ollama expert who debugs models" is a prompt; "ollama" alone is a provider.
+    in_prompt = rest and first.lower() in LLM_PROVIDERS
+    llm_config = None if in_prompt else _named_model(session, first)
+    if llm_config is not None:
+        return llm_config, rest[0] if rest else ""
+    if not rest:
+        raise ValueError(f"Unknown model: {first}")
+    return None, text
+
+
+def _ask_new_agent(session) -> Optional[tuple]:
+    """Ask for the model, then the prompt; None when cancelled. Without a
+    terminal there is nobody to ask, so the agent gets the defaults."""
+    from . import picker
+
+    console = _con(session)
+    if not picker.picker_available(console):
+        return None, ""
+    provider = session.provider_name
+    if provider == "ollama":
+        choices = [
+            {"value": str(m), "label": str(m)} for m in ollama_probe.list_models() or []
+        ]
+    else:
+        choices = _model_choices(provider)
+    llm_config = None
+    if choices:
+        chosen = picker.pick(
+            choices,
+            title=f"New agent: choose a model ({provider})",
+            render=lambda m: m["label"],
+            search_text=lambda m: f"{m['label']} {m['value']}",
+            is_current=lambda m: m["value"] == session.model_name,
+            verb="use",
+        )
+        if chosen is None:
+            return None
+        from .memory_upkeep import llm_config_for
+
+        llm_config = llm_config_for(session, chosen["value"])
+    try:
+        return llm_config, input("Prompt (Enter for the default): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+
+def _agent_name_from(prompt: str) -> str:
+    """A short name for /agents: the prompt's first sentence, less "You are a"."""
+    sentence = re.split(r"[.!?\n]", prompt, maxsplit=1)[0]
+    role = re.sub(r"^\s*you are\s+(an?\s+|the\s+)?", "", sentence, flags=re.IGNORECASE)
+    return role.strip()[:40].rstrip()
+
+
+def _new_agent(session, text: str) -> None:
+    """``/agent new [model] [prompt]``: make an agent and switch to it."""
+    from rich.markup import escape
+
+    from ..llms.llm_factory import create_llm_provider
+    from . import harness_session, ui
+
+    console = _con(session)
+    if len(text) > 1 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    if text:
+        try:
+            llm_config, prompt = _parse_new_agent(session, text)
+        except ValueError as exc:
+            console.print(
+                f"[yellow]{escape(str(exc))}.[/yellow] /models lists the models; "
+                "a prompt needs more than one word."
+            )
+            return
+    else:
+        asked = _ask_new_agent(session)
+        if asked is None:
+            console.print("[dim]No new agent.[/dim]")
+            return
+        llm_config, prompt = asked
+    config = llm_config or dict(session.llm_config)
+    model = llm_config and (
+        llm_config.get("model") or llm_config.get("deployment_name")
+    )
+    try:
+        create_llm_provider(config)
+    except Exception as exc:
+        console.print(
+            f"[red]Could not set up {escape(str(model or session.model_name))}:"
+            f"[/red] {escape(str(exc))}"
+        )
+        return
+    agent = agent_factory.build_agent(session.provider, config, prompt)
+    # Named after the build: a name given to the builder would derive the id
+    # from it, and a second agent with that name would replace the first.
+    agent.name = _agent_name_from(prompt) or model or None
+    agent.save()
+    _switch_agent(session, agent)
+    console.print(
+        f"[green]Created agent[/green] [bold cyan]{escape(ui.agent_label(session))}[/]  "
+        f"[dim]{escape(session.provider_name)}/{escape(session.model_name)} · "
+        f"{agent.agent_id[:8]} · /name to rename[/dim]"
+    )
+    harness = harness_session.active_harness(session)
+    if harness and model:
+        console.print(
+            f"[dim]Turns still run on {escape(harness)}; "
+            "/harness off uses the agent's model.[/dim]"
+        )
+
+
 def cmd_agent(session, args: str):
     console = _con(session)
-    agent_id = args.strip()
-    if not agent_id:
-        console.print("Usage: /agent <agent-id>   (see /agents)")
+    target = args.strip()
+    if not target:
+        console.print(
+            "Usage: /agent <agent-id>   (see /agents)\n"
+            "       /agent new [model] [prompt]",
+            markup=False,
+        )
+        return
+    word, *rest = target.split(maxsplit=1)
+    if word.lower() == "new":
+        _new_agent(session, rest[0].strip() if rest else "")
         return
     from ..memagent import MemAgent
 
-    loaded = MemAgent.load(agent_id, memory_provider=session.provider)
-    session.agent = loaded
-    session.memory_id = None
-    session.thread_id = None
-    try:
-        session.llm_config = dict(getattr(loaded, "llm_config", {}) or {})
-    except Exception:
-        pass
-    console.print(f"[green]Loaded agent[/green] {agent_id}")
+    _switch_agent(session, MemAgent.load(target, memory_provider=session.provider))
+    console.print(f"[green]Loaded agent[/green] {target}")
 
 
 # The longest agent name /name keeps; the UI's header field allows the same.
@@ -2008,6 +2183,7 @@ def cmd_menu(session, args: str):
 
     actions = [
         ("/agents", "switch agent", "←"),
+        ("/agent new", "make a new agent", ""),
         ("/name", "rename this agent", ""),
         ("/connect", "connect Notion, Gmail or Calendar", ""),
         ("/harnesses", "run turns on a harness", "→"),
@@ -2041,6 +2217,7 @@ def cmd_menu(session, args: str):
     rows = [(key, command, what) for key, command, what in ui.HOTKEYS]
     rows.append(("Tab", "/…", "complete a command"))
     rows += [
+        ("", "/agent new [model] [prompt]", "make a new agent"),
         ("", "/sessions", "what Codex and Claude Code did (plugin sessions)"),
         ("", "/memory project", "chat over this folder's project memory"),
         ("", "/models", "show or switch the model"),
@@ -2277,8 +2454,12 @@ COMMANDS: Dict[str, Command] = {
         "Show or set the model summaries and /consolidate run on.",
         "/background-model [model|provider:model|off]",
     ),
-    "agents": Command(cmd_agents, "List saved agents.", "/agents"),
-    "agent": Command(cmd_agent, "Load a saved agent by id.", "/agent <id>"),
+    "agents": Command(cmd_agents, "Switch to a saved agent.", "/agents"),
+    "agent": Command(
+        cmd_agent,
+        "Load a saved agent by id, or make a new one.",
+        "/agent <id> · /agent new [model] [prompt]",
+    ),
     "name": Command(cmd_name, "Show or change the agent's name.", "/name [new name]"),
     "connect": Command(
         cmd_connect,
@@ -2389,6 +2570,7 @@ def command_completions() -> List[str]:
 
     return (
         [f"/{name}" for name in sorted(COMMANDS)]
+        + ["/agent new"]
         + [f"/config {verb}" for verb in ("get", "set", "path", "keys")]
         + [
             f"/config {verb} {key}"

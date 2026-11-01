@@ -9,7 +9,7 @@ from rich.markup import escape
 from . import agent_factory
 from .commands import _con
 
-_PROVIDERS = ("openai", "anthropic", "ollama", "azure", "huggingface", "mlx")
+LLM_PROVIDERS = ("openai", "anthropic", "ollama", "azure", "huggingface", "mlx")
 
 _OP_LABELS = {
     "merge_entities": "merge",
@@ -24,13 +24,14 @@ def _label(config: Dict[str, Any]) -> str:
     return f"{config.get('provider') or '?'}/{model}"
 
 
-def _background_config(session, spec: str) -> Dict[str, Any]:
+def llm_config_for(session, spec: str) -> Dict[str, Any]:
     """``provider:model``, a provider alone, or a model of the chat provider."""
     head, _, rest = spec.partition(":")
-    if head.lower() in _PROVIDERS:
+    if head.lower() in LLM_PROVIDERS:
         config = agent_factory.config_for_provider(head.lower())
         if rest.strip():
-            config["model"] = rest.strip()
+            key = "deployment_name" if head.lower() == "azure" else "model"
+            config[key] = rest.strip()
         return config
     config = dict(session.llm_config or {})
     config["model"] = spec
@@ -66,7 +67,7 @@ def cmd_background_model(session, args: str) -> None:
         save_agent_fields(session, background_llm_config=None)
         console.print("[green]Background model →[/green] the chat model")
         return
-    config = _background_config(session, spec)
+    config = llm_config_for(session, spec)
     agent.with_background_model(config)
     error = getattr(agent, "_background_model_error", None)
     if error:

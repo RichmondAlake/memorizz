@@ -386,7 +386,7 @@ def create_agent(
                 root_fallback=root_fallback,
             )
         if set_default:
-            cfg.save_state({"agent_id": agent.agent_id})
+            cfg.set_active_agent(agent.agent_id)
         _print_payload(
             {
                 "ok": True,

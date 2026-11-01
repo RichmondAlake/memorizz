@@ -353,6 +353,12 @@ def keep_stored_fields(agent, *fields: str) -> None:
     agent._keep_stored_fields = kept | set(fields)
 
 
+def release_stored_fields(agent, *fields: str) -> None:
+    """Let saves write ``fields`` again, for a change meant to last."""
+    kept = set(getattr(agent, "_keep_stored_fields", None) or ())
+    agent._keep_stored_fields = kept - set(fields)
+
+
 def _record_value(record: Any, name: str) -> Any:
     """One field of a stored agent record (a model, or a legacy mapping)."""
     if isinstance(record, dict):

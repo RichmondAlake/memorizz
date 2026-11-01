@@ -40,9 +40,50 @@
   "Redirect URI not registered", because Claude Code publishes its local
   redirects without a port. A local redirect may now use any port; the rest
   of it still has to match exactly. Steps for Claude are in the guide.
+- **`/agent new` makes an agent from the chat.** What follows `new` is read as
+  a model if it names one, otherwise as the agent's prompt:
+  `/agent new gpt-6-luna`, `/agent new You are a careful code reviewer.`, or
+  both. On its own it opens a model picker, then asks for the prompt. The
+  agent gets its own memory and is named after its prompt or model. Before,
+  agents could only be made from the shell or the UI, and `/agents` only
+  switched between saved ones.
+
+### Changed
+
+- **`memorizz` opens on a new conversation** in the agent's memory, instead of
+  resuming the last one; `/conversations` resumes an earlier one. A launch
+  where you type nothing leaves no empty conversation behind. `memorizz run`
+  still carries on the last conversation.
+- **`memorizz` opens the agent you used last.** Switching with `/agents` or
+  `/agent` is remembered, where before the next launch went back to the
+  default agent.
+- An agent keeps its own model across launches. Before, every launch replaced
+  it with the detected default. `--model` now applies to that launch only, and
+  the unnamed assistant the CLI makes on first run still follows your default.
+  An agent whose model can't start here (say its key is gone) says so and uses
+  your default for the session; its saved model stays.
 
 ### Fixed
 
+- `memorizz agents create --set-default` put the new agent in the previous
+  agent's conversation: it read that agent's turns and wrote into its thread.
+- The agent `memorizz` opened had its instruction replaced by the built-in one,
+  and the save after a turn made that permanent, so `agents create
+  --instruction … --set-default` lost the instruction on first use. Opening an
+  agent in the chat also saved a smaller tool list and the session's web,
+  coding and browser settings onto it. Only the CLI's own assistant is updated
+  now, and `/browser on|off` still saves; an instruction already overwritten
+  can't be restored and needs setting again.
+- After `/agents`, each turn saved the new agent's memory and thread next to
+  the old agent's id, so the next launch opened the old agent on the other's
+  conversation. A state file left like that now falls back to the agent's own
+  memory.
+- `/agent` left the session half set up: the status bar kept showing a harness
+  picked with `/harness` while turns ran natively, and the agent had none of
+  the launch's tool setup, shared MCP servers or `--code` tools. A picked
+  harness now comes along to the new agent, and a harness that can't says so.
+- `/background-model azure:<deployment>` used the default deployment instead
+  of the one named.
 - A remote MCP server bound to 127.0.0.1 behind a proxy or tunnel refused
   requests for its public address ("Invalid Host header"); it now accepts
   its `--public-url` host.

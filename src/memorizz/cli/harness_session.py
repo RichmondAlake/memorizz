@@ -390,6 +390,22 @@ def clear_harness(session) -> Dict[str, Any]:
     }
 
 
+def replace_agent(session, agent) -> None:
+    """Move the session to ``agent``. A harness picked with ``/harness`` is the
+    session's choice, so it comes along; raises ValueError when it can't, and
+    the session then runs natively. The agent left behind gets its own
+    settings back first."""
+    picked = getattr(session, "harness", None)
+    chosen = getattr(session, "harness_model_source", None) == "chosen"
+    model = getattr(session, "harness_model", None) if chosen else None
+    if picked or getattr(session, "harness_backup", None) is not None:
+        clear_harness(session)
+    session.harness_backup = None
+    session.agent = agent
+    if picked:
+        apply_harness(session, picked, model=model)
+
+
 def pending_harness_approvals(session, *, limit: int = 5) -> List[Dict[str, Any]]:
     """Approval proposals a harness turn left waiting for a decision."""
     agent = session.agent
