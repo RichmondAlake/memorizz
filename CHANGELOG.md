@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.17.21 — 2026-11-02
+
+### Added
+
+- **Persona learning.** An agent's persona can now grow from its conversations
+  and memories in the background. On a schedule, the background model looks for
+  work the user keeps coming back to and adds one sentence to the goals or
+  background, quoting at least three conversations. The name and role never
+  change this way. It's off by default, and only runs for an agent that serves
+  one person. Sealed conversations are never read, every change can be undone,
+  and you can make changes wait for review. Set it on the agent form under
+  Persona, with `/persona-learning`, or with `persona_learning=`. Review, undo
+  and see past changes on the Learning control plane.
+  Guide: [Persona learning](docs/guides/persona-learning.md).
+- **Timers.** Ask for a pomodoro and it just starts. A countdown shows live in the
+  CLI's status bar and as a card above the chat box in the local UI, and rings
+  when it ends. It needs no approval, timezone or model call. The CLI and UI share
+  timers, and `/timer` starts one without the agent.
+  Guide: [Timers](docs/guides/automations.md#timers).
+
+### Fixed
+
+- A `one_shot` automation now waits for `interval_seconds`. It used to ignore the
+  delay and run straight away.
+- An `interval` or `one_shot` automation no longer needs a timezone: it uses this
+  machine's. The agent's automation tool does the same for cron, except on
+  `multi_tenant` agents or when the machine's timezone can't be read.
+  `create_automation` still requires one for cron.
+- On Oracle, a persona's change history survives a reload. It came back empty,
+  and the next save erased it, so history already lost can't be restored. Version
+  numbers, name and goals were not affected.
+- On Oracle, automations work with the default thin driver. Times were stored in
+  a form the driver can't read, so reading a job failed with DPY-3022. Jobs already
+  stored are readable, with no migration needed.
+- On Oracle, a persona an agent has replaced can't load for it again.
+- `/persona` in the CLI now saves to the agent. Before, a persona lasted for
+  that session and was gone at the next launch, along with its tools. On an agent
+  that already has a persona it changes that persona, keeping its history.
+- A running agent's save no longer overwrites a persona changed elsewhere, such
+  as on the agent form. It takes the newer one instead.
+- `read_persona` no longer returns the change history in a sealed conversation,
+  matching the system prompt: reasons can quote other conversations.
+
 ## 0.17.20 — 2026-11-01
 
 ### Added
