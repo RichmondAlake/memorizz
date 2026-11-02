@@ -63,8 +63,14 @@ Build persistent agents with `MemAgent` and `MemAgentBuilder`. Choose
   stored in toolbox memory and found by meaning. A
   [tool call cache](docs/guides/context-efficiency.md#tool-call-cache) reuses
   the results of repeated calls to tools that are safe to reuse.
-- **Coordination:** delegate work to specialist agents, share memory, and run
-  scheduled automations.
+- **Persona:** give an agent a name, role, goals and background. It changes
+  when someone asks, and with
+  [persona learning](docs/guides/persona-learning.md) on, it can grow in the
+  background from what the agent is used for, with every change quoted and
+  undoable.
+- **Coordination:** delegate work to specialist agents, share memory, run
+  scheduled automations, and start [timers](docs/guides/automations.md#timers)
+  that count down live in the CLI and the chat.
 - **Interfaces:** use the Python SDK, interactive CLI, local web UI, or expose
   Memorizz as an MCP server.
 
@@ -142,6 +148,7 @@ the one in use on held-out examples, and you swap it in (or back) from the
 UI, the CLI or MCP.
 
 Read about [continual learning](docs/guides/continual-learning.md),
+[persona learning](docs/guides/persona-learning.md),
 [fine-tuning](docs/guides/fine-tuning.md), the
 [learning control plane](docs/guides/learning-control-plane.md), the
 [forgetting mechanism](docs/guides/forgetting-mechanism.md), and
@@ -201,10 +208,10 @@ Memory persists under `~/.memorizz/memory` by default. Save `agent.agent_id` to
 - [Memory-first tutorials](examples/zero_to_hero/README.md)
 - [Persistent notes and searchable history: filesystem and Oracle notebooks](examples/context_engineering/README.md)
 - [MCP connectivity](docs/guides/mcp-connectivity.md) and [MCP server](docs/guides/mcp-server.md)
-- [Automations](docs/guides/automations.md) and [multi-user applications](docs/guides/multi-tenant.md)
+- [Automations and timers](docs/guides/automations.md) and [multi-user applications](docs/guides/multi-tenant.md)
 - [Observability](docs/observability-ui.md) and [evaluation suite](docs/evaluation-suite.md)
 - [Usage, cost and memory analytics](docs/usage-analytics.md)
-- [Account-owned persona evolution](docs/persona-evolution-hosts.md)
+- [Persona learning](docs/guides/persona-learning.md) and [account-owned persona evolution](docs/persona-evolution-hosts.md)
 - [API reference](docs/reference/python-api.md), [configuration](docs/reference/configuration.md), and [troubleshooting](docs/troubleshooting.md)
 
 ## License

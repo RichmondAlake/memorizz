@@ -14,8 +14,9 @@ background model and never on the user's turn.
 
 ## The background model
 
-Summaries, context compaction, reflection, LLM importance ratings and skill
-distillation are all memory upkeep. They run on the agent's own model unless
+Summaries, context compaction, reflection, LLM importance ratings, skill
+distillation and [persona learning](persona-learning.md) are all memory upkeep.
+They run on the agent's own model unless
 you give it a background model, which is usually smaller and cheaper. The
 user's turns keep the agent's model.
 

@@ -91,6 +91,10 @@ trust boundaries.
 - Let agents operate Mac apps with [desktop control](desktop-control/index.md):
   windows read as numbered text, actions that wait for approval and never take
   your focus, and every run kept as workflow memory.
+- Let a persona [grow from conversations](guides/persona-learning.md), with
+  every change quoted and undoable.
+- Start [timers](guides/automations.md#timers) that count down live in the CLI
+  and the chat.
 - Choose a [memory provider](memory-providers/filesystem.md) and follow the
   [multi-tenant contract](guides/multi-tenant.md).
 - Control token use with [context efficiency, semantic caching, and compaction](guides/context-efficiency.md).
