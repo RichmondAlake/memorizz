@@ -21,6 +21,10 @@ from ...automation.schedule import (
 from ...automation.store.factory import get_automation_store
 from ...tooling import governed_tool
 
+# Timers belong to the person at this machine: agents that serve a remote caller
+# don't get them.
+TIMER_TOOL_NAMES = ("start_timer", "list_timers", "cancel_timer")
+
 # Tool names registered by ``register_tools``. The automation runner strips these
 # for scheduled runs (an executing agent should do its task, not manage other
 # automations) — keep in sync with the add_tool calls in register_tools.
@@ -31,9 +35,7 @@ AUTOMATION_TOOL_NAMES = (
     "automation_resume_job",
     "automation_delete_job",
     "automation_run_now",
-    "start_timer",
-    "list_timers",
-    "cancel_timer",
+    *TIMER_TOOL_NAMES,
 )
 
 

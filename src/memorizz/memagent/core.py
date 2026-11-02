@@ -10678,11 +10678,11 @@ class MemAgent:
         # 9. Automations instructions (durable scheduling)
         if self.has_automations():
             timer_rule = (
-                ""
-                if self.multi_tenant
-                else "- For a countdown or a reminder in the next few hours, call "
+                "- For a countdown or a reminder in the next few hours, call "
                 "'start_timer' straight away, with no questions. The user sees it "
                 "live and is alerted when it ends.\n"
+                if "start_timer" in self.tool_manager.tools
+                else ""
             )
             prompt_parts.append(
                 "Automations (scheduling/reminders):\n"

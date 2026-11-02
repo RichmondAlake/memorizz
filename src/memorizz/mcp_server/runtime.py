@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .. import timers as timers_store
 from ..approval import (
     ApprovalStateError,
     ApprovalStatus,
@@ -342,6 +343,143 @@ def _ingest_skip_reason(path: Path, *, is_dir: bool) -> Optional[str]:
     return "hidden file" if name.startswith(".") else None
 
 
+def _persona_fields(
+    name: Optional[str],
+    role: Optional[str],
+    goals: Optional[str],
+    background: Optional[str],
+    limit: int,
+) -> Dict[str, str]:
+    """What a call said about the persona, checked. The text reaches every
+    system prompt, so it has the same limit as an instruction."""
+    fields = {
+        key: str(value).strip()
+        for key, value in {
+            "name": name,
+            "role": role,
+            "goals": goals,
+            "background": background,
+        }.items()
+        if value is not None
+    }
+    if "name" in fields and not 1 <= len(fields["name"]) <= 200:
+        raise MemorizzServerError(
+            "invalid_agent", "persona_name must be between 1 and 200 characters"
+        )
+    for key, value in fields.items():
+        if len(value) > limit:
+            raise MemorizzServerError(
+                "invalid_agent", f"persona_{key} cannot exceed {limit} characters"
+            )
+    return fields
+
+
+def _new_persona(fields: Dict[str, str]) -> Any:
+    from ..long_term.semantic.persona.persona import Persona
+
+    if not fields.get("name"):
+        raise MemorizzServerError(
+            "invalid_agent", "persona_name is required to give an agent a persona"
+        )
+    try:
+        return Persona(**fields)
+    except Exception:
+        # Embeddings aren't set up. It only can't be found by similarity.
+        return Persona.from_dict(fields)
+
+
+def _persona_learning_setting(
+    current: Any,
+    enabled: Optional[bool],
+    auto_apply: Optional[bool],
+    *,
+    persona: Any,
+    multi_tenant: bool,
+) -> Any:
+    """The stored ``persona_learning`` value after this call."""
+    if enabled is None and auto_apply is None:
+        return current
+    from ..learning.persona_learning import PersonaLearningConfig
+
+    stored = dict(current) if isinstance(current, dict) else {}
+    on = bool(stored.get("enabled")) if enabled is None else bool(enabled)
+    if not on:
+        if enabled is None:
+            raise MemorizzServerError(
+                "invalid_agent", "Persona learning is off for this agent"
+            )
+        return None
+    if persona is None:
+        raise MemorizzServerError(
+            "invalid_agent",
+            "This agent has no persona to grow: pass persona_name as well",
+        )
+    if multi_tenant:
+        raise MemorizzServerError(
+            "invalid_agent",
+            "An agent serving several users shares its persona, so it can't "
+            "learn from any one of them",
+        )
+    stored["enabled"] = True
+    if auto_apply is not None:
+        stored["auto_apply"] = bool(auto_apply)
+    return PersonaLearningConfig.from_value(stored).to_dict()
+
+
+def _persona_public(agent: Any) -> Dict[str, Any]:
+    """An agent's persona and learning status, without its history.
+
+    The history holds what users wrote, so it stays with the operator.
+    """
+    from ..learning.persona_learning import PersonaLearningConfig, persona_of
+
+    manager = getattr(agent, "persona_manager", None)
+    persona = manager.configuration_persona if manager else persona_of(agent)
+    public: Dict[str, Any] = {}
+    if persona is not None:
+        public["persona"] = {
+            "name": persona.name,
+            "role": persona.role,
+            "goals": persona.goals,
+            "background": persona.background,
+            "version": persona.version,
+        }
+    try:
+        config = PersonaLearningConfig.from_value(
+            getattr(agent, "persona_learning", None)
+        )
+    except (TypeError, ValueError):
+        return public
+    if config.enabled:
+        state = getattr(agent, "persona_learning_state", None)
+        state = state if isinstance(state, dict) else {}
+        reviews = [
+            item for item in state.get("reviews") or [] if isinstance(item, dict)
+        ]
+        public["persona_learning"] = {
+            "every_n_turns": config.every_n_turns,
+            "every_hours": config.every_hours,
+            "auto_apply": config.auto_apply,
+            "change_waiting": bool(state.get("pending")),
+            "last_review": (
+                {key: reviews[-1].get(key) for key in ("at", "outcome", "code")}
+                if reviews
+                else None
+            ),
+        }
+    return public
+
+
+def _timer_public(timer: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "timer_id": timer["timer_id"],
+        "label": timer["label"],
+        "length": timers_store.format_time(timer["seconds"]),
+        "time_left": timers_store.format_time(timer["remaining"]),
+        "state": timer["state"],
+    }
+
+
 class MemorizzRuntime:
     """Lazy, synchronized access to one Memorizz deployment."""
 
@@ -552,6 +690,7 @@ class MemorizzRuntime:
             )
             if value.get(key) is not None
         }
+        public.update(_persona_public(agent))
         return public
 
     def _is_agent_exposed(self, agent_id: str, identity: RequestIdentity) -> bool:
@@ -684,6 +823,12 @@ class MemorizzRuntime:
         meta_harness_mode: Optional[str] = None,
         default_harness: str = "auto",
         harness_workspace: Optional[str] = None,
+        persona_name: Optional[str] = None,
+        persona_role: Optional[str] = None,
+        persona_goals: Optional[str] = None,
+        persona_background: Optional[str] = None,
+        persona_learning: Optional[bool] = None,
+        persona_learning_auto_apply: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Create a validated local agent through the governed MCP write path.
 
@@ -835,6 +980,22 @@ class MemorizzRuntime:
                 else:
                     llm_config["model"] = normalized_llm_model
 
+        persona_fields = _persona_fields(
+            persona_name,
+            persona_role,
+            persona_goals,
+            persona_background,
+            self.config.max_text_chars,
+        )
+        persona = _new_persona(persona_fields) if persona_fields else None
+        learning = _persona_learning_setting(
+            None,
+            persona_learning,
+            persona_learning_auto_apply,
+            persona=persona,
+            multi_tenant=False,
+        )
+
         builder = (
             MemAgentBuilder()
             .with_name(normalized_name)
@@ -850,6 +1011,10 @@ class MemorizzRuntime:
         )
         if normalized_timezone:
             builder.with_default_timezone(normalized_timezone)
+        if persona is not None:
+            builder.with_persona(persona)
+        if learning:
+            builder.with_persona_learning(**learning)
         if normalized_instruction:
             builder.with_instruction(normalized_instruction)
         if normalized_memory_ids:
@@ -955,6 +1120,12 @@ class MemorizzRuntime:
         meta_harness_mode: Optional[str] = None,
         default_harness: Optional[str] = None,
         harness_workspace: Optional[str] = None,
+        persona_name: Optional[str] = None,
+        persona_role: Optional[str] = None,
+        persona_goals: Optional[str] = None,
+        persona_background: Optional[str] = None,
+        persona_learning: Optional[bool] = None,
+        persona_learning_auto_apply: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Update the safe persisted-agent surface without accepting credentials."""
         normalized, existing = self._local_agent_record(
@@ -982,6 +1153,12 @@ class MemorizzRuntime:
                 meta_harness_mode,
                 default_harness,
                 harness_workspace,
+                persona_name,
+                persona_role,
+                persona_goals,
+                persona_background,
+                persona_learning,
+                persona_learning_auto_apply,
             )
         ) or bool(clear_llm)
         if not supplied:
@@ -1222,6 +1399,36 @@ class MemorizzRuntime:
                 ) from exc
             updated.llm_config = llm_config
 
+        # Last, once nothing else can refuse the call: a persona's change is
+        # written as it's made, and it keeps its version and history.
+        from ..learning.persona_learning import persona_of
+
+        persona_fields = _persona_fields(
+            persona_name,
+            persona_role,
+            persona_goals,
+            persona_background,
+            self.config.max_text_chars,
+        )
+        persona = persona_of(updated)
+        if persona is None and persona_fields:
+            persona = _new_persona(persona_fields)
+        updated.persona_learning = _persona_learning_setting(
+            updated.persona_learning,
+            persona_learning,
+            persona_learning_auto_apply,
+            persona=persona,
+            multi_tenant=bool(updated.multi_tenant),
+        )
+        if persona_fields:
+            if persona_of(updated) is not None:
+                persona.update(
+                    persona_fields,
+                    {"reason": "Changed through MCP", "source_type": "tool_call"},
+                    self.provider,
+                )
+            updated.persona = persona
+
         try:
             self.provider.store_memagent(updated)
             persisted = self.provider.retrieve_memagent(normalized)
@@ -1349,7 +1556,7 @@ class MemorizzRuntime:
         else:
             self._assert_agent_exposed(normalized, identity)
             if normalized in self._agents:
-                return self._agents[normalized]
+                return self._without_remote_timers(self._agents[normalized])
             from ..memagent import MemAgent
 
             try:
@@ -1360,6 +1567,16 @@ class MemorizzRuntime:
                 ) from exc
         self._agents[normalized] = agent
         self._agent_locks.setdefault(normalized, threading.RLock())
+        return self._without_remote_timers(agent)
+
+    def _without_remote_timers(self, agent: Any) -> Any:
+        """A remote caller's turn can't read or start this machine's timers."""
+        if self.config.transport != "stdio":
+            from ..memagent.managers.automation_manager import TIMER_TOOL_NAMES
+
+            for name in TIMER_TOOL_NAMES:
+                if name in agent.tool_manager.tools:
+                    agent.tool_manager.remove_tool(name)
         return agent
 
     def _load_agent_for_inspection(
@@ -1494,6 +1711,57 @@ class MemorizzRuntime:
         if observability is not None:
             result["observability"] = _json_value(observability)
         return result
+
+    def _require_local_timers(self, identity: RequestIdentity, scope: str) -> None:
+        self._require_scope(identity, scope)
+        if self.config.transport != "stdio":
+            raise MemorizzServerError(
+                "timers_local_only",
+                "Timers belong to the person at this machine, so they are "
+                "available only over local stdio MCP",
+            )
+
+    def start_timer(
+        self,
+        identity: RequestIdentity,
+        *,
+        minutes: float = 0,
+        seconds: float = 0,
+        label: str = "",
+    ) -> Dict[str, Any]:
+        """Start a countdown the CLI and the local UI on this machine show."""
+        self._require_local_timers(identity, WRITE_SCOPE)
+        try:
+            started = timers_store.start(
+                float(minutes or 0) * 60 + float(seconds or 0), label
+            )
+        except (TypeError, ValueError) as exc:
+            raise MemorizzServerError("invalid_timer", str(exc)) from exc
+        except OSError as exc:
+            raise MemorizzServerError(
+                "provider_error", "The timer could not be saved"
+            ) from exc
+        return {"ok": True, "timer": _timer_public(started)}
+
+    def list_timers(self, identity: RequestIdentity) -> Dict[str, Any]:
+        self._require_local_timers(identity, READ_SCOPE)
+        return {
+            "ok": True,
+            "timers": [_timer_public(item) for item in timers_store.listed()],
+        }
+
+    def cancel_timer(
+        self, identity: RequestIdentity, *, timer_id: str = ""
+    ) -> Dict[str, Any]:
+        self._require_local_timers(identity, WRITE_SCOPE)
+        stopped = timers_store.cancel(timer_id)
+        if stopped is None:
+            raise MemorizzServerError(
+                "timer_not_found",
+                "No such timer. With several running, pass timer_id from "
+                "memorizz_list_timers",
+            )
+        return {"ok": True, "cancelled": _timer_public(stopped)}
 
     def preview_personalization(
         self,

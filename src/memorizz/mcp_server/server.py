@@ -321,8 +321,19 @@ def create_memorizz_mcp_server(
         meta_harness_mode: Optional[str] = None,
         default_harness: str = "auto",
         harness_workspace: Optional[str] = None,
+        persona_name: Optional[str] = None,
+        persona_role: Optional[str] = None,
+        persona_goals: Optional[str] = None,
+        persona_background: Optional[str] = None,
+        persona_learning: Optional[bool] = None,
+        persona_learning_auto_apply: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """Create and persist a local MemAgent after durable host approval."""
+        """Create and persist a local MemAgent after durable host approval.
+
+        persona_learning lets the persona grow from conversations in the
+        background and needs persona_name. With persona_learning_auto_apply
+        false, each change waits for review in the CLI or the local UI.
+        """
         return await _tool_call(
             service.create_agent,
             name,
@@ -344,6 +355,12 @@ def create_memorizz_mcp_server(
             meta_harness_mode=meta_harness_mode,
             default_harness=default_harness,
             harness_workspace=harness_workspace,
+            persona_name=persona_name,
+            persona_role=persona_role,
+            persona_goals=persona_goals,
+            persona_background=persona_background,
+            persona_learning=persona_learning,
+            persona_learning_auto_apply=persona_learning_auto_apply,
         )
 
     @server.tool(annotations=write)
@@ -369,8 +386,19 @@ def create_memorizz_mcp_server(
         meta_harness_mode: Optional[str] = None,
         default_harness: Optional[str] = None,
         harness_workspace: Optional[str] = None,
+        persona_name: Optional[str] = None,
+        persona_role: Optional[str] = None,
+        persona_goals: Optional[str] = None,
+        persona_background: Optional[str] = None,
+        persona_learning: Optional[bool] = None,
+        persona_learning_auto_apply: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """Update safe local agent configuration after host approval."""
+        """Update safe local agent configuration after host approval.
+
+        Persona fields change the persona in place, keeping its version and
+        history. persona_learning needs a persona. Reviewing or undoing what it
+        changed stays in the CLI and the local UI.
+        """
         return await _tool_call(
             service.update_agent,
             agent_id,
@@ -395,6 +423,12 @@ def create_memorizz_mcp_server(
             meta_harness_mode=meta_harness_mode,
             default_harness=default_harness,
             harness_workspace=harness_workspace,
+            persona_name=persona_name,
+            persona_role=persona_role,
+            persona_goals=persona_goals,
+            persona_background=persona_background,
+            persona_learning=persona_learning,
+            persona_learning_auto_apply=persona_learning_auto_apply,
         )
 
     @server.tool(annotations=destructive)
@@ -1149,6 +1183,36 @@ def create_memorizz_mcp_server(
             attributes=attributes,
             relations=[item.model_dump() for item in relations or []],
             memory_id=memory_id,
+        )
+
+    @server.tool(annotations=write)
+    async def memorizz_start_timer(
+        minutes: float = 0, seconds: float = 0, label: str = ""
+    ) -> Dict[str, Any]:
+        """Start a countdown or short reminder: a pomodoro, tea, a call in 10 minutes.
+
+        It counts down live in the MemoRizz CLI's status bar and in the local
+        UI's chat, and alerts the user when it ends. Local stdio only. Put what
+        to remember in label. A pomodoro with no length given is 25 minutes.
+        """
+        return await _tool_call(
+            service.start_timer,
+            current_identity(),
+            minutes=minutes,
+            seconds=seconds,
+            label=label,
+        )
+
+    @server.tool(annotations=read_only)
+    async def memorizz_list_timers() -> Dict[str, Any]:
+        """List this machine's timers with the time left on each."""
+        return await _tool_call(service.list_timers, current_identity())
+
+    @server.tool(annotations=write)
+    async def memorizz_cancel_timer(timer_id: str = "") -> Dict[str, Any]:
+        """Stop a timer. timer_id can be left out when only one is running."""
+        return await _tool_call(
+            service.cancel_timer, current_identity(), timer_id=timer_id
         )
 
     @server.tool(annotations=read_only)

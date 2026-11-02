@@ -750,7 +750,12 @@ def test_memorizz_server_works_over_real_stdio_protocol(tmp_path, monkeypatch):
     tools = manager.list_tools("memorizz-server")
     names = {tool["name"] for tool in tools["tools"]}
     assert tools["ok"] is True
-    assert len(names) == 58
+    assert len(names) == 61
+    assert {
+        "memorizz_start_timer",
+        "memorizz_list_timers",
+        "memorizz_cancel_timer",
+    } <= names
     assert "memorizz_get_memory_timeline" in names
     assert {
         "memorizz_ingest",

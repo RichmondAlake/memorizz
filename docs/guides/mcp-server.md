@@ -160,6 +160,8 @@ external origin, not the internal bind address.
 | Preview bounded personalization and content-safe memory evidence | `memorizz_preview_personalization` | `memorizz:read` |
 | Create a persisted local agent | `memorizz_create_agent` | `memorizz:write`; local `stdio` only; durable approval required |
 | Update safe local agent configuration | `memorizz_update_agent` | `memorizz:write`; local `stdio` only; durable approval required |
+| Set a persona and turn on [persona learning](persona-learning.md) | `persona_*` and `persona_learning` on `memorizz_create_agent` and `memorizz_update_agent` | `memorizz:write`; local `stdio` only |
+| Start, list and cancel [timers](automations.md#timers) | `memorizz_start_timer`, `memorizz_list_timers`, `memorizz_cancel_timer` | `memorizz:write` to start or cancel, `memorizz:read` to list; local `stdio` only |
 | Propose local agent deletion | `memorizz_delete_agent` | `memorizz:write`; local `stdio` only; durable operator approval required |
 | Execute an exposed agent | `memorizz_execute_agent` | `memorizz:execute` + `memorizz:write` |
 | Compile scoped continual-learning memory | `memorizz_compile_memory` | `memorizz:write` |
@@ -364,7 +366,7 @@ memorizz mcp server-resume PROPOSAL_ID
 
 ## Form-factor parity and trust boundary
 
-The 44-tool MCP surface covers the common operational capabilities available
+The 61-tool MCP surface covers the common operational capabilities available
 through the SDK, CLI, and local UI: agent lifecycle and execution, scoped memory
 and conversations, capability/cache/learning/observability inspection,
 continual-learning compilation, conversation compaction, and governed harness
@@ -377,7 +379,8 @@ MCP tools:
 
 - credentials and API-key management;
 - ingestion outside the operator's ingest folders;
-- approval, rejection, and resumption decisions; and
+- approval, rejection, and resumption decisions;
+- reviewing, approving and undoing persona learning changes; and
 - configuration of outbound MCP connections.
 
 Those operations remain in trusted SDK, CLI, or authenticated local-UI code.
