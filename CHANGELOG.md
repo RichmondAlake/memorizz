@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.17.23 — 2026-11-02
+
+### Changed
+
+- **The trace waterfall shows where a turn's time went.** On Observability, the
+  waterfall is now a tree of spans on one clock, and it shows every model, tool
+  and memory span. Before, it hid successful model and tool calls by default,
+  which on a real 34-second turn left out 25 seconds.
+  - Spans nest under the span that started them. Each row can collapse and shows
+    how many spans are inside it. Runs of three or more identical spans fold into
+    one row.
+  - A bar above each turn splits its time into model, tools, memory and
+    unaccounted time. Hatched rows mark stretches where the turn was running but
+    nothing recorded what it was doing.
+  - Failures are marked on the rows above them, and **Next failure** opens each
+    one with the reason it failed.
+  - You can filter by type or by failures, search names, tools, models and IDs,
+    and drag across the overview strip to zoom.
+  - Clicking a span shows its timing, its own time, tokens, cost, error and IDs.
+    It never shows message content.
+  - It works by keyboard, its columns can be resized, and it fits light theme
+    and phone screens.
+
+  Guide: [Observability UI](docs/observability-ui.md#health-causal-inspection-and-comparison).
+
 ## 0.17.22 — 2026-11-02
 
 ### Added
