@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.17.22 — 2026-11-02
+
+### Added
+
+- **Personas over MCP.** `memorizz_create_agent` and `memorizz_update_agent` can
+  set a persona and turn on persona learning, and `memorizz_get_agent` shows the
+  persona and how learning is going. A persona's change history stays out of MCP,
+  because it holds what users wrote. Reviewing and undoing changes stays in the
+  CLI and the local UI.
+- **Timers over MCP.** `memorizz_start_timer`, `memorizz_list_timers` and
+  `memorizz_cancel_timer` let Claude Code and Codex start a countdown that shows
+  in the CLI and the local UI. They work over local stdio only.
+
+### Fixed
+
+- An agent run for a remote MCP caller no longer has the timer tools, which would
+  have let that caller read and start this machine's timers. The system prompt
+  offers `start_timer` only when the agent has it.
+
 ## 0.17.21 — 2026-11-02
 
 ### Added
