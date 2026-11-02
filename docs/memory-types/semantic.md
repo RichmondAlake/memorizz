@@ -312,6 +312,9 @@ call `update_persona` (durable identity shifts only — one-off facts go to
 optional source id/conversation id, and agent id so every evolution remains
 auditable.
 
+To let a persona grow on its own from conversations and memories, see
+[Persona learning](../guides/persona-learning.md).
+
 The Local UI's agent configuration page exposes the evolution model
 through two dropdowns: **Load built-in preset** (from `RoleType` +
 `PREDEFINED_INFO` via `GET /api/persona-presets`) and **Load saved

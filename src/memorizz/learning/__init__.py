@@ -25,11 +25,21 @@ from .models import (
     OutcomeEvidence,
     OutcomeStatus,
 )
+from .persona_learning import (
+    PersonaLearner,
+    PersonaLearningConfig,
+    PersonaProposal,
+    PersonaReview,
+)
 from .store import LearningControlPlaneStore, LearningRecordConflictError
 
 __all__ = [
     "ArtifactKind",
     "CompilerReport",
+    "PersonaLearner",
+    "PersonaLearningConfig",
+    "PersonaProposal",
+    "PersonaReview",
     "ConsolidationConfig",
     "ConsolidationOp",
     "ConsolidationPlan",

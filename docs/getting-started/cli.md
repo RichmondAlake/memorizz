@@ -393,7 +393,9 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/agent new [model] [prompt]` | Make an agent and switch to it. See [Create and inspect agents](#create-and-inspect-agents). |
 | `/name [new name]` | Show or change the agent's name (`/rename` works too). The name shows in the banner, the status bar and the UI's chat header, where you can also click it to rename the agent. |
 | `/connect [notion\|gmail\|google-calendar\|server]` | Without a name, list what the agent can reach and how to connect the rest (`/mcp` works too). With one, attach that connector to the agent and sign in in the browser; the agent gets its tools straight away. When you ask for something the agent isn't connected to, such as "search my Notion", the CLI offers this after the answer. Gmail and Google Calendar need your own Google OAuth client first; `/connect gmail` explains the step. |
-| `/persona [name \| goals \| background]` | Show or set the agent's persona. |
+| `/persona [name \| goals \| background]` | Show or change the agent's persona. Saved with the agent, and a change keeps its history. |
+| `/timer [length [label]]` | Start a countdown in the status bar (`/timer 25 focus`, `/timer 90s tea`, `/timer 1h`), or list them. `/timer cancel [id]` stops one. Rings when it ends. See [Timers](../guides/automations.md#timers). |
+| `/persona-learning [on [review]\|off\|now\|approve\|dismiss\|undo [version]]` | Let the persona grow from conversations on the background model, or review what that did. `now` shows a proposal with its quotes and applies it on yes; `on review` makes changes wait for you. See [Persona learning](../guides/persona-learning.md). |
 | `/persona-reset` | Clear the persona (revert to default). |
 | `/tools` | List the agent's registered tools. |
 | `/ingest <file>` | Ingest a file into the knowledge base. |

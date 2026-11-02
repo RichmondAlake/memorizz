@@ -10,6 +10,7 @@ Cron support is 5-field: minute hour day_of_month month day_of_week.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Set
@@ -46,8 +47,37 @@ _DOW_NAMES = {
 }
 
 
+_ETC_TIMEZONE = "/etc/timezone"
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def local_timezone_name() -> Optional[str]:
+    """This machine's IANA timezone, or None when it can't be told.
+
+    It's None, not UTC, so a schedule that depends on it can ask: Windows has
+    none of these, and neither has a container with a copied /etc/localtime.
+    """
+    candidates = [os.environ.get("TZ", "").strip().lstrip(":")]
+    link = os.path.realpath("/etc/localtime")
+    if "zoneinfo/" in link:
+        candidates.append(link.split("zoneinfo/", 1)[1])
+    try:
+        with open(_ETC_TIMEZONE, encoding="utf-8") as handle:
+            candidates.append(handle.read().strip())
+    except OSError:
+        pass
+    for name in candidates:
+        if not name:
+            continue
+        try:
+            validate_timezone_name(name)
+        except (ValueError, RuntimeError):
+            continue
+        return name
+    return None
 
 
 def validate_timezone_name(name: str):
@@ -254,8 +284,11 @@ def compute_next_run_at(
         return after_utc + timedelta(seconds=seconds)
 
     if normalized in ("one_shot", "once"):
-        # one_shot/once defaults to immediate execution after creation/run-now
-        return after_utc
+        # Once, after interval_seconds if given, else straight away.
+        seconds = int(interval_seconds or 0)
+        if seconds < 0:
+            raise ValueError("interval_seconds can't be negative")
+        return after_utc + timedelta(seconds=seconds)
 
     raise ValueError(
         f"Unknown schedule_type '{schedule_type}' (valid: cron, interval, one_shot, once)"

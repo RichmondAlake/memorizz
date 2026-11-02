@@ -5,7 +5,7 @@
 {% block body_attrs %} class="page-playground" data-sidebar-scope="playground" data-sidebar-default="collapsed"{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="/static/css/playground.css?v=20">
+<link rel="stylesheet" href="/static/css/playground.css?v=21">
 <link rel="stylesheet" href="/static/css/pages/memory-evolution.css?v=8">
 <script src="/static/js/memory-evolution.js?v=8" defer></script>
 <script src="/static/js/context-history.js?v=2" defer></script>
@@ -15,6 +15,7 @@
 <script src="https://cdn.jsdelivr.net/npm/marked@14.0.0/marked.min.js"></script>
 <script src="/static/js/safe-markdown.js?v=2"></script>
 <script src="/static/js/local-models.js?v=1"></script>
+<script src="/static/js/playground-timers.js?v=1" defer></script>
 <style>
     /* Local-model manager widget styles are shared in styles.css
        (.local-model-status .model-manager etc). Below: page-specific rules.
@@ -297,6 +298,7 @@
         </div>
 
         <div class="pg-composer-wrap">
+            <div class="pg-timers" id="pg-timers" aria-label="Timers" hidden></div>
             <div class="pg-composer" id="playground-composer">
                 <div id="pg-kb-chips" class="pg-kb-chips" style="display:none;"></div>
                 <label for="pg-query" class="sr-only">Message</label>
@@ -4318,6 +4320,7 @@ async function sendMessage() {
                 renderCapabilityCard(streamMessage.container, event.capabilities || [], {suggested: true, query: query});
             } else if (event.type === 'tool.started' || event.type === 'tool.completed') {
                 showStatus((event.type === 'tool.started' ? 'Running ' : 'Finished ') + event.tool_name);
+                if (event.type === 'tool.completed' && /_timer$/.test(event.tool_name || '') && window.pgTimers) window.pgTimers.refresh();
                 pgLiveActivity(streamMessage.container, event);
             } else if (event.type === 'completion.check' && !event.accepted) {
                 showStatus('Checking the answer; retrying.');
@@ -4538,6 +4541,8 @@ document.querySelectorAll('.pg-message-text[data-md-raw]').forEach(function(el) 
         const schedule = data.memory_consolidation;
         const edit = '/agents/' + encodeURIComponent(agentId) + '/edit#memory-upkeep';
         const lcp = '/learning-control-plane?agent_id=' + encodeURIComponent(agentId) + '#memory-consolidation';
+        const learning = data.persona_learning;
+        const personaLearning = '/learning-control-plane?agent_id=' + encodeURIComponent(agentId) + '#persona-learning';
         body.innerHTML = '<dl class="pg-overview-list">'
             + row('Memory types', chips(data.memory_types))
             + row('Entity facts', data.entity_memory ? 'On, ' + escapeHtml(scopes[policy.entity_scope || 'memory']) : 'Off')
@@ -4561,6 +4566,10 @@ document.querySelectorAll('.pg-message-text[data-md-raw]').forEach(function(el) 
                 ? 'Every ' + schedule.every_n_turns + ' turns' + (schedule.every_hours ? ' or ' + Math.round(schedule.every_hours) + ' h' : '') + ', ' + (schedule.auto_apply ? 'applied automatically' : 'waits for review')
                     + (data.pending_consolidations ? ' · <a href="' + lcp + '">' + data.pending_consolidations + ' waiting</a>' : '')
                 : 'On demand')
+            + row('Persona learning', learning
+                ? 'Every ' + learning.every_n_turns + ' turns' + (learning.every_hours ? ' or ' + Math.round(learning.every_hours) + ' h' : '') + ', ' + (learning.auto_apply ? 'applied automatically' : 'waits for review')
+                    + (data.pending_persona_change ? ' · <a href="' + personaLearning + '">1 waiting</a>' : '')
+                : 'Off')
             + '</dl><p class="pg-panel-intro"><a href="' + edit + '">Change these on the agent form</a> · <a href="' + lcp + '">Consolidate now</a></p>';
     }
     function load() {

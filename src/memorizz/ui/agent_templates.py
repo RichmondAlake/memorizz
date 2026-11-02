@@ -33,6 +33,7 @@ TEXT_FIELDS = (
     "skill_injection_role",
     "entity_scope",
     "consolidation_every_n_turns",
+    "persona_learning_every_n_turns",
     "forgetting_scoring_recency_decay_per_hour",
     "forgetting_scoring_recency_anchor",
     "forgetting_scoring_alpha_recency",
@@ -71,6 +72,8 @@ CHECKBOX_FIELDS = (
     "sealed_conversations",
     "memory_consolidation",
     "consolidation_auto_apply",
+    "persona_learning",
+    "persona_learning_auto_apply",
     "continual_learning_require_shadow",
     "continual_learning_shadow_evaluation",
     "automations_enabled",
@@ -208,6 +211,8 @@ def _card(template: AgentTemplate) -> Dict[str, Any]:
         chips.append("Sealed conversations")
     if values.get("memory_consolidation"):
         chips.append("Memory consolidation")
+    if values.get("persona_learning"):
+        chips.append("Persona learning")
     if not template.builtin and values.get("llm_model"):
         provider = str(values.get("llm_provider") or "")
         chips.append(

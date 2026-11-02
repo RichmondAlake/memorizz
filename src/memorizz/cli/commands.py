@@ -735,6 +735,20 @@ def cmd_consolidate(session, args: str):
     memory_upkeep.cmd_consolidate(session, args)
 
 
+def cmd_timer(session, args: str):
+    """Show, start or stop a countdown."""
+    from . import timer_commands
+
+    timer_commands.cmd_timer(session, args)
+
+
+def cmd_persona_learning(session, args: str):
+    """Let the persona grow from conversations."""
+    from . import memory_upkeep
+
+    memory_upkeep.cmd_persona_learning(session, args)
+
+
 def cmd_background_model(session, args: str):
     from . import memory_upkeep
 
@@ -1133,11 +1147,31 @@ def cmd_persona(session, args: str):
 
     from ..long_term.semantic.persona import Persona
 
-    persona = Persona(name=name, goals=goals, background=background)
-    if session.agent.set_persona(persona):
-        console.print(f"[green]Persona set →[/green] {name}")
+    persona = getattr(pm, "configuration_persona", None) if pm else None
+    if persona is None:
+        persona = Persona(name=name, goals=goals, background=background)
+        if not session.agent.set_persona(persona):
+            console.print("[red]Failed to set persona.[/red]")
+            return
     else:
-        console.print("[red]Failed to set persona.[/red]")
+        # A new persona would throw away its versions and what it learned.
+        updates = {"name": name, "goals": goals, "background": background}
+        result = pm.apply_update(
+            {key: value for key, value in updates.items() if value},
+            {"reason": "Set with /persona", "source_type": "manual"},
+        )
+        if result.get("error"):
+            console.print(f"[red]{escape(str(result['error']))}[/red]")
+            return
+    try:
+        save_agent_fields(session, persona=persona)
+    except Exception as exc:
+        console.print(
+            "[yellow]Persona set for this session, but it could not be saved:"
+            f"[/yellow] {escape(str(exc))}"
+        )
+        return
+    console.print(f"[green]Persona set →[/green] {escape(name)}")
 
 
 def cmd_persona_reset(session, args: str):
@@ -2496,6 +2530,16 @@ COMMANDS: Dict[str, Command] = {
         cmd_persona,
         "Show or set the agent's persona.",
         "/persona [name | goals | background]",
+    ),
+    "timer": Command(
+        cmd_timer,
+        "Start a countdown in the status bar, or list and cancel them.",
+        "/timer [length [label]] · /timer cancel [id]",
+    ),
+    "persona-learning": Command(
+        cmd_persona_learning,
+        "Let the persona grow from conversations, on the background model.",
+        "/persona-learning [on [review]|off|now|approve|dismiss|undo [version]]",
     ),
     "persona-reset": Command(
         cmd_persona_reset,

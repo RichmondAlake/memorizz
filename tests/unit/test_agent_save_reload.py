@@ -444,7 +444,13 @@ def test_every_saved_field_is_restored():
     persistence._saved_settings(_Record())
 
     # The model instance and the id are restored by load_agent itself.
-    assert set(MemAgentModel.model_fields) - read == {"model", "agent_id"}
+    # The persona learning state is read from the store when it's needed: no
+    # running agent holds a copy to go stale.
+    assert set(MemAgentModel.model_fields) - read == {
+        "model",
+        "agent_id",
+        "persona_learning_state",
+    }
 
 
 # ---------------------------------------------------------------------------

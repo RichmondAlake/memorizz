@@ -136,6 +136,12 @@ async def api_agent_memory_overview(agent_id: str):
     overview["pending_consolidations"] = len(
         _shared_upkeep(_state["provider"], agent_id).plans
     )
+    state = getattr(
+        _state["provider"].retrieve_memagent(agent_id), "persona_learning_state", None
+    )
+    overview["pending_persona_change"] = bool(
+        isinstance(state, dict) and state.get("pending")
+    )
     return overview
 
 

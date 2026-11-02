@@ -10,8 +10,14 @@ import os
 import uuid
 from typing import Any, Dict, List, Optional
 
+from ... import timers as timers_store
 from ...automation.models import AutomationJob
-from ...automation.schedule import compute_next_run_at, utcnow, validate_timezone_name
+from ...automation.schedule import (
+    compute_next_run_at,
+    local_timezone_name,
+    utcnow,
+    validate_timezone_name,
+)
 from ...automation.store.factory import get_automation_store
 from ...tooling import governed_tool
 
@@ -25,6 +31,9 @@ AUTOMATION_TOOL_NAMES = (
     "automation_resume_job",
     "automation_delete_job",
     "automation_run_now",
+    "start_timer",
+    "list_timers",
+    "cancel_timer",
 )
 
 
@@ -46,13 +55,14 @@ class AutomationManager:
         *,
         agent_id: str,
         default_timezone: Optional[str] = None,
+        timers: bool = True,
     ) -> None:
         if not self.is_enabled() or tool_manager is None:
             return
         store = self._store
         assert store is not None
 
-        def _resolve_timezone(value: str) -> str:
+        def _resolve_timezone(value: str, schedule: str) -> str:
             tz = str(value or "").strip()
             if tz:
                 return tz
@@ -62,7 +72,18 @@ class AutomationManager:
             tz = str(os.environ.get("MEMORIZZ_DEFAULT_TIMEZONE", "")).strip()
             if tz:
                 return tz
-            raise ValueError("timezone is required (or set MEMORIZZ_DEFAULT_TIMEZONE)")
+            machine = local_timezone_name()
+            if schedule != "cron":
+                return machine or "UTC"
+            # An agent serving several users runs on a server, and a machine
+            # whose timezone can't be read has none to offer: a cron time
+            # would be a silent guess, so the model asks.
+            if timers and machine:
+                return machine
+            raise ValueError(
+                "timezone is required for a cron schedule: ask the user which one "
+                "(or set MEMORIZZ_DEFAULT_TIMEZONE)"
+            )
 
         def _normalize_whatsapp_to(values: Any) -> List[str]:
             if values is None:
@@ -107,10 +128,13 @@ class AutomationManager:
             whatsapp_to: List[str] = None,
             client_request_id: str = "",
         ) -> Dict[str, Any]:
-            """Schedule a reminder, report or recurring task for this agent to run later.
+            """Schedule a report or recurring task for this agent to run later.
 
-            It runs query_template once ("one_shot"), every interval_seconds
-            ("interval") or on a cron_expr ("cron").
+            It runs query_template once ("one_shot", after interval_seconds if
+            given), every interval_seconds ("interval") or on a cron_expr
+            ("cron"). Leave timezone out unless the user named one; a cron job
+            says so if it needs one. For a countdown the user wants to watch,
+            such as a pomodoro, use start_timer.
             """
             if store is None:
                 return {"ok": False, "error": "Automations are unavailable (no store)."}
@@ -120,7 +144,7 @@ class AutomationManager:
                 return {"ok": False, "error": "name is required."}
 
             schedule = str(schedule_type or "").strip().lower()
-            tz_name = _resolve_timezone(timezone)
+            tz_name = _resolve_timezone(timezone, schedule)
             validate_timezone_name(tz_name)
 
             query = str(query_template or "").strip()
@@ -287,3 +311,76 @@ class AutomationManager:
         tool_manager.add_tool(automation_resume_job)
         tool_manager.add_tool(automation_delete_job)
         tool_manager.add_tool(automation_run_now)
+
+        if not timers:
+            return
+
+        @governed_tool(
+            deterministic=False,
+            side_effects=True,
+            requires_approval=False,
+            domains=("automations",),
+        )
+        def start_timer(
+            minutes: float = 0, seconds: int = 0, label: str = ""
+        ) -> Dict[str, Any]:
+            """Start a countdown or a short reminder: a pomodoro, tea, a call in 10 minutes.
+
+            It counts down live in the terminal status bar and in the local UI
+            chat, and alerts the user when it ends, so don't ask for a timezone
+            or an app. Put what to remember in the label. A pomodoro with no
+            length given is 25 minutes.
+            """
+            try:
+                started = timers_store.start(
+                    float(minutes or 0) * 60 + float(seconds or 0),
+                    label,
+                    agent_id=agent_id,
+                )
+            except (TypeError, ValueError, OSError) as exc:
+                return {"ok": False, "error": str(exc)}
+            return {
+                "ok": True,
+                "timer_id": started["timer_id"],
+                "label": started["label"],
+                "length": timers_store.format_time(started["seconds"]),
+                "note": "The user can see it counting down now.",
+            }
+
+        @governed_tool(
+            deterministic=False, side_effects=False, domains=("automations",)
+        )
+        def list_timers() -> Dict[str, Any]:
+            """List the countdowns running now, with the time left on each."""
+            return {
+                "ok": True,
+                "timers": [
+                    {
+                        "timer_id": item["timer_id"],
+                        "label": item["label"],
+                        "time_left": timers_store.format_time(item["remaining"]),
+                    }
+                    for item in timers_store.running()
+                ],
+            }
+
+        @governed_tool(
+            deterministic=False,
+            side_effects=True,
+            requires_approval=False,
+            domains=("automations",),
+        )
+        def cancel_timer(timer_id: str = "") -> Dict[str, Any]:
+            """Stop a countdown. timer_id can be left out when only one is running."""
+            stopped = timers_store.cancel(timer_id)
+            if stopped is None:
+                return {"ok": False, "error": "Say which timer: call list_timers."}
+            return {
+                "ok": True,
+                "timer_id": stopped["timer_id"],
+                "label": stopped["label"],
+            }
+
+        tool_manager.add_tool(start_timer)
+        tool_manager.add_tool(list_timers)
+        tool_manager.add_tool(cancel_timer)

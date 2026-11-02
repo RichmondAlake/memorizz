@@ -186,4 +186,136 @@ def cmd_consolidate(session, args: str) -> None:
     )
 
 
-__all__ = ["cmd_background_model", "cmd_consolidate"]
+_LEARNING_USAGE = (
+    "Usage: /persona-learning on [review] · off · now · approve · dismiss · "
+    "undo [version]"
+)
+
+
+def _show_proposal(console, proposal: Dict[str, Any]) -> None:
+    console.print(
+        f"  Add to [bold]{escape(str(proposal.get('field')))}[/bold]: "
+        f"{escape(str(proposal.get('addition')))}"
+    )
+    for item in proposal.get("evidence") or []:
+        console.print(f"    [dim]“{escape(str(item.get('quote')))}”[/dim]")
+
+
+def _ask_about_proposal(session, proposal: Dict[str, Any]) -> None:
+    console = _con(session)
+    agent = session.agent
+    _show_proposal(console, proposal)
+    if _confirm("Add this to the persona?"):
+        result = agent.apply_persona_proposal(_approver(session))
+        console.print(
+            f"[green]Persona is now version {result.get('version')}.[/green] "
+            "[dim]Undo with /persona-learning undo[/dim]"
+        )
+    elif _confirm("Turn it down so it isn't proposed again?"):
+        agent.dismiss_persona_proposal(_approver(session))
+        console.print("[dim]Turned down.[/dim]")
+    else:
+        console.print("[dim]Left waiting.[/dim]")
+
+
+def _show_persona_learning(session) -> None:
+    console = _con(session)
+    agent = session.agent
+    config = agent.persona_learning
+    if config.enabled:
+        how = "applied automatically" if config.auto_apply else "waits for review"
+        console.print(
+            f"Persona learning: [cyan]on[/cyan], every {config.every_n_turns} turns "
+            f"or {config.every_hours:g} hours, {how}"
+        )
+    else:
+        console.print("Persona learning: [cyan]off[/cyan]")
+    status = agent.persona_learning_status()
+    review = status.get("last_review")
+    if review:
+        console.print(f"Last review: {escape(str(review.get('reason')))}")
+    pending = status.get("pending")
+    if pending:
+        console.print("Waiting for review:")
+        _show_proposal(console, pending)
+    changes = [item for item in status.get("changes") or [] if not item["undone"]]
+    if changes:
+        console.print("Changes it made:")
+        for change in changes[:5]:
+            console.print(
+                f"  v{change.get('version')} {escape(str(change.get('addition')))}"
+            )
+    console.print(
+        f"[dim]The name and role never change this way. {escape(_LEARNING_USAGE)}[/dim]"
+    )
+
+
+def cmd_persona_learning(session, args: str) -> None:
+    """Let the persona grow from conversations, and review what that did."""
+    from .commands import save_agent_fields
+
+    console = _con(session)
+    agent = session.agent
+    parts = args.split()
+    action = parts[0].lower() if parts else ""
+    if not action:
+        _show_persona_learning(session)
+        return
+    if action in {"on", "off"}:
+        manager = getattr(agent, "persona_manager", None)
+        if action == "on" and not getattr(manager, "configuration_persona", None):
+            console.print(
+                "[yellow]This agent has no persona to grow.[/yellow] "
+                "Set one first with /persona <name>."
+            )
+            return
+        review = [part.lower() for part in parts[1:]] == ["review"]
+        agent.with_persona_learning(action == "on", auto_apply=not review)
+        save_agent_fields(
+            session,
+            persona_learning=(
+                agent.persona_learning.to_dict() if action == "on" else None
+            ),
+        )
+        _show_persona_learning(session)
+        return
+    if action == "now":
+        if not session.memory_id:
+            console.print("[dim]Nothing to review yet: no memory in use.[/dim]")
+            return
+        console.print(
+            f"[dim]Reading recent conversations on "
+            f"{escape(_label(agent.background_llm_config or session.llm_config or {}))} …[/dim]"
+        )
+        review = agent.review_persona(
+            session.memory_id, user_id=session.user_id, force=True
+        )
+        for warning in review.warnings:
+            console.print(f"[yellow]{escape(warning)}[/yellow]")
+        if review.proposal is None:
+            console.print(escape(review.reason))
+            return
+        _ask_about_proposal(session, review.proposal.to_dict())
+        return
+    try:
+        if action == "approve":
+            result = agent.apply_persona_proposal(_approver(session))
+            console.print(
+                f"[green]Persona is now version {result.get('version')}.[/green]"
+            )
+        elif action == "dismiss":
+            agent.dismiss_persona_proposal(_approver(session))
+            console.print("[dim]Turned down.[/dim]")
+        elif action == "undo":
+            version = int(parts[1]) if len(parts) > 1 else None
+            result = agent.undo_persona_change(_approver(session), version)
+            console.print(
+                f"[green]Undone.[/green] Persona is now version {result.get('version')}."
+            )
+        else:
+            console.print(escape(_LEARNING_USAGE))
+    except ValueError as exc:
+        console.print(f"[yellow]{escape(str(exc))}[/yellow]")
+
+
+__all__ = ["cmd_background_model", "cmd_consolidate", "cmd_persona_learning"]

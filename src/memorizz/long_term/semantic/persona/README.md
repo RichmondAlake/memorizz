@@ -65,6 +65,9 @@ agent.set_persona(persona)
 
 ## Persona evolution
 
+To let a persona grow on its own from conversations, see
+[Persona learning](../../../../../docs/guides/persona-learning.md).
+
 A persona exposes an `update` method that applies a partial set of changes
 and appends a history entry with **change_trigger** metadata. The agent has
 a built-in `update_persona` tool wired to this method — so LLM-driven

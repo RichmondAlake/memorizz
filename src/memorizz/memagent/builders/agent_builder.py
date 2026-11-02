@@ -68,6 +68,7 @@ class MemAgentBuilder:
         self._retrieval_policy = None
         self._background_model: Any = None
         self._memory_consolidation: Any = None
+        self._persona_learning: Any = None
         self._memory_routing: Any = None
         self._reranker: Any = None
         self._approval_store = None
@@ -524,6 +525,13 @@ class MemAgentBuilder:
         self._memory_consolidation = {**settings, "enabled": enabled}
         return self
 
+    def with_persona_learning(
+        self, enabled: bool = True, **settings: Any
+    ) -> "MemAgentBuilder":
+        """Grow the persona from conversations; see ``PersonaLearningConfig``."""
+        self._persona_learning = {**settings, "enabled": enabled}
+        return self
+
     def with_memory_routing(
         self, router: Any = "auto", **settings: Any
     ) -> "MemAgentBuilder":
@@ -705,6 +713,7 @@ class MemAgentBuilder:
                     else None
                 ),
                 memory_consolidation=self._memory_consolidation,
+                persona_learning=self._persona_learning,
                 memory_routing=self._memory_routing,
                 reranker=self._reranker,
             )

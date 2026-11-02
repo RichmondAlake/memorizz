@@ -437,6 +437,26 @@
   display: grid;
   gap: 10px;
 }
+.lcp-quotes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.cl-inline-form input:not([type="hidden"]) {
+  width: 120px;
+  min-height: 28px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+}
 .lcp-subtitle {
   margin: 18px 0 8px;
   font-size: 13px;

@@ -18,6 +18,7 @@ full tool-use contract.
 """
 
 import copy
+import json
 import logging
 import uuid
 from typing import Any, Dict, List, Optional, Union
@@ -40,7 +41,14 @@ ALLOWED_UPDATE_FIELDS: frozenset = frozenset(SEMANTIC_FIELDS)
 
 # Known non-MemoryType values accepted for change_trigger.source_type.
 _KNOWN_TRIGGER_SOURCES: frozenset = frozenset(
-    {"manual", "ui_form", "user_feedback", "llm_inference", "tool_call"}
+    {
+        "manual",
+        "ui_form",
+        "user_feedback",
+        "llm_inference",
+        "tool_call",
+        "persona_learning",
+    }
 )
 
 
@@ -162,6 +170,12 @@ class Persona:
             instance.version = 1
 
         raw_history = data.get("evolution_history") or []
+        if isinstance(raw_history, str):
+            # Dropping it here would erase it at the next save.
+            try:
+                raw_history = json.loads(raw_history)
+            except ValueError:
+                logger.warning("Persona history is not valid JSON; ignoring it")
         instance.evolution_history = (
             list(raw_history) if isinstance(raw_history, list) else []
         )
@@ -295,6 +309,10 @@ class Persona:
             "agent_id": change_trigger.get("agent_id"),
             "triggered_at": change_trigger.get("triggered_at") or utc_now_iso(),
         }
+        # A background change also says what it rests on and who let it through.
+        for extra in ("evidence", "addition", "approved_by", "undoes"):
+            if change_trigger.get(extra) is not None:
+                normalized[extra] = change_trigger[extra]
 
         source_type = normalized.get("source_type")
         if source_type:

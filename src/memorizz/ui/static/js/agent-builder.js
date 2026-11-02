@@ -54,6 +54,7 @@
             sealed: checked('sealed_conversations'),
             entityScope: checked('sealed_conversations') ? 'thread' : (value('entity_scope') || 'memory'),
             consolidation: checked('memory_consolidation') ? {turns: parseInt(value('consolidation_every_n_turns'), 10) || 20, autoApply: checked('consolidation_auto_apply')} : null,
+            personaLearning: checked('persona_learning') ? {turns: parseInt(value('persona_learning_every_n_turns'), 10) || 20, autoApply: checked('persona_learning_auto_apply')} : null,
             forgetting: Array.from(form.querySelectorAll('[name^="forgetting_"]')).some(function (el) { return String(el.value || '').trim(); }),
             continual: checked('continual_learning'),
             controlPlane: checked('learning_control_plane'),
@@ -132,6 +133,7 @@
             config.routing && 'Routed',
             config.sealed ? 'Sealed' : (config.entityScope !== 'memory' ? 'Facts per conversation' : ''),
             config.consolidation && 'Consolidated',
+            config.personaLearning && 'Persona learning',
         ].filter(Boolean);
         const runtime = [
             config.maxSteps === 0 ? 'Unlimited tool rounds' : config.maxSteps + ' tool rounds',
@@ -167,6 +169,7 @@
             ['Conversations', config.sealed ? 'Sealed: nothing crosses between them' : 'Recall across a memory’s conversations'],
             ['Entity facts', {memory: 'Shared within a memory', thread: 'Kept to each conversation', disabled: 'Not recalled automatically'}[config.entityScope]],
             ['Consolidation', config.consolidation ? 'Every ' + config.consolidation.turns + ' turns, ' + (config.consolidation.autoApply ? 'applied automatically' : 'waits for review') : 'Off'],
+            ['Persona learning', config.personaLearning ? 'Every ' + config.personaLearning.turns + ' turns, ' + (config.personaLearning.autoApply ? 'applied automatically' : 'waits for review') : 'Off'],
             ['Caching', [config.semanticCache && 'answers', config.toolCache && 'tool results'].filter(Boolean).join(', ') || 'Off'],
             ['group', 'Capabilities'],
             ['Tool access', {private: 'Private', public: 'Public', global: 'Global'}[config.toolAccess] || config.toolAccess],
@@ -270,6 +273,7 @@
         }
         if (config.reranker) arg('reranker', py(config.reranker));
         if (config.consolidation) arg('memory_consolidation', py({every_n_turns: config.consolidation.turns, auto_apply: config.consolidation.autoApply}));
+        if (config.personaLearning) arg('persona_learning', py({every_n_turns: config.personaLearning.turns, auto_apply: config.personaLearning.autoApply}));
         if (config.continual) arg('continual_learning', 'True');
         if (config.controlPlane) arg('learning_control_plane', 'True');
         if (config.internet) {

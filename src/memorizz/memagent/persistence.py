@@ -180,6 +180,11 @@ def save_agent(agent):
                 if agent.memory_consolidation.enabled
                 else None
             ),
+            persona_learning=(
+                agent.persona_learning.to_dict()
+                if agent.persona_learning.enabled
+                else None
+            ),
             memory_routing=(
                 agent.memory_routing.to_dict()
                 if getattr(agent, "memory_routing", None) is not None
@@ -368,15 +373,66 @@ def _record_value(record: Any, name: str) -> Any:
 
 def _with_kept_fields(agent, model):
     """``model`` with the fields ``keep_stored_fields`` named taken from the
-    stored record; unchanged when the agent was never stored."""
-    kept = getattr(agent, "_keep_stored_fields", None)
+    stored record; unchanged when the agent was never stored.
+
+    The persona learning state is always the stored one: another process may
+    have written it, and the agent holds no copy of it.
+    """
+    kept = {
+        *(getattr(agent, "_keep_stored_fields", None) or ()),
+        "persona_learning_state",
+    }
     provider = agent.memory_provider
-    if not kept or not agent.agent_id or not hasattr(provider, "retrieve_memagent"):
+    if not agent.agent_id or not hasattr(provider, "retrieve_memagent"):
         return model
     stored = provider.retrieve_memagent(agent.agent_id)
     if not stored:
         return model
-    return model.model_copy(update={name: _record_value(stored, name) for name in kept})
+    update = {name: _record_value(stored, name) for name in kept}
+    newer = newer_stored_persona(agent, stored)
+    if newer is not None:
+        agent.persona_manager.adopt_stored(newer)
+        update["persona"] = newer
+    return model.model_copy(update=update)
+
+
+def newer_stored_persona(agent, record) -> Any:
+    """The stored persona, when another process has moved this one on.
+
+    The UI and the CLI can both change a persona, so a running agent's copy
+    can be behind. A different persona id is a deliberate replacement.
+    """
+    from ..learning.persona_learning import persona_of
+
+    manager = getattr(agent, "persona_manager", None)
+    live = manager.configuration_persona if manager else None
+    stored = persona_of(record) if record else None
+    if live is None or stored is None:
+        return None
+    if str(stored.persona_id) != str(live.persona_id):
+        return None
+    return stored if int(stored.version) > int(live.version) else None
+
+
+def update_agent_record(provider, agent_id: str, **fields: Any) -> bool:
+    """Write only ``fields`` to a stored agent; False when it isn't stored.
+
+    For work outside a turn: a whole :func:`save_agent` from a background
+    thread would write whatever a run has changed for itself at that moment.
+    """
+    record = provider.retrieve_memagent(agent_id)
+    if not record:
+        return False
+    if hasattr(record, "model_copy"):
+        record = record.model_copy(update=fields)
+    elif isinstance(record, dict):
+        record = {**record, **fields}
+    else:
+        for name, value in fields.items():
+            setattr(record, name, value)
+    writer = getattr(provider, "update_memagent", None) or provider.store_memagent
+    _write_memagent_compat(writer, record)
+    return True
 
 
 def _get_application_mode_value(agent) -> str:
@@ -725,6 +781,7 @@ def _saved_settings(saved_memagent: Any) -> Dict[str, Any]:
         "context_window_tokens": _saved_context_cap(saved_memagent, llm_config),
         "background_llm_config": _dict_or_none(field("background_llm_config")),
         "memory_consolidation": _dict_or_none(field("memory_consolidation")),
+        "persona_learning": _dict_or_none(field("persona_learning")),
         "memory_routing": _dict_or_none(field("memory_routing")),
         "reranker": _dict_or_none(field("reranker")),
         "entity_policy": _dict_or_none(field("entity_policy")),
@@ -1065,6 +1122,12 @@ def _refresh_persona(agent, persona) -> None:
         agent.set_persona(persona, save=False)
 
 
+def _refresh_persona_learning(agent, persona_learning) -> None:
+    from ..learning.persona_learning import PersonaLearningConfig
+
+    agent.persona_learning = PersonaLearningConfig.from_value(persona_learning)
+
+
 def _refresh_application_id(agent, application_id) -> None:
     configured = application_id or os.getenv("MEMORIZZ_APPLICATION_ID", "")
     agent.application_id = (
@@ -1307,6 +1370,7 @@ def _refresh_automations(agent, enabled, default_timezone) -> None:
             agent.tool_manager,
             agent_id=agent.agent_id,
             default_timezone=default_timezone,
+            timers=not agent.multi_tenant,
         )
 
 
@@ -1353,6 +1417,7 @@ _REFRESH_STEPS: Tuple[Tuple[Tuple[str, ...], Callable[..., None]], ...] = (
     (("memory_routing", "reranker", "entity_policy"), _refresh_memory_models),
     (("tools",), _code_owned),
     (("persona",), _refresh_persona),
+    (("persona_learning",), _refresh_persona_learning),
     (
         ("name",),
         _set(

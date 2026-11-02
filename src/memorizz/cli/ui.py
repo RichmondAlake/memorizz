@@ -31,6 +31,7 @@ from rich.live import Live
 from rich.markup import escape
 from rich.text import Text
 
+from .. import timers
 from . import harness_session
 
 # The crest: a block "M". Each row is the same width so the reveal animation
@@ -70,9 +71,11 @@ COMMAND_KINDS = {
             "name",
             "connect",
             "persona",
+            "persona-learning",
             "persona-reset",
             "tools",
             "automation",
+            "timer",
             "approvals",
             "browser",
             "desktop",
@@ -142,6 +145,7 @@ STYLE = Style.from_dict(
         "bottom-toolbar.agent": f"bold {KIND_COLOURS['agents']}",
         "bottom-toolbar.harness": f"bold {KIND_COLOURS['harness']}",
         "bottom-toolbar.update": "bold #fbbf24 bg:#3b2f0b",
+        "bottom-toolbar.timer": "bold #111827 bg:#67e8f9",
         # The / completion menu: dark, each command in its kind's colour.
         "completion-menu": "bg:#1f2430 #c8d0e0",
         "completion-menu.completion": "bg:#1f2430",
@@ -418,7 +422,7 @@ def toolbar(session: Any) -> List[Tuple[str, str]]:
     if len(agent) > 24:
         agent = agent[:23].rstrip() + "…"
     status = HTML(
-        f" <bottom-toolbar.brand>memorizz</bottom-toolbar.brand> "
+        f"{timer_fragment()} <bottom-toolbar.brand>memorizz</bottom-toolbar.brand> "
         f"<bottom-toolbar.dim>·</bottom-toolbar.dim> "
         f"<bottom-toolbar.agent>{_escape(agent)}</bottom-toolbar.agent> "
         f"<bottom-toolbar.dim>·</bottom-toolbar.dim> {model} "
@@ -432,6 +436,21 @@ def toolbar(session: Any) -> List[Tuple[str, str]]:
     )
     rule = [frame_rule(session), ("", "\n")] if framed() else []
     return rule + to_formatted_text(status)
+
+
+def timer_fragment() -> str:
+    """The status bar's countdown: ' ⏱ Focus 24:59 ', and how many more."""
+    try:
+        active = timers.running()
+    except Exception:
+        # A countdown must never stop the prompt drawing.
+        return ""
+    if not active:
+        return ""
+    first = active[0]
+    more = f" +{len(active) - 1}" if len(active) > 1 else ""
+    text = f"{first['label'][:24]} {timers.format_time(first['remaining'])}{more}"
+    return f"<bottom-toolbar.timer> ⏱ {_escape(text)} </bottom-toolbar.timer> "
 
 
 def update_fragment(session: Any) -> str:

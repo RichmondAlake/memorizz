@@ -58,15 +58,48 @@ deployments must run the current schema setup/migrations first.
 |---|---|---|
 | `cron` | five-field `cron_expr` | Runs in the configured IANA timezone |
 | `interval` | `interval_seconds` | Runs after each fixed interval |
-| `one_shot` | optional `start_at` through lower-level job APIs | Runs once, then disables |
+| `one_shot` | optional `interval_seconds`, or `start_at` through lower-level job APIs | Runs once, after that delay, then disables |
 
 Timezone resolves from the method argument, `agent.default_timezone`, then
-`MEMORIZZ_DEFAULT_TIMEZONE`. A missing or invalid timezone fails before the job
-is stored.
+`MEMORIZZ_DEFAULT_TIMEZONE`. Only a cron time depends on it, so `interval` and
+`one_shot` jobs fall back to this machine's timezone. A cron job created in Python
+or on a `multi_tenant` agent has to name one. So does one on a machine whose
+timezone can't be read, as on Windows or in some containers. Otherwise an agent
+working for the person at this machine uses this machine's. An invalid timezone
+fails before the job is stored.
 
 Query templates support `{today_iso}`, `{scheduled_for_iso}`, `{now_utc_iso}`,
 and `{timezone}`. Treat the template as persistent instructions: review it for
 prompt injection, excessive authority, secrets, and unstable external data.
+
+A `one_shot` job runs once, after `interval_seconds` if you give it, and straight
+away if you don't.
+
+## Timers
+
+For a countdown someone wants to watch, such as a pomodoro or a tea timer, an
+automation is the wrong tool: it needs a worker and approval, and it runs the
+agent when it ends. An agent has `start_timer`, `list_timers` and `cancel_timer`
+instead. A timer needs no approval, runs nothing when it ends, and makes no model
+call. You can also start one without the agent:
+
+```text
+/timer 25 focus     25 minutes
+/timer 90s tea      90 seconds
+/timer 1h           one hour
+/timer              list what's running
+/timer cancel       stop the only one running, or give its id
+```
+
+In the CLI, a timer counts down in the status bar, and when it ends you get a
+line above the prompt and a terminal bell. In the local UI it's a live card above
+the chat box, with a chime and a button to cancel or dismiss it.
+
+Timers belong to the person at this machine. They live in
+`~/.memorizz/timers.json`, so the CLI and the UI show the same ones, and one keeps
+counting with both closed. If it ends then, the CLI tells you at the next launch,
+and the UI shows it as finished. A timer can run for up to 24 hours. Agents with
+`multi_tenant=True` don't get these tools.
 
 ## Manage jobs
 

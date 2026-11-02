@@ -30,6 +30,7 @@ from .. import __version__
 from . import commands
 from . import config as cfg
 from . import harness_session, ui
+from .timer_commands import announce_finished, timer_watch
 from .updates import known_update, update_notifier
 
 
@@ -302,8 +303,11 @@ def run_repl(session) -> None:
 
     ui.animate_crest(console)
     _banner(console, session)
+    announce_finished(console)
 
-    with patch_stdout(raw=True), update_notifier(console, session):
+    with patch_stdout(raw=True), update_notifier(console, session), timer_watch(
+        console
+    ):
         while True:
             try:
                 line = ptk.prompt(lambda: ui.prompt_message(session))

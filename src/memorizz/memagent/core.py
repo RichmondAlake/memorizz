@@ -236,6 +236,18 @@ _MEMORY_BOOKKEEPING_TOOLS = frozenset(
 )
 
 
+def _without_quotes(persona: Dict[str, Any]) -> List[Any]:
+    """Take a change's evidence out of a persona dict before the model reads it.
+
+    Those are a user's words from other conversations, kept for the people
+    auditing the change. Returns the history.
+    """
+    history = persona.get("evolution_history") or []
+    for entry in history:
+        (entry.get("change_trigger") or {}).pop("evidence", None)
+    return history
+
+
 _CONTEXT_LOCAL_MISSING = object()
 _CONTEXT_LOCAL_CREATE_LOCK = threading.Lock()
 
@@ -395,6 +407,8 @@ class _UpkeepState:
         # (memory_id, user_id), and the keys being drained now.
         self.routing: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = {}
         self.routing_draining: Set[Tuple[Any, ...]] = set()
+        # Per (memory_id, user_id): turns since the last persona review.
+        self.persona_learning: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
 
 
 _UPKEEP_STATES: "weakref.WeakKeyDictionary[Any, Dict[str, _UpkeepState]]" = (
@@ -575,6 +589,7 @@ class MemAgent:
         background_model: Optional[Any] = None,
         background_llm_config: Optional[Dict[str, Any]] = None,
         memory_consolidation: Optional[Union[bool, Dict[str, Any]]] = None,
+        persona_learning: Optional[Union[bool, Dict[str, Any]]] = None,
         memory_routing: Optional[Union[bool, str, Dict[str, Any]]] = None,
         reranker: Optional[Union[str, Dict[str, Any]]] = None,
         entity_policy: Optional[Union[Dict[str, Any], Any]] = None,
@@ -911,6 +926,9 @@ class MemAgent:
         from ..learning.consolidation import ConsolidationConfig
 
         self.memory_consolidation = ConsolidationConfig.from_value(memory_consolidation)
+        from ..learning.persona_learning import PersonaLearningConfig
+
+        self.persona_learning = PersonaLearningConfig.from_value(persona_learning)
         from ..reranking import RerankerConfig
         from .memory_routing import MemoryRoutingConfig
 
@@ -1007,6 +1025,7 @@ class MemAgent:
                 "run_harness_task",
                 "get_harness_run",
                 "request_capability",
+                "start_timer",
                 *self.context_policy.always_visible_tools,
             },
             max_invocations_per_turn=self.context_policy.max_tool_invocations_per_turn,
@@ -1800,6 +1819,8 @@ class MemAgent:
                     self.tool_manager,
                     agent_id=self.agent_id,
                     default_timezone=getattr(self, "default_timezone", None),
+                    # Timers belong to the person at this machine.
+                    timers=not self.multi_tenant,
                 )
             except Exception as exc:
                 logger.warning("Failed to register automation tools: %s", exc)
@@ -4071,13 +4092,15 @@ class MemAgent:
 
         Args:
             name: Human-readable job name (e.g. "Daily briefing").
-            schedule_type: One of "cron", "interval", or "one_shot".
+            schedule_type: One of "cron", "interval", or "one_shot". A
+                one_shot runs once, after interval_seconds if given.
             query_template: The prompt template to run. Supports placeholders:
                 {today_iso}, {scheduled_for_iso}, {now_utc_iso}, {timezone}.
             cron_expr: 5-field cron expression (required when schedule_type="cron").
             interval_seconds: Seconds between runs (required when schedule_type="interval").
-            timezone: IANA timezone name. Falls back to agent's default_timezone
-                or MEMORIZZ_DEFAULT_TIMEZONE env var.
+            timezone: IANA timezone name. Falls back to agent's default_timezone,
+                then the MEMORIZZ_DEFAULT_TIMEZONE env var. Required for cron;
+                other schedules can use this machine's timezone.
             memory_id: Memory ID for the automation's conversation thread.
                 Auto-generated if not provided.
             whatsapp_to: List of WhatsApp recipient numbers. When provided,
@@ -4111,16 +4134,22 @@ class MemAgent:
         from ..automation.models import AutomationJob as _AutomationJob
         from ..automation.schedule import (
             compute_next_run_at,
+            local_timezone_name,
             utcnow,
             validate_timezone_name,
         )
 
-        # Resolve timezone: explicit > agent default > env var
+        # Resolve timezone: explicit > agent default > env var > this machine
+        # (not for cron, which needs one named)
         tz_name = (timezone or "").strip()
         if not tz_name:
             tz_name = (getattr(self, "default_timezone", None) or "").strip()
         if not tz_name:
             tz_name = os.environ.get("MEMORIZZ_DEFAULT_TIMEZONE", "").strip()
+        if not tz_name and str(schedule_type or "").strip().lower() != "cron":
+            # Only a cron time means anything in a timezone. On a server this
+            # machine's would be a silent guess, so a cron job has to say.
+            tz_name = local_timezone_name() or "UTC"
         if not tz_name:
             raise ValueError(
                 "timezone is required. Pass it explicitly, set default_timezone "
@@ -6639,6 +6668,7 @@ class MemAgent:
         self._record_interaction(query, response, memory_id, thread_id, user_id=user_id)
         self._schedule_background_compaction(response)
         self._note_turn_for_consolidation(memory_id, user_id, thread_id)
+        self._note_turn_for_persona_learning(memory_id, user_id)
         self._note_turn_for_routing(query, memory_id, user_id, thread_id)
 
     def run(
@@ -10647,11 +10677,25 @@ class MemAgent:
 
         # 9. Automations instructions (durable scheduling)
         if self.has_automations():
+            timer_rule = (
+                ""
+                if self.multi_tenant
+                else "- For a countdown or a reminder in the next few hours, call "
+                "'start_timer' straight away, with no questions. The user sees it "
+                "live and is alerted when it ends.\n"
+            )
             prompt_parts.append(
                 "Automations (scheduling/reminders):\n"
-                "- If the user asks to schedule a reminder, recurring message, or timed task, "
-                "ask clarifying questions: time/frequency, timezone, recipients, and content.\n"
-                "- Mutating automation calls pause as durable approval proposals.\n"
+                f"{timer_rule}"
+                "- If the user asks to schedule a recurring message, or a task for you "
+                "to run later, ask only for what is missing: time/frequency, "
+                "recipients, and content. Only a cron schedule depends on a timezone"
+                + (
+                    ": ask for one.\n"
+                    if self.multi_tenant
+                    else "; this machine's is used unless the tool asks for one.\n"
+                )
+                + "- Mutating automation calls pause as durable approval proposals.\n"
                 "- A host user must approve the exact arguments before execution resumes.\n"
                 "- For WhatsApp delivery, require recipients; accept E.164 numbers with or without the 'whatsapp:' prefix.\n"
                 "- If required capabilities/data are missing, suggest enabling internet access or using "
@@ -11656,6 +11700,8 @@ class MemAgent:
                     "reason": "This conversation is sealed, so the shared persona "
                     "can't be changed from it.",
                 }
+            if self.memory_provider is not None:
+                self._catch_up_persona()
             change_trigger = {
                 "reason": reason,
                 "source_type": source_type,
@@ -11688,6 +11734,8 @@ class MemAgent:
                         "refreshing the agent document failed. The next successful "
                         "save will reconcile the snapshot."
                     )
+            if isinstance(result.get("persona"), dict):
+                _without_quotes(result["persona"])
             return result
 
         @governed_tool(deterministic=False, side_effects=False, domains=("memory",))
@@ -11710,10 +11758,14 @@ class MemAgent:
             if persona is None:
                 return {"error": "No persona attached to this agent."}
             payload = persona.to_dict()
+            history = _without_quotes(payload)
+            if self._active_retrieval_policy().is_sealed:
+                # As in the system prompt: reasons can quote other conversations.
+                payload["evolution_history"] = []
             return {
                 "persona": payload,
                 "version": payload.get("version", 1),
-                "history_count": len(payload.get("evolution_history") or []),
+                "history_count": len(history),
             }
 
         update_persona.__name__ = "update_persona"
@@ -12645,6 +12697,168 @@ class MemAgent:
                 state["threads"].update(threads)
                 state["since"] = since
 
+    # ------------------------------------------------------------------
+    # Persona learning (docs/guides/persona-learning.md)
+    # ------------------------------------------------------------------
+
+    def with_persona_learning(self, enabled: bool = True, **settings: Any):
+        """Grow the persona from conversations and memories, off the turn.
+
+        Settings are those of :class:`PersonaLearningConfig`: ``every_n_turns``
+        (20), ``every_hours`` (24), ``auto_apply`` (True), ``min_conversations``
+        (3), ``max_threads`` and ``max_messages_per_thread``. Reviews run on the
+        background model. Returns the agent, for chaining.
+        """
+        from ..learning.persona_learning import PersonaLearningConfig
+
+        self.persona_learning = PersonaLearningConfig.from_value(
+            {**self.persona_learning.to_dict(), **settings, "enabled": enabled}
+        )
+        return self
+
+    def _persona_learner(self) -> Any:
+        from ..learning.persona_learning import PersonaLearner
+
+        return PersonaLearner(
+            self.memory_provider,
+            self.agent_id,
+            model=self.background_model,
+            config=self.persona_learning,
+            multi_tenant=self.multi_tenant,
+            # Facts kept per thread are not shared across conversations.
+            entities=self.retrieval_policy.entity_scope == "memory",
+        )
+
+    def _catch_up_persona(self) -> None:
+        """Take a persona change made elsewhere, so a new one builds on it."""
+        from .persistence import newer_stored_persona
+
+        try:
+            record = self.memory_provider.retrieve_memagent(self.agent_id)
+        except Exception:
+            return
+        newer = newer_stored_persona(self, record)
+        if newer is not None:
+            self.persona_manager.adopt_stored(newer)
+
+    def _use_stored_persona(self, persona: Any) -> None:
+        """Serve the persona a background change wrote from the next turn on."""
+        if self.persona_manager is not None:
+            self.persona_manager.set_persona(persona, self.agent_id, save=False)
+
+    def review_persona(
+        self,
+        memory_id: Optional[str] = None,
+        *,
+        user_id: Optional[str] = None,
+        force: bool = False,
+    ) -> Any:
+        """Review recent conversations for a lasting pattern, now.
+
+        Returns a :class:`PersonaReview`. The persona doesn't change: a
+        proposal waits for :meth:`apply_persona_proposal` or
+        :meth:`dismiss_persona_proposal`, on the stored agent, so it survives a
+        restart. ``force`` reviews even with nothing new since the last one.
+        """
+        memory = MemAgent._host_memory_id(self, memory_id)
+        if not memory:
+            raise ValueError("memory_id is required for a persona review")
+        return self._persona_learner().review(memory, user_id, force=force)
+
+    def apply_persona_proposal(self, approved_by: str, proposal: Any = None) -> Any:
+        """Apply the waiting persona change. Undo it with :meth:`undo_persona_change`."""
+        persona, result = self._persona_learner().apply(approved_by, proposal)
+        self._use_stored_persona(persona)
+        return result
+
+    def dismiss_persona_proposal(self, approved_by: str) -> None:
+        """Turn down the waiting persona change; it won't be proposed again."""
+        self._persona_learner().dismiss(approved_by)
+
+    def undo_persona_change(
+        self, approved_by: str, version: Optional[int] = None
+    ) -> Any:
+        """Undo the latest background persona change, or the one making ``version``."""
+        persona, result = self._persona_learner().undo(approved_by, version)
+        self._use_stored_persona(persona)
+        return result
+
+    def persona_learning_status(self) -> Dict[str, Any]:
+        """Reviews so far, a change waiting for review, and past changes."""
+        return self._persona_learner().status()
+
+    def _note_turn_for_persona_learning(
+        self, memory_id: Optional[str], user_id: Optional[str]
+    ) -> None:
+        """Count the turn and schedule a persona review when one is due."""
+        config = self.persona_learning
+        manager = self.persona_manager
+        if (
+            not config.enabled
+            or self.multi_tenant
+            or self.memory_provider is None
+            or not memory_id
+            or manager is None
+            or manager.has_snapshot
+            or manager.configuration_persona is None
+            or self._active_retrieval_policy().is_sealed
+        ):
+            return
+        key = (memory_id, user_id)
+        schedule = self._upkeep().persona_learning
+        with self._upkeep_lock:
+            state = schedule.get(key)
+        if state is None:
+            # The clock survives a restart, or short sessions would never
+            # reach a review. Turns don't, so the hours are what count there.
+            started = self._last_persona_review()
+            with self._upkeep_lock:
+                state = schedule.setdefault(key, {"turns": 0, "started": started})
+        now = time.time()
+        with self._upkeep_lock:
+            state["turns"] += 1
+            due = state["turns"] >= config.every_n_turns or (
+                config.every_hours > 0
+                and now - state["started"] >= config.every_hours * 3600
+            )
+            if not due:
+                return
+            state.update(turns=0, started=now)
+
+        def _review() -> None:
+            from ..learning.persona_learning import AUTOMATIC_APPROVER
+
+            review = self.review_persona(memory_id, user_id=user_id)
+            logger.info(
+                "Persona review of agent %s: %s (%s)",
+                self.agent_id,
+                review.outcome,
+                review.code,
+            )
+            # A change left waiting (review mode was on, or a process died
+            # before applying it) comes back here rather than blocking reviews.
+            if review.proposal is None or not self.persona_learning.auto_apply:
+                return
+            result = self.apply_persona_proposal(AUTOMATIC_APPROVER, review.proposal)
+            logger.info(
+                "Persona of agent %s is now version %s",
+                self.agent_id,
+                result.get("version"),
+            )
+
+        # The persona is the agent's, so one review at a time across memories.
+        self._submit_upkeep(("persona_learning",), _review, label="persona learning")
+
+    def _last_persona_review(self) -> float:
+        """Epoch seconds of the last review on record (0.0 for none yet)."""
+        try:
+            record = self.memory_provider.retrieve_memagent(self.agent_id)
+        except Exception:
+            return 0.0
+        state = getattr(record, "persona_learning_state", None)
+        last = state.get("last_review_at") if isinstance(state, dict) else None
+        return float(last) if isinstance(last, (int, float)) else 0.0
+
     # -- memory routing ---------------------------------------------------------
 
     def with_memory_routing(
@@ -13339,6 +13553,11 @@ class MemAgent:
             "memory_consolidation": (
                 self.memory_consolidation.to_dict()
                 if self.memory_consolidation.enabled
+                else None
+            ),
+            "persona_learning": (
+                self.persona_learning.to_dict()
+                if self.persona_learning.enabled
                 else None
             ),
             "memory_routing": (

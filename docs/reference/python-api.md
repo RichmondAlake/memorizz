@@ -25,6 +25,12 @@ This page covers the stable, high-value Python surface. Import public types from
         - wait_for_memory_upkeep
         - describe_memory
         - with_memory_consolidation
+        - with_persona_learning
+        - review_persona
+        - apply_persona_proposal
+        - dismiss_persona_proposal
+        - undo_persona_change
+        - persona_learning_status
         - with_memory_routing
         - with_reranker
         - remember

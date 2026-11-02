@@ -59,6 +59,15 @@ class PersonaManager:
         self._default_persona = value
 
     @property
+    def has_snapshot(self) -> bool:
+        """True while a request-local persona is bound in this context."""
+        return self._snapshot.get() is not _NO_SNAPSHOT
+
+    def adopt_stored(self, persona: Persona) -> None:
+        """Serve a persona another process saved, from the next turn on."""
+        self._default_persona = persona
+
+    @property
     def configuration_persona(self) -> Optional[Persona]:
         """Persistent agent configuration, never a host's account snapshot."""
         return self._default_persona

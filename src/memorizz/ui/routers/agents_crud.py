@@ -792,6 +792,7 @@ def _retrieval_policy_with_forgetting(
 def _memory_upkeep_form_values(agent: Any) -> Dict[str, Any]:
     """Template values for the Memory upkeep group."""
     from ...learning.consolidation import ConsolidationConfig
+    from ...learning.persona_learning import PersonaLearningConfig
     from ...retrieval import RetrievalPolicy
 
     background = getattr(agent, "background_llm_config", None) or {}
@@ -808,10 +809,19 @@ def _memory_upkeep_form_values(agent: Any) -> Dict[str, Any]:
         )
     except (TypeError, ValueError):
         consolidation = ConsolidationConfig()
+    try:
+        persona_learning = PersonaLearningConfig.from_value(
+            getattr(agent, "persona_learning", None)
+        )
+    except (TypeError, ValueError):
+        persona_learning = PersonaLearningConfig()
     policy = getattr(agent, "retrieval_policy", None) or {}
     if hasattr(policy, "to_dict"):
         policy = policy.to_dict()
     return {
+        "persona_learning": persona_learning.enabled,
+        "persona_learning_every_n_turns": persona_learning.every_n_turns,
+        "persona_learning_auto_apply": persona_learning.auto_apply,
         "background_model": (
             f"{background.get('provider')}:{model}"
             if model and background.get("provider")
@@ -1090,6 +1100,28 @@ def _retrieval_policy_with_privacy(
     elif scope == "memory":
         current.pop("entity_scope", None)
     return current or None
+
+
+def _persona_learning_value(
+    enabled: Optional[str],
+    every_n_turns: Optional[str],
+    auto_apply: Optional[str],
+    existing: Any = None,
+) -> Optional[Dict[str, Any]]:
+    from ...learning.persona_learning import PersonaLearningConfig
+
+    if not _parse_bool(enabled):
+        return None
+    value = dict(existing) if isinstance(existing, dict) else {}
+    value["enabled"] = True
+    try:
+        turns = int(_to_text(every_n_turns).strip())
+    except ValueError:
+        turns = 0
+    if turns >= 1:
+        value["every_n_turns"] = turns
+    value["auto_apply"] = _parse_bool(auto_apply)
+    return PersonaLearningConfig.from_value(value).to_dict()
 
 
 def _memory_consolidation_value(
@@ -1706,6 +1738,9 @@ async def agent_create_submit(
     memory_consolidation: Optional[str] = Form(None),
     consolidation_every_n_turns: Optional[str] = Form(None),
     consolidation_auto_apply: Optional[str] = Form(None),
+    persona_learning: Optional[str] = Form(None),
+    persona_learning_every_n_turns: Optional[str] = Form(None),
+    persona_learning_auto_apply: Optional[str] = Form(None),
     skill_injection_role: str = Form("user"),
     continual_learning_require_shadow: Optional[str] = Form(None),
     continual_learning_shadow_evaluation: Optional[str] = Form(None),
@@ -1792,6 +1827,9 @@ async def agent_create_submit(
     background_llm_config_value = _parse_background_model(background_model, llm_config)
     memory_consolidation_value = _memory_consolidation_value(
         memory_consolidation, consolidation_every_n_turns, consolidation_auto_apply
+    )
+    persona_learning_value = _persona_learning_value(
+        persona_learning, persona_learning_every_n_turns, persona_learning_auto_apply
     )
     if memory_models_form:  # an empty select posts nothing: it means none
         reranker, memory_routing = reranker or "", memory_routing or ""
@@ -2023,6 +2061,7 @@ async def agent_create_submit(
         retrieval_policy=retrieval_policy_value,
         background_llm_config=background_llm_config_value,
         memory_consolidation=memory_consolidation_value,
+        persona_learning=persona_learning_value,
         memory_routing=memory_routing_value,
         reranker=reranker_value,
         automations_enabled=automations_enabled_value,
@@ -2107,6 +2146,9 @@ async def agent_edit_submit(
     memory_consolidation: Optional[str] = Form(None),
     consolidation_every_n_turns: Optional[str] = Form(None),
     consolidation_auto_apply: Optional[str] = Form(None),
+    persona_learning: Optional[str] = Form(None),
+    persona_learning_every_n_turns: Optional[str] = Form(None),
+    persona_learning_auto_apply: Optional[str] = Form(None),
     skill_injection_role: str = Form("user"),
     continual_learning_require_shadow: Optional[str] = Form(None),
     continual_learning_shadow_evaluation: Optional[str] = Form(None),
@@ -2203,6 +2245,12 @@ async def agent_edit_submit(
         consolidation_every_n_turns,
         consolidation_auto_apply,
         getattr(existing, "memory_consolidation", None),
+    )
+    persona_learning_value = _persona_learning_value(
+        persona_learning,
+        persona_learning_every_n_turns,
+        persona_learning_auto_apply,
+        getattr(existing, "persona_learning", None),
     )
     if memory_models_form:  # an empty select posts nothing: it means none
         reranker, memory_routing = reranker or "", memory_routing or ""
@@ -2505,6 +2553,7 @@ async def agent_edit_submit(
             "retrieval_policy": retrieval_policy_value,
             "background_llm_config": background_llm_config_value,
             "memory_consolidation": memory_consolidation_value,
+            "persona_learning": persona_learning_value,
             "memory_routing": memory_routing_value,
             "reranker": reranker_value,
             "automations_enabled": automations_enabled_value,

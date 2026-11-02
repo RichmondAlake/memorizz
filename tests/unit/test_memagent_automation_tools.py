@@ -191,7 +191,7 @@ def test_create_automation_raises_when_unavailable():
 
 
 def test_create_automation_raises_on_missing_timezone(monkeypatch):
-    """create_automation raises ValueError when no timezone can be resolved."""
+    """A cron job has to say which timezone its times are in."""
     from memorizz.memagent import MemAgent
 
     _patch_store(monkeypatch)
@@ -201,9 +201,9 @@ def test_create_automation_raises_on_missing_timezone(monkeypatch):
     with pytest.raises(ValueError, match="timezone is required"):
         agent.create_automation(
             name="Test",
-            schedule_type="interval",
+            schedule_type="cron",
+            cron_expr="0 8 * * *",
             query_template="Hello",
-            interval_seconds=60,
         )
 
 

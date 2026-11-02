@@ -46,6 +46,10 @@ class MemAgentModel(BaseModel):
     completion_policy: Optional[Dict[str, Any]] = None
     retrieval_policy: Optional[Dict[str, Any]] = None
     memory_consolidation: Optional[Dict[str, Any]] = None
+    # Persona learning settings (PersonaLearningConfig); None = off.
+    persona_learning: Optional[Dict[str, Any]] = None
+    # What persona learning has done: last review, a change waiting for review.
+    persona_learning_state: Optional[Dict[str, Any]] = None
     # Memory routing of the agent's own writes (MemoryRoutingConfig); None = off.
     memory_routing: Optional[Dict[str, Any]] = None
     # The agent's own reranker (RerankerConfig); None follows the store's.

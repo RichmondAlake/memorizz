@@ -342,9 +342,18 @@ def capabilities() -> Dict[str, Any]:
                     "compaction",
                     "reflection",
                     "consolidation",
+                    "persona_learning",
                     "entity_capture",
                     "memory_routing",
                 ],
+            },
+            "persona_learning": {
+                "available": True,
+                "parameter": "persona_learning",
+                "off_turn": True,
+                "learnable_fields": ["goals", "background"],
+                "evidence": "quotes from three or more conversations by default",
+                "undo": True,
             },
             "entity_capture": {
                 "available": True,

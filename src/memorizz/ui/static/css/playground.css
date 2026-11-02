@@ -946,6 +946,73 @@ body.page-playground .main-content > * {
     padding: 6px max(24px, calc((100% - var(--thread-w)) / 2)) 12px;
 }
 
+.pg-timers {
+    display: grid;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+
+.pg-timers[hidden] {
+    display: none;
+}
+
+.pg-timer {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 14px;
+    padding: 9px 12px 11px 16px;
+    overflow: hidden;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+}
+
+.pg-timer-label {
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 14px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pg-timer-clock {
+    color: var(--text-primary);
+    font-size: 22px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    line-height: 1.2;
+}
+
+.pg-timer-track {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    height: 3px;
+    background: var(--border-color);
+}
+
+.pg-timer-fill {
+    width: 0;
+    height: 100%;
+    background: var(--accent-primary);
+}
+
+.pg-timer.is-finished .pg-timer-label {
+    color: var(--text-primary);
+}
+
+.pg-timer.is-finished .pg-timer-clock {
+    color: var(--accent-secondary);
+    font-size: 15px;
+}
+
+.pg-timer.is-finished .pg-timer-fill {
+    background: var(--accent-secondary);
+}
+
 .pg-composer {
     display: flex;
     flex-direction: column;

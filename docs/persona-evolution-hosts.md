@@ -1,7 +1,10 @@
 # Account-owned persona evolution
 
 Memorizz's native `Persona.update()` records versioned changes; it is not a
-daily reflection scheduler. A persona attached to one shared `MemAgent` is
+daily reflection scheduler. For a single-owner agent, [persona
+learning](guides/persona-learning.md) reviews conversations on a schedule. It
+leaves multi-tenant agents alone, and the rest of this page is for them. A
+persona attached to one shared `MemAgent` is
 configuration for that agent, not automatically a different persona for every
 `user_id`.
 

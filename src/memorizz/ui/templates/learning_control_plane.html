@@ -3,7 +3,7 @@
 {% from '_learning_tabs.html' import learning_tabs %}
 
 {% block title %}Learning control plane - Memorizz{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/pages/learning-control-plane.css?v=7">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/learning-control-plane.css?v=8">{% endblock %}
 
 {% block content %}
 {#- Links out of an event: its trace, and the exact scope its compile stream covers. -#}
@@ -256,6 +256,79 @@
     </div>
     {% endif %}
 </section>
+{% if persona_learning and persona_learning.has_persona %}
+{% set pl = persona_learning %}
+{% set pl_sched = pl.schedule %}
+<section class="panel lcp-consolidation" id="persona-learning" aria-labelledby="lcp-persona-title">
+    <div class="panel-header">
+        <div>
+            <h2 class="panel-title" id="lcp-persona-title">Persona learning</h2>
+            <p class="panel-description">Looks for work the user keeps coming back to across conversations, then adds one sentence to the persona's goals or background, keeping the quotes it rests on. Reviews run on {% if pl.model %}<strong>{{ pl.model }}</strong> ({{ 'background model' if pl.model_is_background else 'the chat model; set a background model on the agent' }}){% else %}no model yet{% endif %}. The name and role never change this way, and conversations that ran sealed are never read.</p>
+        </div>
+        <span class="pill" title="Set on the agent's form, under Persona">{% if pl.enabled %}Every {{ pl_sched.every_n_turns }} turns{% if pl_sched.every_hours %} or {{ pl_sched.every_hours|int }} h{% endif %} · {{ 'applies automatically' if pl_sched.auto_apply else 'waits for review' }}{% else %}Off{% endif %}</span>
+    </div>
+    {% if pl.multi_tenant %}<p class="form-note lcp-note">This agent serves several users who share its persona, so it doesn't learn from any one of them.</p>
+    {% elif not pl.enabled %}<p class="form-note lcp-note">Off for this agent. <a href="/agents/{{ selected_agent_id }}/edit#persona-learning">Turn it on in the agent's persona settings</a>, or run one review now.</p>{% endif %}
+    {% if pl.last_review %}<p class="form-note lcp-note">Last review {{ (pl.last_review.at or '')[:16]|replace('T', ' ') }}: {{ pl.last_review.reason }}</p>{% endif %}
+    {% if not ui_read_only and not pl.multi_tenant %}
+    <form method="post" action="/learning-control-plane/persona-review" class="filter-bar lcp-consolidation-form" aria-label="Review the persona">
+        {{ hidden_scope }}
+        <label for="persona_memory_id">Memory ID<input id="persona_memory_id" name="persona_memory_id" list="lcp-memory-ids" required autocomplete="off" value="{{ memory_id or (pl.memory_ids[-1] if pl.memory_ids else '') }}"></label>
+        <label for="persona_user_id">User ID<input id="persona_user_id" name="persona_user_id" value="{{ user_id }}" placeholder="Anonymous user" autocomplete="off"></label>
+        <div class="filter-actions">
+            <button class="btn" type="submit" title="Reads recent conversations and proposes a change; nothing changes until you approve">Review now</button>
+        </div>
+    </form>
+    {% endif %}
+    {% if pl.pending %}
+    <h3 class="lcp-subtitle">Waiting for review</h3>
+    <div class="lcp-consolidation-plan">
+        <p>Add to <strong>{{ pl.pending.field }}</strong>: {{ pl.pending.addition }}</p>
+        <ul class="lcp-quotes">
+            {% for item in pl.pending.evidence %}<li>“{{ item.quote }}”</li>{% endfor %}
+        </ul>
+        {% if not ui_read_only %}
+        <form method="post" action="/learning-control-plane/persona-apply" class="filter-bar">
+            {{ hidden_scope }}
+            <label for="persona_approved_by">Approver identity<input id="persona_approved_by" name="approved_by" required autocomplete="off"></label>
+            <div class="filter-actions">
+                <button class="btn btn-primary" type="submit">Add to the persona</button>
+                <button class="btn" type="submit" formaction="/learning-control-plane/persona-dismiss">Turn down</button>
+            </div>
+        </form>
+        {% endif %}
+    </div>
+    {% endif %}
+    {% if pl.changes %}
+    <h3 class="lcp-subtitle">Changes it made</h3>
+    <div class="table-scroll">
+        <table class="data-table lcp-compact">
+            <thead><tr><th scope="col">Version</th><th scope="col">Added</th><th scope="col">Rests on</th><th scope="col">Approved by</th><th scope="col">When</th>{% if not ui_read_only %}<th scope="col">Undo</th>{% endif %}</tr></thead>
+            <tbody>
+            {% for change in pl.changes %}
+            <tr>
+                <td class="mono">v{{ change.version }}</td>
+                <td>{{ change.addition or '—' }} <small>{{ change.fields|join(', ') }}</small></td>
+                <td><ul class="lcp-quotes">{% for item in change.evidence %}<li>“{{ item.quote }}”</li>{% endfor %}</ul></td>
+                <td>{{ change.approved_by or '—' }}</td>
+                <td class="mono">{{ (change.timestamp or '')[:16]|replace('T', ' ') }}</td>
+                {% if not ui_read_only %}
+                <td>{% if change.undone %}Undone{% else %}
+                    <form method="post" action="/learning-control-plane/persona-undo" class="cl-inline-form">
+                        {{ hidden_scope }}<input type="hidden" name="version" value="{{ change.version }}">
+                        <input name="approved_by" required placeholder="Approver" aria-label="Approver identity" autocomplete="off">
+                        <button class="btn btn-sm" type="submit">Undo</button>
+                    </form>{% endif %}
+                </td>
+                {% endif %}
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>
+{% endif %}
 {% endif %}
 
 {% if view.record_count == 0 %}

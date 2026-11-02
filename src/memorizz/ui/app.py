@@ -1100,6 +1100,10 @@ def create_app(
     app.include_router(oracle_docker_router)
     app.include_router(agents_api_router)
     from .failure_alerts import router as failure_alerts_router
+    from .routers.timers import router as timers_router
+
+    app.include_router(timers_router)
+
     from .routers.failures import router as failures_router
 
     app.include_router(failures_router)

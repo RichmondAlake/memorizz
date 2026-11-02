@@ -485,6 +485,32 @@
                 <textarea id="persona_background" name="persona_background" rows="3">{{ persona_background }}</textarea>
             </div>
             <p class="form-hint" id="persona_version_hint" style="display: none;"></p>
+            <details class="builder-subsection" id="persona-learning" {% if persona_learning|default(false) %}open{% endif %}>
+                <summary>Learn from conversations<span class="builder-subsection-desc">Let the goals and background grow in the background</span></summary>
+                <div class="section-body">
+                    <div class="form-group checkbox-group">
+                        <label>
+                            <input type="checkbox" id="persona_learning" name="persona_learning" value="on" {% if persona_learning|default(false) %}checked{% endif %}>
+                            Grow this persona from conversations and memories
+                        </label>
+                        <p class="form-hint">The background model looks for work the user keeps coming back to. When it finds a pattern across at least three conversations, it adds one sentence to the goals or background and keeps the quotes it rests on. The name and role never change this way, and sealed conversations are never read. Needs a persona, and an agent that serves one person.</p>
+                    </div>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label for="persona_learning_every_n_turns">Review every this many turns</label>
+                            <input id="persona_learning_every_n_turns" type="number" min="1" step="1" name="persona_learning_every_n_turns" value="{{ persona_learning_every_n_turns|default(20) }}">
+                            <p class="form-hint">Or once a day, whichever comes first.</p>
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="persona_learning_auto_apply" name="persona_learning_auto_apply" value="on" {% if persona_learning_auto_apply|default(true) %}checked{% endif %}>
+                                Apply changes automatically
+                            </label>
+                            <p class="form-hint">Off, each change waits for you on the Learning control plane. Either way you can undo it there.</p>
+                        </div>
+                    </div>
+                </div>
+            </details>
             <script>
                 (function() {
                     var presetSelect = document.getElementById('persona_preset_select');

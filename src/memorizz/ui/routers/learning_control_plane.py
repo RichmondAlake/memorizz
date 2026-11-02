@@ -88,6 +88,34 @@ def _consolidator(agent_id: str, *, with_model: bool = True) -> Any:
     )
 
 
+def _persona_learner(agent_id: str, *, with_model: bool = True) -> Any:
+    """A persona learner for a saved agent, on its background (else chat) model."""
+    from ...learning.consolidation import model_for_agent
+    from ...learning.persona_learning import PersonaLearner, PersonaLearningConfig
+
+    record = _saved_agent(agent_id)
+    model = None
+    if with_model and record is not None:
+        try:
+            model = model_for_agent(record)
+        except Exception as exc:
+            logger.warning("No persona review model for %s: %s", agent_id, exc)
+    try:
+        config = PersonaLearningConfig.from_value(
+            _agent_field(record, "persona_learning") or None
+        )
+    except (TypeError, ValueError):
+        config = PersonaLearningConfig()
+    return PersonaLearner(
+        _state["provider"],
+        agent_id,
+        model=model,
+        config=config,
+        multi_tenant=bool(_agent_field(record, "multi_tenant")),
+        entities=_entity_scope(agent_id) == "memory",
+    )
+
+
 def _entity_scope(agent_id: str) -> str:
     policy = _agent_field(_saved_agent(agent_id), "retrieval_policy")
     if hasattr(policy, "to_dict"):
@@ -257,11 +285,23 @@ async def learning_control_plane_page(
             }
         except Exception as exc:
             logger.debug("Consolidation panel data failed: %s", exc)
+    persona_learning: Dict[str, Any] = {}
+    if selected:
+        try:
+            persona_learning = _persona_learner(selected, with_model=False).status()
+            persona_learning["memory_ids"] = consolidation.get("memory_ids") or []
+            persona_learning["model"] = consolidation.get("model")
+            persona_learning["model_is_background"] = consolidation.get(
+                "model_is_background"
+            )
+        except Exception as exc:
+            logger.debug("Persona learning panel data failed: %s", exc)
     return templates.TemplateResponse(
         "learning_control_plane.html",
         {
             "suppressed": suppressed,
             "consolidation": consolidation,
+            "persona_learning": persona_learning,
             "request": request,
             "provider_type": _state["provider_type"],
             "connection_info": _state["connection_info"],
@@ -473,6 +513,113 @@ async def unsuppress_memory(
     return _redirect(
         agent_id, memory_id=memory_id, user_id=user_id, thread_id=thread_id
     )
+
+
+def _persona_action(
+    agent_id: str,
+    memory_id: Optional[str],
+    user_id: Optional[str],
+    thread_id: Optional[str],
+    message: Any,
+) -> RedirectResponse:
+    """Run one persona action and report it on the page."""
+    try:
+        _last_actions[agent_id] = {
+            "kind": "persona-learning",
+            "message": message(),
+            "at": datetime.now().isoformat(timespec="seconds"),
+        }
+    except Exception as exc:
+        _last_actions[agent_id] = {"kind": "error", "message": str(exc)}
+    return _redirect(
+        agent_id, memory_id=memory_id, user_id=user_id, thread_id=thread_id
+    )
+
+
+@router.post("/learning-control-plane/persona-review")
+async def review_persona(
+    agent_id: str = Form(...),
+    persona_memory_id: str = Form(...),
+    persona_user_id: Optional[str] = Form(None),
+    memory_id: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    thread_id: Optional[str] = Form(None),
+):
+    """Look for a lasting pattern now (the model call takes a while)."""
+    from starlette.concurrency import run_in_threadpool
+
+    def _review() -> str:
+        review = _persona_learner(agent_id).review(
+            persona_memory_id.strip(),
+            (persona_user_id or "").strip() or None,
+            force=True,
+        )
+        return review.reason
+
+    try:
+        message = await run_in_threadpool(_review)
+    except Exception as exc:
+        _last_actions[agent_id] = {"kind": "error", "message": str(exc)}
+        return _redirect(
+            agent_id, memory_id=memory_id, user_id=user_id, thread_id=thread_id
+        )
+    return _persona_action(agent_id, memory_id, user_id, thread_id, lambda: message)
+
+
+@router.post("/learning-control-plane/persona-apply")
+async def apply_persona(
+    agent_id: str = Form(...),
+    approved_by: str = Form(...),
+    memory_id: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    thread_id: Optional[str] = Form(None),
+):
+    """Apply the change waiting for review."""
+
+    def _apply() -> str:
+        _persona, result = _persona_learner(agent_id, with_model=False).apply(
+            approved_by
+        )
+        return f"Persona is now version {result.get('version')}."
+
+    return _persona_action(agent_id, memory_id, user_id, thread_id, _apply)
+
+
+@router.post("/learning-control-plane/persona-dismiss")
+async def dismiss_persona(
+    agent_id: str = Form(...),
+    approved_by: str = Form(...),
+    memory_id: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    thread_id: Optional[str] = Form(None),
+):
+    """Turn down the change waiting for review."""
+
+    def _dismiss() -> str:
+        _persona_learner(agent_id, with_model=False).dismiss(approved_by)
+        return "Turned down. It won't be proposed again."
+
+    return _persona_action(agent_id, memory_id, user_id, thread_id, _dismiss)
+
+
+@router.post("/learning-control-plane/persona-undo")
+async def undo_persona(
+    agent_id: str = Form(...),
+    approved_by: str = Form(...),
+    version: int = Form(...),
+    memory_id: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    thread_id: Optional[str] = Form(None),
+):
+    """Undo one background change."""
+
+    def _undo() -> str:
+        _persona, result = _persona_learner(agent_id, with_model=False).undo(
+            approved_by, version
+        )
+        return f"Undone. Persona is now version {result.get('version')}."
+
+    return _persona_action(agent_id, memory_id, user_id, thread_id, _undo)
 
 
 @router.post("/learning-control-plane/consolidation-plan")
