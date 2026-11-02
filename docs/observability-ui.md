@@ -320,10 +320,28 @@ for a required interactive contract.
 
 ### Health, causal inspection, and comparison
 
-The trace timeline includes a **Causal waterfall** that pairs start/result events,
-shows recorded parent links, links spans to their event evidence, and flags
-missing parents, missing causal events and cycles. Missing durations are shown
-as unknown. An observed parent link does not prove source ownership or quality.
+The **Waterfall** places each turn's spans on the turn's clock, nested by their
+recorded parent links, with start and result events paired into one bar. A model
+call shows its model and step, a tool call its tool, and memory its type. Runs of
+identical spans fold into one row; open it to see each one.
+
+- **Failures.** A failed span is red, with a plain sentence on why. Every span
+  above it carries a red mark at the failure's time, so a folded tree still shows
+  where it failed. **Next failure** steps through them.
+- **Where the time went.** A bar above each turn gives each moment to the deepest
+  span running then. Time no span covers is *Unaccounted*, and long stretches of
+  it also appear as hatched rows inside the turn.
+- **Finding a span.** Filter by lane or by failures, or search by name, tool,
+  model or ID. Drag across the overview above the time axis to zoom in; drag the
+  highlighted window to move along the turn.
+- **Details.** Select a span for its start, duration, own time, tokens, charge,
+  error code and IDs, with a link to its event in the timeline.
+- **Keyboard.** The up and down arrow keys move between rows, the right and left
+  arrow keys open and close them, and Enter shows a span's details.
+
+Missing data stays visible. An event with no duration is a diamond. A span with
+no recorded end fades out. Missing parents, missing causal events and cycles are
+flagged. An observed parent link does not prove source ownership or quality.
 
 `/traces/health` and `/traces/health.json` expose normalized-event and schema
 counts, normalization/query failures, missing identities and stages, orphan

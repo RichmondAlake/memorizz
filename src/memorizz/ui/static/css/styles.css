@@ -5503,11 +5503,6 @@ body.theme-light .connect-btn {
     }
 }
 /* Content-free causal span inspection. */
-.trace-waterfall-table small {
-    display: block;
-    opacity: .7;
-}
-
 .trace-lineage-grid {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -5523,23 +5518,6 @@ body.theme-light .connect-btn {
     .trace-lineage-grid { grid-template-columns: 1fr; }
 }
 
-.trace-waterfall-track {
-    position: relative;
-    min-width: 120px;
-    height: 12px;
-    background: rgba(128, 128, 128, .15);
-    overflow: hidden;
-}
-
-.trace-waterfall-track span {
-    position: absolute;
-    top: 2px;
-    height: 8px;
-    min-width: 2px;
-    max-width: 100%;
-    background: currentColor;
-    opacity: .7;
-}
 .trace-navigator > .traces-table-wrap, #incident-results {
     max-height: 24rem;
     overflow: auto;
@@ -5563,7 +5541,6 @@ body.theme-light .connect-btn {
 .trace-evidence-empty { padding: 0.75rem; border-left: 3px solid #c8a150; }
 #trace-lineage-inspectors, #trace-waterfall, #trace-insights, #trace-output-contracts { scroll-margin-top: 12rem; }
 #incident-results code, #incident-results summary, #incident-results a { overflow-wrap: anywhere; }
-.trace-scroll-hint { font-size: 0.85rem; }
 
 /* Playground: provider prompt-cache card */
 .pg-cache-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }

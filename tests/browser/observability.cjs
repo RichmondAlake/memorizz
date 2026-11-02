@@ -48,9 +48,26 @@ const {chromium} = require(process.env.MEMORIZZ_PLAYWRIGHT_MODULE || 'playwright
         await page.locator('#fleet-title').waitFor();
         assert(await page.locator('.obs-fleet-tools .range-picker').count());
         await page.goto(fromTraces);
-        await page.locator('#trace-category').selectOption('delivery');
+        // The waterfall: lane filter, search, a span's details and the keyboard.
+        await page.locator('[data-wf-filter="output"]').click();
         assert(await page.locator('[data-waterfall-kind="output_contract"]:visible').count());
-        await page.locator('#trace-category').selectOption('all');
+        assert.equal(await page.locator('[data-wf-filter="output"]').getAttribute('aria-pressed'), 'true');
+        assert(!(await page.locator('#trace-waterfall .wf-row[data-lane="memory"]:visible').count()));
+        await page.locator('[data-wf-filter="all"]').click();
+        await page.locator('[data-wf-search]').fill('no span is called this');
+        await page.waitForFunction(() => document.querySelector('[data-wf-status]').textContent.includes('No spans match'));
+        await page.locator('[data-wf-search]').fill('');
+        await page.waitForFunction(() => !document.querySelector('[data-wf-status]').textContent);
+        const firstSpan = page.locator('#trace-waterfall .wf-row--span').first();
+        await firstSpan.click();
+        await page.locator('#trace-waterfall .wf-panel').waitFor();
+        assert((await page.locator('#trace-waterfall .wf-panel').textContent()).includes('Kind'));
+        assert.equal(await firstSpan.getAttribute('aria-selected'), 'true');
+        await page.keyboard.press('Escape');
+        assert(!(await page.locator('#trace-waterfall .wf-panel').count()));
+        await page.keyboard.press('ArrowDown');
+        assert.notEqual(await page.evaluate(() => document.activeElement.id), await firstSpan.getAttribute('id'));
+        assert(!(await page.content()).includes('SYNTHETIC PRIVATE PREVIEW'));
         await page.locator('[data-artifact-ref]').first().click();
         await page.waitForFunction(() => document.querySelector('[data-artifact-ref]').nextElementSibling.textContent.includes('ownership_verified'));
         const revealRequest = page.waitForRequest(request => new URL(request.url()).pathname === '/traces/reveal');

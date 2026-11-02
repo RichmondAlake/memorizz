@@ -1557,7 +1557,6 @@ body.theme-light #trace-timeline {
 a.trace-analysis-stat--link { color: inherit; text-decoration: none; }
 a.trace-analysis-stat--link:hover,
 a.trace-analysis-stat--link:focus-visible { border-color: var(--text-muted); }
-.trace-waterfall-failed { color: var(--accent-danger); font-weight: 600; }
 
 /* Failures across agents, and the rules that watch them. */
 .obs-fleet-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: 16px 0; }

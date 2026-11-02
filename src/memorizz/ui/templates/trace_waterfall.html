@@ -1,33 +1,106 @@
-{% if trace_waterfall %}
-<div class="detail-section observability-section" id="trace-waterfall">
-    <h2>Causal waterfall</h2>
-    <label>Lane <select id="trace-category"><option value="all">All</option><option value="memory">Memory</option><option value="model">Model</option><option value="tool">Tool</option><option value="host">Host action</option><option value="artifact">Artifact</option><option value="delivery">Delivery / contract</option><option value="errors">Errors and gaps</option></select></label>
-    <label><input type="checkbox" id="trace-show-success"> Show successful low-level model/tool spans</label>
-    <p>Recorded parent links, grouped by root and turn. Bars show observed timing, not inferred model latency. Select an operation to inspect its evidence.</p>
-    {% set any_failed = namespace(value=false) %}
-    {% for group in trace_waterfall %}{% if group.nodes|selectattr('status', 'in', ['error', 'partial'])|list %}{% set any_failed.value = true %}{% endif %}{% endfor %}
-    {% for group in trace_waterfall %}
-    {% set failed_steps = group.nodes|selectattr('status', 'in', ['error', 'partial'])|list|length %}
-    <details{% if failed_steps or (loop.first and not any_failed.value) or selected_root_trace_id %} open{% endif %}{% if failed_steps %} class="has-failures"{% endif %}>
-        <summary>{% if failed_steps %}<span class="trace-waterfall-failed">{{ failed_steps }} failed</span> {% endif %}Root <code>{{ group.root_trace_id or 'Unknown' }}</code> · Turn <code>{{ group.turn_id or 'Unknown' }}</code> · {{ group.nodes|length }} spans</summary>
-        <p class="trace-scroll-hint">Scroll the table horizontally to inspect timing and duration →</p>
-        <div class="traces-table-wrap" tabindex="0" role="region" aria-label="Causal waterfall, horizontally scrollable">
-        <table class="traces-agents-table trace-waterfall-table">
-            <thead><tr><th>Operation / causal parent</th><th>Status</th><th>Timing</th><th>Duration</th></tr></thead>
-            <tbody>{% for node in group.nodes %}
-                <tr data-waterfall-kind="{{ node.kind }}" data-waterfall-status="{{ node.status }}" data-waterfall-gap="{{ 'true' if node.missing_parent or node.missing_cause or node.cycle else 'false' }}">
-                    <td><div style="padding-left: {{ [node.depth, 10]|min * 12 }}px"><a href="#{{ node.anchor }}">{{ node.operation }}</a>
-                    {% if node.parent_span_id %}<small>Parent: {{ node.parent_span_id|truncate(24) }}</small>{% endif %}
-                    {% if node.caused_by_event_id %}<small>Caused by event: {{ node.caused_by_event_id|truncate(24) }}</small>{% endif %}
-                    {% if node.missing_parent or node.missing_cause or node.cycle %}<span class="badge badge-warning">{{ 'Cyclic parent chain' if node.cycle else 'Missing parent or cause' }}</span>{% endif %}</div></td>
-                    <td>{{ node.status }}</td>
-                    <td><div class="trace-waterfall-track" aria-label="Offset {{ node.offset_ms if node.offset_ms is not none else 'unknown' }} ms"><span style="left: {{ node.offset_percent }}%; width: {{ node.duration_percent }}%"></span></div></td>
-                    <td>{{ node.duration_ms if node.duration_ms is not none else 'Unknown' }}{% if node.duration_ms is not none %} ms{% endif %}</td>
-                </tr>
-            {% endfor %}</tbody>
-        </table>
+{#- The waterfall: each turn's spans on one clock, nested by recorded parent.
+    Rows come from ui/waterfall_view.py; js/trace-waterfall.js adds folding,
+    filters, search, zoom and the detail panel. Without script every row
+    shows, in order, with its bar. -#}
+{% from '_fmt.html' import count %}
+{% set wf = trace_waterfall_view %}
+{% if wf and wf.turns %}
+{% set any_failed = wf.failed > 0 %}
+<section class="detail-section observability-section wf" id="trace-waterfall" aria-labelledby="trace-waterfall-title">
+    <div class="wf-head">
+        <div class="wf-heading">
+            <h2 id="trace-waterfall-title">Waterfall</h2>
+            <p class="wf-sub">{{ count(wf.spans) }} span{{ '' if wf.spans == 1 else 's' }}{% if wf.turns|length > 1 %} in {{ wf.turns|length }} turns{% endif %}, nested by recorded parent and placed on the turn's clock. Select a span for its details.</p>
         </div>
+        <div class="wf-tools">
+            {% if wf.filters|length > 1 or wf.failed %}
+            <div class="obs-tl-filter wf-filter" role="group" aria-label="Show spans">
+                <button type="button" data-wf-filter="all" aria-pressed="true">All <span>{{ count(wf.spans) }}</span></button>
+                {% for filter in wf.filters %}<button type="button" data-wf-filter="{{ filter.key }}" aria-pressed="false"><i class="wf-swatch" data-lane="{{ filter.key }}" aria-hidden="true"></i>{{ filter.label }} <span>{{ count(filter.count) }}</span></button>{% endfor %}
+                {% if wf.failed %}<button type="button" data-wf-filter="failed" aria-pressed="false" class="is-errors">Failed <span>{{ wf.failed }}</span></button>{% endif %}
+            </div>
+            {% endif %}
+            <input class="wf-search" type="search" data-wf-search placeholder="Find a span" aria-label="Find a span by name, tool, model or ID" autocomplete="off" spellcheck="false">
+            {% if wf.failed %}<button class="btn btn-sm wf-next-failure" type="button" data-wf-next-failure>Next failure</button>{% endif %}
+        </div>
+    </div>
+    <ul class="wf-key" aria-label="How to read the bars">
+        <li><i class="wf-key-bar" aria-hidden="true"></i>Recorded duration</li>
+        <li><i class="wf-key-point" aria-hidden="true"></i>No duration recorded</li>
+        <li><i class="wf-key-open" aria-hidden="true"></i>Started, no end recorded</li>
+        <li><i class="wf-key-gap" aria-hidden="true"></i>Unaccounted: no span recorded</li>
+        {% if any_failed %}<li><i class="wf-key-mark" aria-hidden="true"></i>A failure inside this span</li>{% endif %}
+    </ul>
+    <p class="wf-status" role="status" data-wf-status></p>
+    {% for turn in wf.turns %}
+    {% set open_turn = turn.failed or turn.selected or selected_root_trace_id or (loop.first and not any_failed) %}
+    <details class="wf-turn{% if turn.failed %} has-failures{% endif %}" data-wf-turn="{{ turn.id }}"{% if open_turn %} open{% endif %}>
+        <summary class="wf-turn-summary">
+            {% if turn.failed %}<span class="wf-failed-count">{{ turn.failed }} failed</span>{% endif %}
+            <strong title="{{ turn.turn_id or turn.root_trace_id or '' }}">{{ turn.title }}</strong>
+            <span class="wf-turn-meta">{% if turn.duration %}{{ turn.duration }} · {% endif %}{{ count(turn.span_count) }} span{{ '' if turn.span_count == 1 else 's' }}{% if turn.started_at %} · started <time data-wf-clock datetime="{{ turn.started_at }}">{{ turn.started_at[11:19] }}</time>{% endif %}{% if turn.warnings %} · <span class="wf-turn-warn">{{ turn.warnings }} with a missing or looping parent</span>{% endif %}</span>
+        </summary>
+        <p class="wf-turn-empty" data-wf-empty hidden>No spans in this turn match.</p>
+        {% if turn.breakdown %}
+        <div class="wf-breakdown">
+            <div class="wf-breakdown-bar" role="img" aria-label="Where the time went: {% for part in turn.breakdown %}{{ part.label }} {{ part.duration }}{% if not loop.last %}, {% endif %}{% endfor %}">
+                {%- for part in turn.breakdown %}<span data-lane="{{ part.key }}" style="width: {{ part.share }}%"></span>{% endfor -%}
+            </div>
+            <ul class="wf-breakdown-key">
+                {% for part in turn.breakdown %}<li data-lane="{{ part.key }}" title="{{ '%.1f'|format(part.share) }}% of the turn"><i class="wf-swatch" data-lane="{{ part.key }}" aria-hidden="true"></i>{{ part.label }} <strong>{{ part.duration }}</strong></li>{% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+        <div class="wf-grid" role="treegrid" aria-label="Spans in {{ turn.title }}" data-wf-grid data-wf-extent="{{ turn.extent_ms }}">
+            <div class="wf-header" role="row">
+                <div class="wf-header-name" role="columnheader">
+                    <span>Span</span>
+                    <button class="wf-text-button" type="button" data-wf-reset hidden>Reset zoom</button>
+                    <button class="wf-text-button" type="button" data-wf-collapse-all>Collapse all</button>
+                </div>
+                <div class="wf-header-time" role="columnheader" aria-label="Time from the turn's start">
+                    <div class="wf-minimap" data-wf-minimap title="Drag to zoom into part of the turn">
+                        <canvas aria-hidden="true"></canvas>
+                        <div class="wf-window" data-wf-window hidden></div>
+                    </div>
+                    <div class="wf-axis" data-wf-axis aria-hidden="true">{% for tick in turn.ticks %}<span style="left: {{ tick.left }}%">{{ tick.label }}</span>{% endfor %}</div>
+                </div>
+            </div>
+            <div class="wf-divider" role="separator" aria-orientation="vertical" aria-label="Resize the span column" aria-valuemin="20" aria-valuemax="70" aria-valuenow="38" tabindex="0" data-wf-divider></div>
+            <div class="wf-body" role="rowgroup">
+                <div class="wf-gridlines" data-wf-gridlines aria-hidden="true">{% for tick in turn.ticks %}<i style="left: {{ tick.left }}%"></i>{% endfor %}</div>
+                {% for row in turn.rows %}
+                <div class="wf-row wf-row--{{ row.type }}{% if row.failed %} is-failed{% endif %}{% if row.selected %} is-selected{% endif %}" role="row" id="{{ row.id }}" tabindex="-1"
+                    aria-level="{{ row.depth + 1 }}"{% if row.children %} aria-expanded="{{ 'false' if row.type == 'fold' else 'true' }}"{% endif %}{% if row.selected %} aria-selected="true"{% endif %}
+                    data-wf-row data-lane="{{ row.lane }}" data-depth="{{ row.depth }}"{% if row.parent %} data-parent="{{ row.parent }}"{% endif %}
+                    data-waterfall-kind="{{ row.kind }}" data-waterfall-status="{{ row.status }}" data-waterfall-gap="{{ 'true' if row.gap else 'false' }}"
+                    {%- if row.failed %} data-failed="true"{% endif %}{% if row.parent and row.parent.startswith(turn.id ~ '-f') %} hidden{% endif %}
+                    data-search="{{ (row.label ~ ' ' ~ row.detail ~ ' ' ~ row.kind ~ ' ' ~ row.status)|lower }}">
+                    <div class="wf-name" role="gridcell" style="--depth: {{ [row.depth, 14]|min }}">
+                        {% if row.children %}<button class="wf-toggle" type="button" tabindex="-1" data-wf-toggle aria-label="{{ 'Expand' if row.type == 'fold' else 'Collapse' }} {{ row.label }}"><svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>{% else %}<span class="wf-leaf" aria-hidden="true"></span>{% endif %}
+                        <i class="wf-swatch" data-lane="{{ row.lane }}" aria-hidden="true"></i>
+                        <span class="wf-label">{{ row.label }}</span>
+                        {%- if row.type == 'fold' %}<span class="wf-count">×{{ row.count }}</span>{% endif %}
+                        {%- if row.detail %}<span class="wf-detail">{{ row.detail }}</span>{% endif %}
+                        {%- if row.children and row.type != 'fold' %}<span class="wf-inside" title="Spans inside">{{ row.spans - 1 }}</span>{% endif %}
+                        {%- if row.failed %}<span class="wf-flag">Failed</span>{% endif %}
+                        {%- if row.warning %}<span class="wf-warn" role="img" aria-label="{{ row.warning }}" title="{{ row.warning }}">!</span>{% endif %}
+                    </div>
+                    <div class="wf-track" role="gridcell"><div class="wf-plot">
+                        {% if row.shape == 'untimed' %}<span class="wf-untimed">No time recorded</span>
+                        {% else %}<span class="wf-bar wf-bar--{{ row.shape }}" data-left="{{ row.left }}" data-width="{{ row.width }}" style="left: {{ row.left }}%; width: {{ row.width }}%"{% if row.type == 'span' %} title="Starts {{ row.start }} in{% if row.duration %}, runs {{ row.duration }}{% elif row.shape == 'open' %}, no end recorded{% endif %}"{% endif %}></span>
+                        {% if row.duration or row.shape == 'open' %}<span class="wf-dur wf-dur--{{ row.label_side }}" data-wf-dur style="{% if row.label_side == 'left' %}right: {{ 100 - row.left }}%{% elif row.label_side == 'inside' %}right: {{ 100 - row.left - row.width }}%{% else %}left: {{ row.left + row.width }}%{% endif %}">{{ row.duration or 'no end recorded' }}</span>{% endif %}
+                        {% for mark in row.marks %}<button class="wf-mark" type="button" tabindex="-1" data-wf-goto="{{ mark.target }}" data-left="{{ mark.left }}" style="left: {{ mark.left }}%" aria-label="{{ mark.label }}" title="{{ mark.label }}"></button>{% endfor %}
+                        {% endif %}
+                    </div></div>
+                </div>
+                {% endfor %}
+            </div>
+            <p class="wf-hidden-note" data-wf-hidden-note hidden></p>
+        </div>
+        <script type="application/json" data-wf-details>{{ turn.details|tojson }}</script>
     </details>
     {% endfor %}
-</div>
+    <noscript><style>#trace-waterfall .wf-row[hidden] { display: grid; } #trace-waterfall .wf-minimap, #trace-waterfall [data-wf-collapse-all], #trace-waterfall .wf-search { display: none; }</style></noscript>
+</section>
 {% endif %}

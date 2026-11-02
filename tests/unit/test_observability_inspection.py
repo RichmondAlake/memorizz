@@ -213,7 +213,11 @@ def test_health_and_comparison_html_json_no_writes(inspection_client):
         page = client.get("/traces/compare", params=params)
         assert page.status_code == 200
         assert "PRIVATE" not in page.text + diff.text
-        assert "Causal waterfall" in client.get("/traces?agent_id=agent").text
+        traces = client.get("/traces?agent_id=agent").text
+        assert (
+            'id="trace-waterfall"' in traces
+            and '<h2 id="trace-waterfall-title">Waterfall</h2>' in traces
+        )
     assert provider.list_all(MemoryType.SHARED_MEMORY) == before
 
 

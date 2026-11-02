@@ -222,7 +222,6 @@
         } catch (error) { button.textContent = 'Copy failed'; }
         setTimeout(() => { button.textContent = 'Copy JSON'; }, 1500);
     }));
-    const category = document.getElementById('trace-category');
     document.querySelectorAll('[data-artifact-ref]').forEach(button => button.addEventListener('click', async () => {
         const output = button.nextElementSibling;
         try {
@@ -234,18 +233,6 @@
         } catch (error) { output.textContent = error.message; }
         output.hidden = false;
     }));
-    const successes = document.getElementById('trace-show-success');
-    function filterWaterfall() {
-        document.querySelectorAll('[data-waterfall-kind]').forEach(row => {
-            const kind = row.dataset.waterfallKind;
-            const group = kind.startsWith('memory') || kind === 'context_binding' ? 'memory' : kind.startsWith('model') ? 'model' : kind.startsWith('tool') ? 'tool' : kind.startsWith('artifact') ? 'artifact' : ['ui_delivery', 'output_contract'].includes(kind) ? 'delivery' : 'host';
-            const error = ['error', 'partial'].includes(row.dataset.waterfallStatus) || row.dataset.waterfallGap === 'true';
-            row.hidden = (category && category.value !== 'all' && (category.value === 'errors' ? !error : group !== category.value)) || (!successes?.checked && ['model', 'tool'].includes(group) && row.dataset.waterfallStatus === 'success' && !error);
-        });
-    }
-    category?.addEventListener('change', filterWaterfall);
-    successes?.addEventListener('change', filterWaterfall);
-    filterWaterfall();
     const selected = document.querySelector('[data-selected-event]');
     if (selected) { selected.scrollIntoView({block: 'center'}); selected.focus({preventScroll: true}); }
     document.getElementById('trace-replay-create')?.addEventListener('click', async event => {

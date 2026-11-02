@@ -38,7 +38,9 @@ const {chromium} = require(process.env.MEMORIZZ_PLAYWRIGHT_MODULE || 'playwright
         await page.locator('.trace-section-nav a[href="#trace-lineage-inspectors"]').click();
         assert(await page.locator('.trace-section-nav').evaluate(node => Math.abs(node.getBoundingClientRect().top) < 2));
         assert(await page.locator('#trace-lineage-inspectors').isVisible());
-        assert(await page.locator('.trace-scroll-hint').isVisible());
+        await page.locator('#trace-waterfall .wf-row').first().scrollIntoViewIfNeeded();
+        assert(await page.locator('#trace-waterfall .wf-row').first().isVisible());
+        assert(await page.evaluate(() => document.documentElement.scrollWidth <= 390));
         await page.screenshot({path: process.env.MEMORIZZ_AUDIT_SCREENSHOT || '/private/tmp/memorizz-observability-audit-mobile.png'});
         assert.deepEqual(errors, []);
         console.log('PASS: legacy unknown coverage, explicit missing-evidence panels, disabled hooks, scoped round-trip navigation, bounded busy overview and usable mobile incident placement');

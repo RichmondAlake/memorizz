@@ -40,6 +40,48 @@ def _milliseconds(value):
     )
 
 
+# Content-free fields a span row may show: what ran, where and what it cost.
+# A terminal event's value wins over its start event's.
+WATERFALL_ATTRIBUTES = (
+    "model",
+    "provider",
+    "response_model",
+    "tool_name",
+    "logical_tool_name",
+    "tool_provider",
+    "memory_type",
+    "stage",
+    "iteration",
+    "input_tokens",
+    "output_tokens",
+    "cached_tokens",
+    "cost_usd",
+    "ttft_ms",
+    "error_code",
+    "outcome",
+    "outcome_reason_code",
+    "stop_reason",
+    "cache_decision",
+    "memory_supplied_count",
+    "memory_candidate_count",
+    "finish_reason",
+)
+
+
+def _span_attributes(captured):
+    attributes = {}
+    for row in captured:
+        for key in WATERFALL_ATTRIBUTES:
+            value = row.get(key)
+            if (
+                value is not None
+                and value != ""
+                and not isinstance(value, (dict, list))
+            ):
+                attributes[key] = value
+    return attributes
+
+
 def build_causal_waterfall(events):
     """Pair span phases and expose recorded parentage, never inferred lineage.
 
@@ -119,12 +161,15 @@ def build_causal_waterfall(events):
                     if first.get("phase") == "event"
                     else "unknown_legacy",
                     "task_id": first.get("task_id"),
+                    "attributes": _span_attributes(captured),
                 }
             )
         starts = [
-            node["start_ms"] for node in nodes.values() if node["start_ms"] is not None
+            (node["start_ms"], node["timestamp"])
+            for node in nodes.values()
+            if node["start_ms"] is not None
         ]
-        origin = min(starts) if starts else None
+        origin, started_at = min(starts) if starts else (None, None)
         for node in nodes.values():
             path, current = set(), node["span_id"]
             while current in nodes and current not in path:
@@ -168,6 +213,8 @@ def build_causal_waterfall(events):
                 "thread_id": scope[3],
                 "root_trace_id": scope[4],
                 "turn_id": scope[5],
+                "started_at": timestamp(started_at) if started_at else None,
+                "extent_ms": round(max(ends, default=0), 3),
                 "nodes": ordered,
             }
         )

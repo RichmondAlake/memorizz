@@ -69,6 +69,7 @@ from ..security import (
 )
 from ..state import _state, templates
 from ..trace_access import current_principal, scoped_trace_filters
+from ..waterfall_view import waterfall_view
 from .trace_tools import trace_capabilities
 
 logger = logging.getLogger(__name__)
@@ -756,7 +757,12 @@ async def traces_page(
                 ]
             ),
             "trace_tag_pairs": tag_pairs(trace_events),
-            "trace_waterfall": build_causal_waterfall(display_trace_events),
+            "trace_waterfall": (
+                trace_waterfall := build_causal_waterfall(display_trace_events)
+            ),
+            "trace_waterfall_view": waterfall_view(
+                trace_waterfall, selected_event_id=event_id
+            ),
             "trace_inspectors": build_lineage_inspectors(display_trace_events),
             "trace_permissions": {
                 permission: current_principal.get().allows(permission)
