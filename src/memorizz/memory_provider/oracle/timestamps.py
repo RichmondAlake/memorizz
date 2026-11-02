@@ -14,9 +14,11 @@ with ``+00:00`` (``utc_iso``).
 python-oracledb never reads a ``datetime``'s ``tzinfo`` when binding (the
 4.0 driver drops it), so an aware value must be converted here first, and a
 ``TIMESTAMP WITH TIME ZONE`` column must be written as
-``FROM_TZ(CAST(:x AS TIMESTAMP), 'UTC')`` (``utc_tstz_sql``) or Oracle
+``FROM_TZ(CAST(:x AS TIMESTAMP), '+00:00')`` (``utc_tstz_sql``) or Oracle
 labels the bound wall-clock time with the session time zone, which thin mode
-sets from the Python process's local offset.
+sets from the Python process's local offset. It has to be an offset: a value
+stored with a region name such as ``'UTC'`` can't be fetched in thin mode
+(DPY-3022), so such columns are read through ``utc_tstz_read``.
 
 Rows written before this convention hold local time; migrations
 ``013_utc_timestamps.sql`` converts them once, given their time zone.
@@ -77,7 +79,16 @@ def utc_epoch(value: Any) -> Optional[float]:
 def utc_tstz_sql(bind: str) -> str:
     """SQL writing the naive UTC bind ``:bind`` into a TIMESTAMP WITH TIME
     ZONE column as a UTC instant."""
-    return f"FROM_TZ(CAST(:{bind} AS TIMESTAMP), 'UTC')"
+    return f"FROM_TZ(CAST(:{bind} AS TIMESTAMP), '+00:00')"
+
+
+def utc_tstz_read(column: str) -> str:
+    """SQL reading a TIMESTAMP WITH TIME ZONE column as naive UTC.
+
+    Rows written before ``utc_tstz_sql`` used an offset hold the region name
+    ``'UTC'``, which thin mode can't fetch; this reads them either way.
+    """
+    return f"SYS_EXTRACT_UTC({column}) AS {column}"
 
 
 __all__ = [

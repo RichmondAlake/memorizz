@@ -7833,6 +7833,14 @@ class OracleProvider(
                     version=persona_dict.get("version"),
                     evolution_history=persona_dict.get("evolution_history"),
                 )
+                # An agent has one persona. A replaced one stays in the
+                # library but must not load for this agent again.
+                cursor.execute(
+                    f"UPDATE {self._get_table_name(MemoryType.PERSONAS)} "
+                    "SET agent_id = NULL "
+                    "WHERE agent_id = :agent_id AND persona_id <> :persona_id",
+                    {"agent_id": agent_id_str, "persona_id": persona_id_value},
+                )
 
             # Store tools in the toolbox base table. ``None`` means this save
             # carries no tool list; a list (empty included) is the agent's
@@ -8679,6 +8687,7 @@ class OracleProvider(
                        {_select_list(evolution_fields)}
                 FROM {self._get_table_name(MemoryType.PERSONAS)}
                 WHERE agent_id = :agent_id
+                ORDER BY updated_at DESC NULLS LAST
             """,
                 {"agent_id": agent_id},
             )

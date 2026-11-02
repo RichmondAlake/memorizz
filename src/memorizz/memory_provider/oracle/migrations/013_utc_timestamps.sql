@@ -88,7 +88,7 @@ DECLARE
             EXECUTE IMMEDIATE
                 'UPDATE ' || table_name_in ||
                 ' SET ' || column_name_in ||
-                ' = FROM_TZ(CAST(' || column_name_in || ' AS TIMESTAMP), ''UTC'')' ||
+                ' = FROM_TZ(CAST(' || column_name_in || ' AS TIMESTAMP), ''+00:00'')' ||
                 ' WHERE ' || column_name_in || ' IS NOT NULL' ||
                 ' AND (EXTRACT(TIMEZONE_HOUR FROM ' || column_name_in || ') <> 0' ||
                 ' OR EXTRACT(TIMEZONE_MINUTE FROM ' || column_name_in || ') <> 0)';

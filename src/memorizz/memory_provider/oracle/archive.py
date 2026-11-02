@@ -29,6 +29,7 @@ _RAW_TYPES = {
 _JSON = {
     "traits",
     "expertise",
+    "evolution_history",
     "parameters",
     "input_schema",
     "tool_policy",

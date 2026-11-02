@@ -846,13 +846,13 @@ def test_automation_schedule_times_are_written_as_utc_instants():
     store.claim_due_jobs("worker", now, limit=5, lease_seconds=60)
 
     sql, params = cursor.calls[0]
-    assert "next_run_at <= FROM_TZ(CAST(:now_utc AS TIMESTAMP), 'UTC')" in sql
+    assert "next_run_at <= FROM_TZ(CAST(:now_utc AS TIMESTAMP), '+00:00')" in sql
     assert params["now_utc"] == datetime(2026, 10, 1, 7, 0)
 
     cursor.calls.clear()
     store.update_job("job", {"next_run_at": now, "name": "n"})
     sql, params = cursor.calls[0]
-    assert "next_run_at = FROM_TZ(CAST(:v_next_run_at AS TIMESTAMP), 'UTC')" in sql
+    assert "next_run_at = FROM_TZ(CAST(:v_next_run_at AS TIMESTAMP), '+00:00')" in sql
     assert "updated_at = SYS_EXTRACT_UTC(SYSTIMESTAMP)" in sql
     assert params["v_next_run_at"] == datetime(2026, 10, 1, 7, 0)
 

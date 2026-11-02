@@ -9,8 +9,11 @@ a datetime's tzinfo when binding, and Oracle then labels the bare wall-clock
 time with the session time zone (thin mode: the Python process's local
 offset), so an aware UTC value used to be stored as that wall clock in the
 local zone. Every schedule time is therefore bound as naive UTC wrapped in
-``FROM_TZ(..., 'UTC')`` (``_tstz``). The plain ``created_at``/``updated_at``
-columns hold UTC like the memory tables (``memory_provider/oracle/timestamps``).
+``FROM_TZ(..., '+00:00')`` (``_tstz``) and read back through
+``SYS_EXTRACT_UTC`` (``utc_tstz_read``), because thin mode can't fetch a value
+stored with a region name, as older rows are. The plain ``created_at``/
+``updated_at`` columns hold UTC like the memory tables
+(``memory_provider/oracle/timestamps``).
 """
 
 from __future__ import annotations
@@ -21,13 +24,24 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from ..._time import as_utc
-from ...memory_provider.oracle.timestamps import UTC_NOW_SQL, utc_bind, utc_tstz_sql
+from ...memory_provider.oracle.timestamps import (
+    UTC_NOW_SQL,
+    utc_bind,
+    utc_tstz_read,
+    utc_tstz_sql,
+)
 from ..models import AutomationDelivery, AutomationJob, AutomationRun
 from ..schedule import utcnow as _utcnow
 
 # The TIMESTAMP WITH TIME ZONE columns of automation_jobs.
 _JOB_TSTZ_COLUMNS = frozenset(
     {"start_at", "next_run_at", "last_run_at", "lock_expires_at"}
+)
+
+
+# The TIMESTAMP WITH TIME ZONE columns of automation_runs, in select order.
+_RUN_TIMES = ", ".join(
+    utc_tstz_read(column) for column in ("scheduled_for", "started_at", "finished_at")
 )
 
 
@@ -129,9 +143,11 @@ class OracleAutomationStore:
     def _select_job_columns(self) -> str:
         return (
             "job_id, agent_id, name, enabled, schedule_type, cron_expr, interval_seconds, "
-            "timezone, start_at, next_run_at, last_run_at, misfire_policy, max_run_seconds, "
+            f"timezone, {utc_tstz_read('start_at')}, {utc_tstz_read('next_run_at')}, "
+            f"{utc_tstz_read('last_run_at')}, misfire_policy, max_run_seconds, "
             "retry_max_attempts, retry_backoff_seconds, action_type, action_config, "
-            "delivery_type, delivery_config, locked_by, lock_expires_at, created_at, updated_at"
+            "delivery_type, delivery_config, locked_by, "
+            f"{utc_tstz_read('lock_expires_at')}, created_at, updated_at"
         )
 
     def create_job(self, job: AutomationJob) -> AutomationJob:
@@ -531,7 +547,7 @@ class OracleAutomationStore:
 
             cursor.execute(
                 f"""
-                SELECT run_id, job_id, scheduled_for, started_at, finished_at,
+                SELECT run_id, job_id, {_RUN_TIMES},
                        status, attempt, error, result_summary, result_payload, created_at
                 FROM {runs_table}
                 WHERE run_id = :run_id
@@ -649,7 +665,7 @@ class OracleAutomationStore:
             cursor = conn.cursor()
             cursor.execute(
                 f"""
-                SELECT run_id, job_id, scheduled_for, started_at, finished_at,
+                SELECT run_id, job_id, {_RUN_TIMES},
                        status, attempt, error, result_summary, result_payload, created_at
                 FROM {runs_table}
                 WHERE job_id = :job_id

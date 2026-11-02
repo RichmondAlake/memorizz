@@ -861,7 +861,7 @@ def test_store_memagent_skips_reembedding_unchanged_tools_and_personas():
         s for s, _ in cursor.calls if s.startswith("UPDATE MEMORIZZ.toolbox")
     ]
     persona_updates = [
-        s for s, _ in cursor.calls if s.startswith("UPDATE MEMORIZZ.personas")
+        s for s, _ in cursor.calls if s.startswith("UPDATE MEMORIZZ.personas SET name")
     ]
     assert len(toolbox_updates) == 1 and "embedding" not in toolbox_updates[0]
     assert len(persona_updates) == 1 and "embedding" not in persona_updates[0]
@@ -885,7 +885,7 @@ def test_store_memagent_skips_reembedding_unchanged_tools_and_personas():
     provider.store_memagent(agent)
     assert embed_calls == ["Researcher: Keeps provenance Cite sources"]
     persona_updates = [
-        s for s, _ in cursor.calls if s.startswith("UPDATE MEMORIZZ.personas")
+        s for s, _ in cursor.calls if s.startswith("UPDATE MEMORIZZ.personas SET name")
     ]
     assert "embedding = :embedding" in persona_updates[0]
 
