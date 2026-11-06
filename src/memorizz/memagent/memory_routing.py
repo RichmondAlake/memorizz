@@ -55,6 +55,20 @@ SHORT_TERM_MEMORY = "short_term_memory"
 FILED_STORES = (KNOWLEDGE_BASE, ENTITY_MEMORY, SHORT_TERM_MEMORY)
 #: Namespace of knowledge-base entries the router filed.
 REMEMBERED_NAMESPACE = "remembered"
+#: Namespace of the procedures the user stated, when the agent keeps them in
+#: its knowledge base rather than as skills.
+PROCEDURES_NAMESPACE = "procedures"
+#: What a captured fact is about.
+FACT_KINDS = ("preference", "fact", "event")
+
+
+#: Settings that work without routing; given alone they leave it off.
+_WITHOUT_ROUTING = (
+    "entity_capture",
+    "extraction_gate",
+    "gate_threshold",
+    "dedupe_writes",
+)
 
 
 def _truthy(value: Any) -> bool:
@@ -92,9 +106,32 @@ class MemoryRoutingConfig:
     #: is on and the agent has its own background model; False never; True
     #: also on the chat model when there is no background model.
     entity_capture: Optional[bool] = None
+    #: Before a user message is read for facts, a decision model says
+    #: whether it holds anything worth keeping, and what kind (preference,
+    #: fact, procedure or event). Below ``gate_threshold`` nothing more is
+    #: done with it. True uses the agent's decision model; a name ("d1",
+    #: "openai_decisions", ...) picks one. See memorizz.decision_models.
+    extraction_gate: Any = None
+    gate_threshold: float = 0.5
+    #: Before the agent writes a memory to its knowledge base, a decision
+    #: model compares it with the closest stored ones: the same fact is not
+    #: written again, one with more detail or that is no longer true
+    #: replaces the old one (kept, hidden from recall), and another fact
+    #: about the same subject is linked to it.
+    dedupe_writes: Any = None
     extra: Dict[str, Any] = field(default_factory=dict, compare=False)
 
     def __post_init__(self) -> None:
+        from ..decision_models import feature_setting
+
+        object.__setattr__(
+            self, "extraction_gate", feature_setting(self.extraction_gate)
+        )
+        object.__setattr__(self, "dedupe_writes", feature_setting(self.dedupe_writes))
+        threshold = float(self.gate_threshold)
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError("gate_threshold must be a number from 0 to 1")
+        object.__setattr__(self, "gate_threshold", threshold)
         if self.router not in ROUTERS:
             raise ValueError(
                 f"Unknown memory router {self.router!r}; use one of {', '.join(ROUTERS)}"
@@ -134,14 +171,17 @@ class MemoryRoutingConfig:
             raise TypeError("memory_routing must be a bool, a router name or a mapping")
         known = {item.name for item in fields(cls)} - {"extra"}
         data = {key: value[key] for key in value if key in known}
-        # {"entity_capture": False} sets capture alone; routing stays off.
-        data.setdefault("enabled", set(data) != {"entity_capture"})
+        # {"entity_capture": False} (or a gate or write dedupe alone) sets
+        # that alone; routing stays off.
+        data.setdefault("enabled", not set(data) <= set(_WITHOUT_ROUTING) or not data)
         data["enabled"] = _truthy(data["enabled"])
         if "capture_turns" in data:
             data["capture_turns"] = _truthy(data["capture_turns"])
         return cls(**data)
 
     def to_dict(self) -> Dict[str, Any]:
+        from ..decision_models import saved_setting
+
         out: Dict[str, Any] = {
             "enabled": self.enabled,
             "router": self.router,
@@ -154,12 +194,23 @@ class MemoryRoutingConfig:
             out["run_id"] = self.run_id
         if self.entity_capture is not None:
             out["entity_capture"] = self.entity_capture
+        if self.extraction_gate is not None:
+            out["extraction_gate"] = saved_setting(self.extraction_gate)
+            out["gate_threshold"] = self.gate_threshold
+        if self.dedupe_writes is not None:
+            out["dedupe_writes"] = saved_setting(self.dedupe_writes)
         return out
 
     @property
     def worth_saving(self) -> bool:
-        """Routing is on, or entity capture was set by hand."""
-        return self.enabled or self.entity_capture is not None
+        """Routing is on, or entity capture, the gate or write dedupe was set
+        by hand."""
+        return (
+            self.enabled
+            or self.entity_capture is not None
+            or self.extraction_gate is not None
+            or self.dedupe_writes is not None
+        )
 
     @property
     def label(self) -> str:
@@ -421,17 +472,30 @@ def place(
 # -- entity facts --------------------------------------------------------------
 
 _FACTS_PROMPT = """You maintain an assistant's long-term memory.
-List durable facts the text below states about the user or about named people,
+List the facts the text below states about the user or about named people,
 organisations, projects and things: names, roles, preferences, plans,
-relationships, attributes. Skip anything temporary, guesses, and facts already
-known.
+relationships, attributes. A trip, booking, event or project counts for as long
+as it lasts: a fact said to hold only for it ("for this trip") belongs to that
+thing, so use its known entity when one fits, else name it, and leave the
+user's own preference as it is. When the text corrects a known fact, give the
+new value. Skip passing states (how someone feels today, what they are doing
+right now), guesses, and facts already known.
 
-For each fact, "evidence" is a short phrase (at most 12 words) copied exactly
-from the text. Use "user" as the entity for facts about the user, and write
-other names as the text writes them. Attribute names are short snake_case.
+Also list the procedures it gives: how the user wants a kind of task done, as
+steps to follow or a standing rule for a kind of request ("To deploy, run the
+tests, tag the release, then post in #releases"). A procedure is not a fact.
+
+For each fact, "kind" is preference (how the user likes things done), fact
+(something true about them or their world) or event (something that happened
+or is scheduled, with its time), and "evidence" is a short phrase (at most 12
+words) copied exactly from the text. Use "user" as the entity for facts about
+the user, and write other names as the text writes them. Attribute names are
+short snake_case. For each procedure give a short "name", "when" it applies,
+its "steps" in order, and "evidence" copied exactly from the text.
 Reply with JSON only, in this shape:
-{"facts": [{"entity": "user", "entity_type": "person", "attribute": "...", "value": "...", "evidence": "..."}]}
-Reply {"facts": []} when there is nothing new.
+{"facts": [{"entity": "user", "entity_type": "person", "kind": "preference", "attribute": "...", "value": "...", "evidence": "..."}],
+ "procedures": [{"name": "...", "when": "...", "steps": ["...", "..."], "evidence": "..."}]}
+Reply {"facts": [], "procedures": []} when there is nothing new.
 
 Already known:
 {known}
@@ -441,16 +505,65 @@ The text ({source}):
 """
 
 
-def extract_facts(
+def _valid_procedure(item: Any, said: str) -> Optional[Dict[str, Any]]:
+    """A procedure from the extractor, kept only when it rests on words
+    copied from the text."""
+    from ..learning.consolidation import _normalized
+
+    if not isinstance(item, Mapping):
+        return None
+    name = " ".join(str(item.get("name") or "").split())[:120]
+    when = " ".join(str(item.get("when") or "").split())[:300]
+    raw_steps = item.get("steps")
+    if isinstance(raw_steps, str):
+        raw_steps = [raw_steps]
+    steps = [
+        " ".join(str(step).split())[:300]
+        for step in raw_steps or []
+        if str(step or "").strip()
+    ][:20]
+    evidence = _normalized(item.get("evidence")).strip(" \"'.")
+    if not name or not steps or len(evidence) < 3 or evidence not in said:
+        return None
+    return {
+        "name": name,
+        "when": when,
+        "steps": steps,
+        "evidence": str(item.get("evidence") or "")[:300],
+    }
+
+
+def procedure_text(procedure: Mapping[str, Any]) -> str:
+    """A stated procedure as one self-contained note."""
+    steps = " ".join(
+        f"{number}. {step.rstrip('.')}."
+        for number, step in enumerate(procedure.get("steps") or [], 1)
+    )
+    when = re.sub(
+        r"^(?:when|whenever)\s+",
+        "",
+        str(procedure.get("when") or "").strip().rstrip("."),
+        flags=re.IGNORECASE,
+    )
+    head = f"Procedure: {procedure.get('name')}"
+    if when:
+        head += f" (when {when})"
+    return f"{head}. {steps}".strip()
+
+
+def extract_memories(
     text: str,
     generate: Callable[[str], str],
     records: List[Mapping[str, Any]],
     *,
     source: str = "what the user wrote",
     thread_id: str = "",
-) -> List[Dict[str, Any]]:
-    """Entity facts in ``text``, each resting on a phrase copied from it and
-    not already stored (the consolidation pass's guards)."""
+) -> Dict[str, List[Dict[str, Any]]]:
+    """What ``text`` states worth keeping, typed: ``facts`` about the user
+    and named people and things (each with its ``kind``: preference, fact or
+    event) and ``procedures`` (how the user wants a kind of task done). Each
+    rests on a phrase copied from the text; facts already stored are left
+    out (the consolidation pass's guards)."""
     from ..learning.consolidation import (
         MemoryConsolidator,
         _normalized,
@@ -467,7 +580,7 @@ def extract_facts(
         )
     )
     said = _normalized(text)
-    out, seen = [], set()
+    facts, seen = [], set()
     for item in (reply or {}).get("facts") or []:
         op = MemoryConsolidator._valid_fact(item, said, known, known_values, thread_id)
         if op is None:
@@ -476,8 +589,33 @@ def extract_facts(
         if key in seen:
             continue
         seen.add(key)
-        out.append({**op.details, "entity_id": op.target_id or None})
-    return out
+        fact = {**op.details, "entity_id": op.target_id or None}
+        kind = str(item.get("kind") or "").strip().lower()
+        if kind in FACT_KINDS:
+            fact["kind"] = kind
+        facts.append(fact)
+    procedures, named = [], set()
+    for item in (reply or {}).get("procedures") or []:
+        procedure = _valid_procedure(item, said)
+        if procedure is None or procedure["name"].casefold() in named:
+            continue
+        named.add(procedure["name"].casefold())
+        procedures.append(procedure)
+    return {"facts": facts, "procedures": procedures}
+
+
+def extract_facts(
+    text: str,
+    generate: Callable[[str], str],
+    records: List[Mapping[str, Any]],
+    *,
+    source: str = "what the user wrote",
+    thread_id: str = "",
+) -> List[Dict[str, Any]]:
+    """Entity facts in ``text`` (see :func:`extract_memories`)."""
+    return extract_memories(
+        text, generate, records, source=source, thread_id=thread_id
+    )["facts"]
 
 
 def file_entity_facts(
@@ -533,6 +671,7 @@ def file_entity_facts(
                     if fact.get("thread_id")
                     else {}
                 ),
+                **({"kind": fact["kind"]} if fact.get("kind") in FACT_KINDS else {}),
             }
             for fact in group
         ]
@@ -737,41 +876,72 @@ def extract_facts_in_parts(
     thread_id: str = "",
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """``extract_facts`` over a message of any length, part by part (see
-    ``text_parts``). A later part's value for an entity's attribute replaces
-    an earlier one, as a later line of the message would. Returns the facts
-    and ``{"parts": n, "unread_chars": n}``."""
+    ``text_parts``). Returns the facts and ``{"parts": n, "unread_chars": n}``."""
+    found, read = extract_memories_in_parts(
+        text, generate, records, source=source, thread_id=thread_id
+    )
+    return found["facts"], read
+
+
+def extract_memories_in_parts(
+    text: str,
+    generate: Callable[[str], str],
+    records: List[Mapping[str, Any]],
+    *,
+    source: str = "what the user wrote",
+    thread_id: str = "",
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, int]]:
+    """``extract_memories`` over a message of any length, part by part (see
+    ``text_parts``). A later part's value for an entity's attribute, or a
+    procedure of the same name, replaces an earlier one, as a later line of
+    the message would. Returns ``{"facts", "procedures"}`` and
+    ``{"parts": n, "unread_chars": n}``."""
     from ..learning.consolidation import _normalized
 
     parts, unread = text_parts(text)
     found: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    procedures: Dict[str, Dict[str, Any]] = {}
     for part in parts:
-        for fact in extract_facts(
+        memories = extract_memories(
             clean_text(part, limit=CAPTURE_PART_CHARS),
             generate,
             records,
             source=source,
             thread_id=thread_id,
-        ):
+        )
+        for fact in memories["facts"]:
             key = (_normalized(fact["entity"]), str(fact["attribute"]).casefold())
             found.pop(key, None)
             found[key] = fact
+        for procedure in memories["procedures"]:
+            key = procedure["name"].casefold()
+            procedures.pop(key, None)
+            procedures[key] = procedure
     if unread:
         logger.warning(
             "Entity capture read %d part(s) of a message and left %d characters unread",
             len(parts),
             unread,
         )
-    return list(found.values()), {"parts": len(parts), "unread_chars": unread}
+    return (
+        {"facts": list(found.values()), "procedures": list(procedures.values())},
+        {"parts": len(parts), "unread_chars": unread},
+    )
 
 
 __all__ = [
     "DEFAULT_DECISIONS_MODEL",
+    "FACT_KINDS",
     "FILED_STORES",
     "MemoryRoutingConfig",
+    "PROCEDURES_NAMESPACE",
     "REMEMBERED_NAMESPACE",
     "ROUTERS",
     "extract_facts",
     "extract_facts_in_parts",
+    "extract_memories",
+    "extract_memories_in_parts",
+    "procedure_text",
     "file_entity_facts",
     "place",
     "route",

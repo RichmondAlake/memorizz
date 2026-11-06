@@ -85,6 +85,7 @@ def _consolidator(agent_id: str, *, with_model: bool = True) -> Any:
         model=model,
         config=config,
         knowledge_base_ids=_agent_field(record, "knowledge_base_ids") or (),
+        decision_model=_agent_field(record, "decision_model") or None,
     )
 
 

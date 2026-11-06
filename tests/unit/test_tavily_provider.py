@@ -67,3 +67,48 @@ def test_tavily_fetch_truncates_content_and_returns_raw():
     assert page.metadata["content_returned_characters"] == 20
     assert len(page.content) == 20
     assert page.raw["title"] == "Example Doc"
+
+
+@pytest.mark.unit
+def test_tavily_search_can_return_each_pages_text():
+    provider = TavilyProvider(
+        api_key="test-key",
+        config={"include_raw_content": True, "max_content_chars": 30},
+    )
+    provider._post = MagicMock(
+        return_value={
+            "results": [
+                {
+                    "url": "https://example.com/rules",
+                    "title": "Baggage rules",
+                    "content": "Power banks go in carry-on.",
+                    "raw_content": "# Baggage rules\n" + "Full page text. " * 10,
+                },
+                {"url": "https://example.com/empty", "content": "Snippet only"},
+            ]
+        }
+    )
+
+    results = provider.search("power bank rules")
+
+    payload = provider._post.call_args.args[1]
+    assert payload["include_raw_content"] == "markdown"
+    first, second = results
+    assert first.snippet == "Power banks go in carry-on."
+    assert first.content == ("# Baggage rules\n" + "Full page text. " * 10)[:30]
+    assert first.metadata["content_truncated"] is True
+    assert first.to_dict()["content"] == first.content
+    # A result without page text keeps the usual shape.
+    assert second.content is None and "content" not in second.to_dict()
+
+
+@pytest.mark.unit
+def test_tavily_page_text_is_off_unless_asked_and_per_call():
+    provider = TavilyProvider(api_key="test-key")
+    provider._post = MagicMock(return_value={"results": []})
+
+    provider.search("q")
+    assert "include_raw_content" not in provider._post.call_args.args[1]
+    provider.search("q", include_raw_content="text")
+    assert provider._post.call_args.args[1]["include_raw_content"] == "text"
+    assert provider.get_config()["include_raw_content"] is False

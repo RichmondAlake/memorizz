@@ -64,6 +64,16 @@ TavilyProvider(
 
 Responses include truncation metadata whenever `max_content_chars` shortens an extracted page so downstream prompts can adapt.
 
+Search results carry Tavily's short `snippet` by default. Set `include_raw_content` to get each page's own text as well, in `result.content` (and `"content"` in the agent's `internet_search` results):
+
+```python
+search = TavilyProvider(config={"include_raw_content": True})  # or "text"
+for result in search.search("TAP Air Portugal power bank rules"):
+    passage = result.content or result.snippet
+```
+
+`True` asks for markdown and `"text"` for plain text. Pass `include_raw_content=` to `search()` to choose per call. Each page's text is cut to `max_content_chars` (12,000 by default), with `content_truncated` in `result.metadata` when it was. Page text makes results much longer, so pair it with a `ToolResultPolicy` that offloads large tool results when an agent searches.
+
 ## Firecrawl Provider
 
 The Firecrawl integration gives you search + crawl with no extra package:

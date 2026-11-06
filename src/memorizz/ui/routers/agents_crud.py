@@ -18,7 +18,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -857,6 +857,169 @@ def _memory_model_form_values(agent: Any) -> Dict[str, Any]:
         "reranker": _reranker_form_value(reranker),
         "memory_routing": _memory_routing_form_value(routing),
         "memory_routing_capture": routing.capture_turns,
+        "decision_model": _decision_model_form_value(
+            getattr(agent, "decision_model", None)
+        ),
+        "decision_features": _decision_features_on(agent),
+    }
+
+
+#: What a decision model can answer for an agent, as the form offers it:
+#: (form key, label). See memorizz.decision_models.
+DECISION_FEATURES = (
+    (
+        "extraction_gate",
+        "Before reading a message for facts: is anything worth keeping?",
+    ),
+    ("read_routing", "Before recall: which kinds of memory does the request need?"),
+    ("tool_selection", "Which tool does the request need, if any?"),
+    ("dedupe_writes", "Before writing a note: is it already known, or no longer true?"),
+    ("relations", "In memory consolidation: how do the agent's notes relate?"),
+    ("cache_verifier", "Before serving a cached answer: does it answer the question?"),
+)
+
+
+def _as_dict(value: Any) -> Dict[str, Any]:
+    if hasattr(value, "to_dict"):
+        value = value.to_dict()
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _decision_model_form_value(value: Any) -> str:
+    from ...decision_models import DecisionModelConfig
+
+    try:
+        config = DecisionModelConfig.from_value(value)
+    except (TypeError, ValueError):
+        return ""
+    return config.spec if config is not None else ""
+
+
+def _decision_features_on(agent: Any) -> List[str]:
+    """The form keys of the features this agent asks its decision model."""
+    routing = _as_dict(getattr(agent, "memory_routing", None))
+    switches = {
+        "extraction_gate": routing.get("extraction_gate"),
+        "dedupe_writes": routing.get("dedupe_writes"),
+        "read_routing": _as_dict(getattr(agent, "retrieval_policy", None)).get(
+            "read_routing"
+        ),
+        "tool_selection": _as_dict(getattr(agent, "context_policy", None)).get(
+            "tool_selection"
+        ),
+        "relations": _as_dict(getattr(agent, "memory_consolidation", None)).get(
+            "relations"
+        ),
+        "cache_verifier": _as_dict(getattr(agent, "semantic_cache_config", None)).get(
+            "verifier"
+        ),
+    }
+    return [key for key, _label in DECISION_FEATURES if switches.get(key)]
+
+
+def _decision_model_value(value: Optional[str], existing: Any = None) -> Any:
+    """The decision model to save: None is none. A function passed in code
+    is saved by name, and the form keeps it."""
+    from ...decision_models import DecisionModelConfig
+
+    if value is None:  # an older form without the select keeps what it had
+        return existing
+    text = _to_text(value).strip()
+    if not text:
+        return None
+    try:
+        config = DecisionModelConfig.from_value(text)
+    except (TypeError, ValueError):
+        return existing
+    return config.to_dict() if config else None
+
+
+async def _decision_features_posted(
+    request: Request, memory_models_form: str
+) -> Optional[List[str]]:
+    """The decision-feature switches the form posted; None from a form
+    without the Memory models group (the saved switches stay)."""
+    if not memory_models_form:
+        return None
+    form = await request.form()
+    return [
+        key
+        for key, _label in DECISION_FEATURES
+        if _parse_bool(form.get(f"decision_{key}"))
+    ]
+
+
+def _switched(
+    data: Any, key: str, on: bool, extra: Tuple[str, ...] = ()
+) -> Dict[str, Any]:
+    """``data`` with the switch ``key`` on (a model named in code stays) or
+    off (with its ``extra`` settings)."""
+    value = _as_dict(data)
+    if on:
+        if not value.get(key):
+            value[key] = True
+    else:
+        for name in (key, *extra):
+            value.pop(name, None)
+    return value
+
+
+def _with_decision_features(
+    checked: Iterable[str],
+    *,
+    memory_routing: Any,
+    retrieval_policy: Any,
+    context_policy: Any,
+    memory_consolidation: Any,
+    semantic_cache_config: Any,
+) -> Dict[str, Any]:
+    """Each setting a decision-feature switch lives in, with the form's
+    switches applied; None where nothing is left to save."""
+    from ...memagent.memory_routing import MemoryRoutingConfig
+
+    on = set(checked)
+    routing = _switched(
+        memory_routing, "extraction_gate", "extraction_gate" in on, ("gate_threshold",)
+    )
+    routing = _switched(routing, "dedupe_writes", "dedupe_writes" in on)
+    routing_value = None
+    if routing:
+        config = MemoryRoutingConfig.from_value(routing)
+        routing_value = config.to_dict() if config.worth_saving else None
+
+    policy = _switched(
+        retrieval_policy, "read_routing", "read_routing" in on, ("read_threshold",)
+    )
+    context = _switched(
+        context_policy,
+        "tool_selection",
+        "tool_selection" in on,
+        ("tool_selection_margin",),
+    )
+    consolidation = _as_dict(memory_consolidation)
+    if consolidation or "relations" in on:
+        consolidation.setdefault("enabled", False)
+        consolidation = _switched(consolidation, "relations", "relations" in on)
+        if not consolidation.get("enabled") and not consolidation.get("relations"):
+            consolidation = {}
+
+    cache = _as_dict(semantic_cache_config)
+    verify = "cache_verifier" in on
+    if bool(cache.get("verifier")) != verify:
+        # The cache's default line moves with the verifier (0.7 with one,
+        # 0.9 without); a saved default would pin the old one.
+        if cache.get("similarity_threshold") in (0.7, 0.78, 0.9):
+            cache.pop("similarity_threshold", None)
+    cache = _switched(cache, "verifier", verify)
+    if cache.get("verifier") is None:
+        cache.pop("verifier", None)
+
+    return {
+        "memory_routing": routing_value,
+        "retrieval_policy": policy or None,
+        "context_policy": context or None,
+        "memory_consolidation": consolidation or None,
+        "semantic_cache_config": cache or None,
     }
 
 
@@ -867,6 +1030,8 @@ def _reranker_form_value(reranker: Any) -> str:
         return "off"
     if reranker.provider == "finetuned":
         return f"finetuned:{reranker.run_id}"
+    if reranker.provider == "custom":
+        return f"custom:{reranker.model}" if reranker.model else "custom"
     return f"{reranker.provider}:{reranker.model_name}"
 
 
@@ -908,24 +1073,37 @@ def _memory_routing_value(
     except (TypeError, ValueError):
         return existing
     kept = existing if isinstance(existing, dict) else {}
-    # Entity capture is set in code, not on the form: keep what is saved.
-    entity_capture = kept.get("entity_capture")
+    # Entity capture, the extraction gate and write dedupe are set in code,
+    # not on the form: keep what is saved.
+    in_code = {
+        key: kept[key]
+        for key in (
+            "entity_capture",
+            "extraction_gate",
+            "gate_threshold",
+            "dedupe_writes",
+        )
+        if kept.get(key) is not None
+    }
     if not config.enabled:
-        if entity_capture is None:
+        if not in_code:
             return None
-        return MemoryRoutingConfig(entity_capture=entity_capture).to_dict()
+        return MemoryRoutingConfig(**in_code).to_dict()
     return MemoryRoutingConfig.from_value(
         {
             **config.to_dict(),
             "min_confidence": kept.get("min_confidence", config.min_confidence),
             "capture_turns": _parse_bool(capture),
-            "entity_capture": entity_capture,
+            **in_code,
         }
     ).to_dict()
 
 
 def _memory_model_choices(
-    agent_id: Optional[str], reranker: str = "", memory_routing: str = ""
+    agent_id: Optional[str],
+    reranker: str = "",
+    memory_routing: str = "",
+    decision_model: str = "",
 ) -> Dict[str, Any]:
     """Options for the reranker and memory-routing selects: hosted models
     (marked when their key is missing), runs fine-tuned in this store, and
@@ -960,7 +1138,10 @@ def _memory_model_choices(
         return f"{run.get('label') or run.get('run_id')} ({_to_text(run.get('run_id'))[:8]})"
 
     def needs_key(name: str) -> str:
-        return "" if keys.get(name) else f" (needs {PROVIDERS[name]['env']})"
+        if keys.get(name):
+            return ""
+        env = PROVIDERS[name]["env"]
+        return f" (needs {env})" if env else " (needs torch and transformers)"
 
     own_reranker = own.get("reranking") or {}
     follow = (
@@ -988,6 +1169,19 @@ def _memory_model_choices(
                     "label": f"{spec['title']} · {model}{needs_key(name)}",
                 }
                 for name, spec in PROVIDERS.items()
+                if spec["env"]
+                for model in spec["models"]
+            ],
+        },
+        {
+            "label": "On this machine",
+            "options": [
+                {
+                    "value": f"{name}:{model}",
+                    "label": f"{spec['title']} · {model}{needs_key(name)}",
+                }
+                for name, spec in PROVIDERS.items()
+                if not spec["env"]
                 for model in spec["models"]
             ],
         },
@@ -1031,16 +1225,82 @@ def _memory_model_choices(
     if tuned:
         routing_groups.append({"label": "Fine-tuned in this store", "options": tuned})
 
+    decision_groups = _decision_model_groups(runs)
     for groups, current in (
         (reranker_groups, reranker),
         (routing_groups, memory_routing),
+        (decision_groups, decision_model),
     ):
         values = {option["value"] for group in groups for option in group["options"]}
         if current and current not in values:
             groups.append(
                 {"label": "Current", "options": [{"value": current, "label": current}]}
             )
-    return {"reranker": reranker_groups, "memory_routing": routing_groups}
+    return {
+        "reranker": reranker_groups,
+        "memory_routing": routing_groups,
+        "decision_model": decision_groups,
+        "decision_features": [
+            {"value": key, "label": label} for key, label in DECISION_FEATURES
+        ],
+    }
+
+
+def _decision_model_groups(runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Options for the decision-model select: none, automatic, the background
+    model, d1 on this machine, the hosted ones (marked when their key is
+    missing) and decision models fine-tuned in this store."""
+    from ...decision_models import BACKENDS, SYSTEM_ONE
+    from ...reranking import _local_ready
+
+    def needs(env: Optional[str]) -> str:
+        return "" if not env or os.environ.get(env) else f" (needs {env})"
+
+    hosted = [
+        {
+            "value": f"{name}:{BACKENDS[name]['model']}",
+            "label": f"{BACKENDS[name]['title']} · {BACKENDS[name]['model']}"
+            + needs(BACKENDS[name]["env"]),
+        }
+        for name in (*SYSTEM_ONE, "openai_decisions")
+    ]
+    groups = [
+        {
+            "label": None,
+            "options": [
+                {"value": "", "label": "None"},
+                {
+                    "value": "auto",
+                    "label": "Automatic (OpenAI Decisions with an OpenAI key, "
+                    "else the background model)",
+                },
+                {"value": "llm", "label": "The background model"},
+            ],
+        },
+        {
+            "label": "On this machine",
+            "options": [
+                {
+                    "value": "d1",
+                    "label": f"Liquid d1 · {BACKENDS['d1']['model']}"
+                    + ("" if _local_ready() else " (needs torch and transformers)"),
+                }
+            ],
+        },
+        {"label": "Hosted", "options": hosted},
+    ]
+    tuned = [
+        {
+            "value": f"finetuned:{run['run_id']}",
+            "label": f"{run.get('label') or run.get('run_id')} "
+            f"({_to_text(run.get('run_id'))[:8]})",
+        }
+        for run in runs
+        if run.get("kind") == "decision"
+    ]
+    if tuned:
+        groups.append({"label": "Fine-tuned in this store", "options": tuned})
+    return groups
 
 
 _BACKGROUND_PROVIDERS = (
@@ -1512,7 +1772,10 @@ def _builder_context(
         "agent_id": agent_id or "",
         "store": store,
         "memory_models": _memory_model_choices(
-            agent_id, form_data.get("reranker", ""), form_data.get("memory_routing", "")
+            agent_id,
+            form_data.get("reranker", ""),
+            form_data.get("memory_routing", ""),
+            form_data.get("decision_model", ""),
         ),
         "mcp_servers": mcp_servers,
         "mode_memory_types": {
@@ -1783,6 +2046,7 @@ async def agent_create_submit(
     memory_routing: Optional[str] = Form(None),
     memory_routing_capture: Optional[str] = Form(None),
     memory_models_form: str = Form(""),
+    decision_model: Optional[str] = Form(None),
 ):
     """Create a new agent using the configured memory provider.
 
@@ -1833,8 +2097,22 @@ async def agent_create_submit(
     )
     if memory_models_form:  # an empty select posts nothing: it means none
         reranker, memory_routing = reranker or "", memory_routing or ""
+        decision_model = decision_model or ""
     reranker_value = _reranker_value(reranker)
     memory_routing_value = _memory_routing_value(memory_routing, memory_routing_capture)
+    decision_model_value = _decision_model_value(decision_model)
+    decision_features = await _decision_features_posted(request, memory_models_form)
+    decision_values = _with_decision_features(
+        decision_features or (),
+        memory_routing=memory_routing_value,
+        retrieval_policy=retrieval_policy_value,
+        context_policy=None,
+        memory_consolidation=memory_consolidation_value,
+        semantic_cache_config=None,
+    )
+    memory_routing_value = decision_values["memory_routing"]
+    retrieval_policy_value = decision_values["retrieval_policy"]
+    memory_consolidation_value = decision_values["memory_consolidation"]
     continual_learning_require_shadow_value = _parse_bool(
         continual_learning_require_shadow
     )
@@ -1973,6 +2251,8 @@ async def agent_create_submit(
         "memory_routing_capture": _parse_bool(memory_routing_capture)
         if memory_routing is not None
         else True,
+        "decision_model": _to_text(decision_model).strip(),
+        "decision_features": list(decision_features or ()),
         **delegation_form_ctx,
     }
 
@@ -2064,6 +2344,9 @@ async def agent_create_submit(
         persona_learning=persona_learning_value,
         memory_routing=memory_routing_value,
         reranker=reranker_value,
+        decision_model=decision_model_value,
+        context_policy=decision_values["context_policy"],
+        semantic_cache_config=decision_values["semantic_cache_config"],
         automations_enabled=automations_enabled_value,
         default_timezone=default_timezone_value,
         whatsapp_enabled=whatsapp_enabled_value,
@@ -2188,6 +2471,7 @@ async def agent_edit_submit(
     memory_routing: Optional[str] = Form(None),
     memory_routing_capture: Optional[str] = Form(None),
     memory_models_form: str = Form(""),
+    decision_model: Optional[str] = Form(None),
 ):
     """Update an existing agent."""
     if not _state["provider"]:
@@ -2254,12 +2538,34 @@ async def agent_edit_submit(
     )
     if memory_models_form:  # an empty select posts nothing: it means none
         reranker, memory_routing = reranker or "", memory_routing or ""
+        decision_model = decision_model or ""
     reranker_value = _reranker_value(reranker, getattr(existing, "reranker", None))
     memory_routing_value = _memory_routing_value(
         memory_routing,
         memory_routing_capture,
         getattr(existing, "memory_routing", None),
     )
+    decision_model_value = _decision_model_value(
+        decision_model, getattr(existing, "decision_model", None)
+    )
+    decision_features = await _decision_features_posted(request, memory_models_form)
+    decision_update: Dict[str, Any] = {}
+    if decision_features is not None:
+        decision_values = _with_decision_features(
+            decision_features,
+            memory_routing=memory_routing_value,
+            retrieval_policy=retrieval_policy_value,
+            context_policy=getattr(existing, "context_policy", None),
+            memory_consolidation=memory_consolidation_value,
+            semantic_cache_config=getattr(existing, "semantic_cache_config", None),
+        )
+        memory_routing_value = decision_values["memory_routing"]
+        retrieval_policy_value = decision_values["retrieval_policy"]
+        memory_consolidation_value = decision_values["memory_consolidation"]
+        decision_update = {
+            "context_policy": decision_values["context_policy"],
+            "semantic_cache_config": decision_values["semantic_cache_config"],
+        }
     continual_learning_require_shadow_value = _parse_bool(
         continual_learning_require_shadow
     )
@@ -2419,6 +2725,12 @@ async def agent_edit_submit(
         "default_timezone": default_timezone,
     }
 
+    if decision_features is not None:
+        form_override_data.update(
+            decision_model=_to_text(decision_model).strip(),
+            decision_features=list(decision_features),
+        )
+
     def _render_error(message: str):
         # Saved values first, then what was just submitted, so the form shows
         # the user's input with the message.
@@ -2556,6 +2868,8 @@ async def agent_edit_submit(
             "persona_learning": persona_learning_value,
             "memory_routing": memory_routing_value,
             "reranker": reranker_value,
+            "decision_model": decision_model_value,
+            **decision_update,
             "automations_enabled": automations_enabled_value,
             "default_timezone": default_timezone_value,
             "whatsapp_enabled": whatsapp_enabled_value,

@@ -20,6 +20,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple, Union
 _CONVERSATION_SCOPES = {"memory", "thread", "disabled"}
 _KNOWLEDGE_SCOPES = {"memory", "namespace", "disabled"}
 _ENTITY_SCOPES = {"memory", "thread", "disabled"}
+_WORKFLOW_SCOPES = {"memory", "thread", "disabled"}
 
 
 def _scope(value: Any, *, allowed: set[str], label: str) -> str:
@@ -114,6 +115,21 @@ class RetrievalPolicy:
     recalled text of a turn as a whole (None, the default, sets no total
     cap). The most relevant items get their share first, so raising the
     per-item cap with a total cap cannot flood the prompt.
+
+    ``workflow_scope`` recalls past workflows (a request, the tools it called
+    and whether each worked) among the memories, for an agent with workflow
+    memory: ``"memory"`` from every thread of the memory and user,
+    ``"thread"`` from the current thread only, ``"disabled"`` (the default)
+    none. A thread-scoped or sealed policy keeps it to the current thread.
+
+    ``read_routing`` asks a decision model, before recall, which kinds of
+    memory a request needs: episodic (past conversations), semantic (the
+    knowledge base and entity facts) and procedural (workflows, skills and
+    stated procedures), one yes or no each in one request. Stores whose kind
+    gets less than ``read_threshold`` are not searched that turn; the
+    conversation itself is always loaded. ``True`` uses the agent's decision
+    model; a name ("d1", "openai_decisions", ...) picks one. When the model
+    cannot answer, every store is searched as usual.
     """
 
     conversation_scope: str = "memory"
@@ -131,8 +147,18 @@ class RetrievalPolicy:
     retention: Optional[Dict[str, Any]] = None
     max_chars_per_item: Optional[int] = 600
     max_recall_chars: Optional[int] = None
+    workflow_scope: str = "disabled"
+    read_routing: Any = None
+    read_threshold: float = 0.5
 
     def __post_init__(self) -> None:
+        from .decision_models import feature_setting
+
+        object.__setattr__(self, "read_routing", feature_setting(self.read_routing))
+        threshold = float(self.read_threshold)
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError("read_threshold must be a number from 0 to 1")
+        object.__setattr__(self, "read_threshold", threshold)
         for name in ("scoring", "retention"):
             value = getattr(self, name)
             if value is not None and not isinstance(value, dict):
@@ -165,6 +191,13 @@ class RetrievalPolicy:
             self,
             "entity_scope",
             _scope(self.entity_scope, allowed=_ENTITY_SCOPES, label="entity_scope"),
+        )
+        object.__setattr__(
+            self,
+            "workflow_scope",
+            _scope(
+                self.workflow_scope, allowed=_WORKFLOW_SCOPES, label="workflow_scope"
+            ),
         )
         if isinstance(self.candidate_limit, bool) or int(self.candidate_limit) < 1:
             raise ValueError("candidate_limit must be a positive integer")
@@ -282,4 +315,21 @@ class RetrievalPolicy:
             result["max_chars_per_item"] = self.max_chars_per_item
         if self.max_recall_chars is not None:
             result["max_recall_chars"] = self.max_recall_chars
+        if self.workflow_scope != "disabled":
+            result["workflow_scope"] = self.workflow_scope
+        if self.read_routing is not None:
+            from .decision_models import saved_setting
+
+            result["read_routing"] = saved_setting(self.read_routing)
+            result["read_threshold"] = self.read_threshold
         return result
+
+    @property
+    def workflows_in_thread_only(self) -> bool:
+        """Workflow recall stays in the current thread: asked for, or the
+        policy keeps conversations per thread."""
+        return (
+            self.workflow_scope == "thread"
+            or self.conversation_scope == "thread"
+            or self.is_sealed
+        )

@@ -959,10 +959,24 @@ body.theme-light .inline-thread-chip {
     gap: var(--spacing-xs);
 }
 
-.form-group label {
+.form-group label,
+.form-group .form-label {
     font-size: 13px;
     font-weight: 500;
     color: var(--text-secondary);
+}
+
+/* The decision model's switches: one per line, in the label's colour. */
+.decision-features label.checkbox-group {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--spacing-xs);
+    font-weight: 400;
+    color: var(--text-primary);
+}
+
+.decision-features label.checkbox-group input {
+    margin-top: 2px;
 }
 
 .form-group .optional {

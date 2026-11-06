@@ -10,6 +10,7 @@ import difflib
 import hashlib
 import inspect
 import json
+import logging
 import re
 import threading
 from collections import OrderedDict
@@ -38,6 +39,8 @@ from .tool_outcomes import (
     ToolResult,
     normalize_tool_result,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _json_default(value: Any) -> Any:
@@ -400,8 +403,28 @@ class ContextPolicy:
     # disclosure selects (for example a per-turn checklist tool the host's
     # context already describes, which the model should not have to discover).
     always_visible_tools: Tuple[str, ...] = ()
+    # The least cosine similarity (0 to 1) between a request and a stored
+    # tool for routing to offer it. None offers the tool_top_k closest tools
+    # however far they are, so an unrelated request is still offered some;
+    # with a cut-off it is offered none. Applies when routing selects tools,
+    # not when the whole list is sent (stable_tool_list_tokens).
+    tool_min_similarity: Optional[float] = None
+    # A decision model picks the tool a request needs, or none, from the
+    # closest tools: True for the agent's decision model, or one named
+    # ("d1", "openai_decisions", ...). See memorizz.decision_models. The
+    # runner-up is offered too when it is within tool_selection_margin.
+    tool_selection: Any = None
+    tool_selection_margin: float = 0.15
 
     def __post_init__(self) -> None:
+        from .decision_models import feature_setting
+
+        object.__setattr__(self, "tool_selection", feature_setting(self.tool_selection))
+        object.__setattr__(
+            self,
+            "tool_selection_margin",
+            max(0.0, min(float(self.tool_selection_margin), 1.0)),
+        )
         names = self.always_visible_tools
         if isinstance(names, str):
             names = (names,)
@@ -415,6 +438,12 @@ class ContextPolicy:
             ),
         )
         object.__setattr__(self, "tool_top_k", max(1, min(int(self.tool_top_k), 50)))
+        if self.tool_min_similarity is not None:
+            object.__setattr__(
+                self,
+                "tool_min_similarity",
+                max(0.0, min(float(self.tool_min_similarity), 1.0)),
+            )
         object.__setattr__(
             self, "sticky_tool_limit", max(0, min(int(self.sticky_tool_limit), 50))
         )
@@ -459,6 +488,8 @@ class ContextPolicy:
         raise TypeError("context_policy must be ContextPolicy, dict, or None")
 
     def to_dict(self) -> Dict[str, Any]:
+        from .decision_models import saved_setting
+
         return {
             "progressive_tool_disclosure": self.progressive_tool_disclosure,
             "tool_top_k": self.tool_top_k,
@@ -472,6 +503,19 @@ class ContextPolicy:
             **(
                 {"always_visible_tools": list(self.always_visible_tools)}
                 if self.always_visible_tools
+                else {}
+            ),
+            **(
+                {"tool_min_similarity": self.tool_min_similarity}
+                if self.tool_min_similarity is not None
+                else {}
+            ),
+            **(
+                {
+                    "tool_selection": saved_setting(self.tool_selection),
+                    "tool_selection_margin": self.tool_selection_margin,
+                }
+                if self.tool_selection is not None
                 else {}
             ),
         }
@@ -642,6 +686,11 @@ class SemanticToolRouter:
         max_attempts_per_call: int = 2,
         sticky_limit: int = 0,
         stable_under_tokens: int = 0,
+        min_similarity: Optional[float] = None,
+        selector: Optional[
+            Callable[[str, Dict[str, str]], Optional[Dict[str, float]]]
+        ] = None,
+        selection_margin: float = 0.15,
     ) -> None:
         self._turn_state_var: ContextVar[
             Optional[SemanticToolRouter._TurnState]
@@ -661,6 +710,13 @@ class SemanticToolRouter:
         self.max_attempts_per_call = max(1, int(max_attempts_per_call))
         self.sticky_limit = max(0, int(sticky_limit))
         self.stable_under_tokens = max(0, int(stable_under_tokens))
+        # Toolbox rows less similar than this to the request are not offered.
+        self.min_similarity = min_similarity
+        # A decision model that picks the tool a request needs, or none, from
+        # the closest ones: (request, {name: description}) -> each option's
+        # probability, "none" included; None when it could not answer.
+        self.selector = selector
+        self.selection_margin = max(0.0, min(float(selection_margin), 1.0))
         self._selected: set[str] = set()
         self._call_attempts: Dict[str, int] = {}
         self._successful_calls: set[str] = set()
@@ -746,10 +802,18 @@ class SemanticToolRouter:
     def _semantic_candidates(
         self, query: str, *, user_id: Optional[str], limit: int
     ) -> List[str]:
+        return self._semantic_search(query, user_id=user_id, limit=limit)[0]
+
+    def _semantic_search(
+        self, query: str, *, user_id: Optional[str], limit: int
+    ) -> tuple[List[str], bool]:
+        """Registered tools ranked by meaning, and whether the toolbox ranked
+        tools that ``min_similarity`` turned away (then none is relevant, and
+        keyword matching must not offer them back)."""
         from .memory_provider.base import user_scope_matches
 
         if self.toolbox is None:
-            return []
+            return [], False
         try:
             rows = self.toolbox.get_most_similar_tools(
                 query,
@@ -760,8 +824,9 @@ class SemanticToolRouter:
         except TypeError:
             rows = self.toolbox.get_most_similar_tools(query, limit=max(limit * 5, 25))
         except Exception:
-            return []
+            return [], False
         names: List[str] = []
+        too_far = 0
         registered = set(self.tool_manager.list_tools())
         for row in rows or []:
             if not isinstance(row, dict):
@@ -775,11 +840,26 @@ class SemanticToolRouter:
             if not user_scope_matches(row.get("user_id"), user_id, "toolbox"):
                 continue
             name = self._resolve_name(str(row.get("name") or ""))
-            if name in registered and name not in names:
-                names.append(name)
+            if name not in registered or name in names:
+                continue
+            if self._too_far(row):
+                too_far += 1
+                continue
+            names.append(name)
             if len(names) >= limit:
                 break
-        return names
+        return names, bool(too_far and not names)
+
+    def _too_far(self, row: Mapping[str, Any]) -> bool:
+        """Below the cut-off. A row without a score cannot be judged, so it
+        stays."""
+        cut_off = getattr(self, "min_similarity", None)
+        if cut_off is None:
+            return False
+        score = row.get("score")
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            return False
+        return float(score) < float(cut_off)
 
     def select(
         self, query: str, *, user_id: Optional[str] = None, limit: Optional[int] = None
@@ -808,13 +888,60 @@ class SemanticToolRouter:
             while len(_STICKY_TOOLS) > 512:
                 _STICKY_TOOLS.popitem(last=False)
 
+    # Tools a decision model chooses among: the closest ones by meaning.
+    SELECTION_CANDIDATES = 5
+
+    def _decide_tools(
+        self, query: str, candidates: Sequence[str]
+    ) -> Optional[List[str]]:
+        """The tool the selector picks from ``candidates`` (and the runner-up
+        when it is within ``selection_margin``); [] when it says none is
+        needed; None when there is no selector or it could not answer."""
+        selector = getattr(self, "selector", None)
+        if selector is None or not candidates:
+            return None
+        described = {
+            self._name(item): str(item.get("description") or "")
+            for item in self._metadata()
+        }
+        options = {name: described.get(name) or name for name in candidates}
+        try:
+            ranked = selector(query, options)
+        except Exception as exc:
+            logger.warning("Tool selection failed; using the closest tools: %s", exc)
+            return None
+        if not ranked:
+            return None
+        ranked = sorted(ranked.items(), key=lambda item: -float(item[1]))
+        picked = [ranked[0][0]]
+        margin = getattr(self, "selection_margin", 0.15)
+        if len(ranked) > 1 and float(ranked[0][1]) - float(ranked[1][1]) <= margin:
+            picked.append(ranked[1][0])
+        return [name for name in picked if name in options]
+
     def preview(
         self, query: str, *, user_id: Optional[str] = None, limit: Optional[int] = None
     ) -> List[str]:
         """Select candidates without mutating the active turn allowlist."""
         bounded = max(1, min(int(limit or self.top_k), self.top_k))
-        semantic = self._semantic_candidates(query, user_id=user_id, limit=bounded)
-        if not semantic:
+        if getattr(self, "selector", None) is not None:
+            wide = max(bounded, self.SELECTION_CANDIDATES)
+            semantic, none_close = self._semantic_search(
+                query, user_id=user_id, limit=wide
+            )
+            if none_close:
+                return []  # the cut-off turned every tool away
+            candidates = semantic or self._lexical_candidates(query, wide)
+            decided = self._decide_tools(query, candidates)
+            if decided is not None:
+                return decided[:bounded]
+            if semantic:
+                return semantic[:bounded]
+            return self._lexical_candidates(query, bounded)
+        semantic, none_close = self._semantic_search(
+            query, user_id=user_id, limit=bounded
+        )
+        if not semantic and not none_close:
             return self._lexical_candidates(query, bounded)
         # MCP tools are ranked by meaning once indexed (see MCPToolIndex).
         # Until then, or with nothing to embed them, clear keyword matches
@@ -925,7 +1052,9 @@ class SemanticToolRouter:
         from turn to turn; selecting per query would change it whenever a new
         tool became relevant. All listed tools are callable this turn.
         """
-        if not self.stable_under_tokens:
+        if not self.stable_under_tokens or getattr(self, "selector", None):
+            # A decision model choosing the tools would do nothing if every
+            # tool were sent anyway.
             return None
         schemas = [
             schema

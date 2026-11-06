@@ -147,9 +147,18 @@ datasets stay in the connected memory provider, each model is scored against
 the one in use on held-out examples, and you swap it in (or back) from the
 UI, the CLI or MCP.
 
+Where memory used to decide with a similarity score and a fixed threshold, an
+agent can ask a [decision model](docs/guides/decision-models.md) instead:
+Liquid's d1 on your machine, TypeSafe's Jev, OpenAI Decisions, or one
+fine-tuned in Memorizz. It answers whether a message holds anything worth
+keeping, which memory a request needs, whether a cached answer fits the
+question as asked, how a new note relates to stored ones, and which tool a
+request needs, if any.
+
 Read about [continual learning](docs/guides/continual-learning.md),
 [persona learning](docs/guides/persona-learning.md),
-[fine-tuning](docs/guides/fine-tuning.md), the
+[fine-tuning](docs/guides/fine-tuning.md),
+[decision models](docs/guides/decision-models.md), the
 [learning control plane](docs/guides/learning-control-plane.md), the
 [forgetting mechanism](docs/guides/forgetting-mechanism.md), and
 [evaluation methods](docs/evaluation-suite.md).

@@ -68,6 +68,7 @@ A pass covers one memory and one user. It first makes a dry-run plan:
 | Duplicate rows | no | A summary with the same text as an older one in its thread, or near-identical to it (cosine ≥ 0.97), is hidden. With `knowledge_base=True`, so is a knowledge-base chunk that repeats another chunk in the same knowledge base and namespace. |
 | Attribute review | yes | Within an entity, of two attributes about the same thing (one fact under two names, or an answer that changed), the older is retired. Two entities that are one person or thing under two names merge when they also share at least two facts. |
 | New facts | yes | Durable facts the user stated in recent conversations, and the agent never stored, are added to entity memory. |
+| Note relations | a decision model | With `relations=True`, the agent's own knowledge-base notes are compared with the closest older ones: the same fact said again is hidden, a note that a newer one refines or contradicts is hidden (superseded by it), and another fact about the same subject is linked. See [Decision Models](decision-models.md#consolidation-relations). |
 
 Guards on the model's suggestions:
 

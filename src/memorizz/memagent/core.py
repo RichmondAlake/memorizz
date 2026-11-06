@@ -162,6 +162,10 @@ logger = logging.getLogger(__name__)
 # What a turn that didn't finish keeps of the user's message and of the reply
 # written so far, each, in its trace (see _finish_trace_turn).
 _UNFINISHED_TURN_CHARS = 4000
+# run(raise_errors=...) for this call only; None follows agent.raise_errors.
+_RAISE_ERRORS: ContextVar[Optional[bool]] = ContextVar(
+    "memorizz_raise_errors", default=None
+)
 
 
 def _memory_reranker(
@@ -591,9 +595,11 @@ class MemAgent:
         memory_consolidation: Optional[Union[bool, Dict[str, Any]]] = None,
         persona_learning: Optional[Union[bool, Dict[str, Any]]] = None,
         memory_routing: Optional[Union[bool, str, Dict[str, Any]]] = None,
-        reranker: Optional[Union[str, Dict[str, Any]]] = None,
+        reranker: Any = None,
         entity_policy: Optional[Union[Dict[str, Any], Any]] = None,
         multi_tenant: bool = False,
+        raise_errors: bool = False,
+        decision_model: Any = None,
     ):
         """Initialize the MemAgent with configuration."""
         # Eager creation: no first-use race between concurrent runs.
@@ -747,6 +753,9 @@ class MemAgent:
         )
         self.mcp_servers = self.mcp_manager.server_dicts()
         self.automations_enabled = bool(automations_enabled)
+        # run() and run_stream() raise a failure instead of answering with
+        # "I encountered an error: ..." (run(raise_errors=...) per call).
+        self.raise_errors = bool(raise_errors)
         self.default_timezone = (
             default_timezone.strip()
             if isinstance(default_timezone, str) and default_timezone.strip()
@@ -940,6 +949,12 @@ class MemAgent:
         self.entity_policy = EntityPolicy.from_value(entity_policy)
         # The agent's own reranker; None follows the store's.
         self.reranker = RerankerConfig.from_value(reranker)
+        from ..decision_models import DecisionModelConfig
+
+        # The decision model features switched on with True ask (see
+        # memorizz.decision_models); None: those features use "auto".
+        self.decision_model = DecisionModelConfig.from_value(decision_model)
+        self._deciders: Dict[Any, Any] = {}
         self._retrieval_scoring_cache: Optional[Tuple[Any, RetrievalScoring]] = None
         self._internet_access_failure_count = 0
         self._internet_access_disabled_reason: Optional[str] = None
@@ -1032,6 +1047,9 @@ class MemAgent:
             max_attempts_per_call=self.context_policy.max_tool_attempts_per_call,
             sticky_limit=self.context_policy.sticky_tool_limit,
             stable_under_tokens=self.context_policy.stable_tool_list_tokens,
+            min_similarity=self.context_policy.tool_min_similarity,
+            selector=self._tool_selector(),
+            selection_margin=self.context_policy.tool_selection_margin,
         )
         self._register_context_monitor_tools()
         self._register_knowledge_base_tools()
@@ -6544,6 +6562,7 @@ class MemAgent:
                 pass
         if not self.cache_manager.enabled:
             return cache_metadata, None
+        self._wire_cache_verifier()
         cached_response = self.cache_manager.get_cached_response(
             query,
             thread_id,
@@ -6683,6 +6702,7 @@ class MemAgent:
         retrieval_policy: Any = None,
         trace_tags: Optional[Dict[str, str]] = None,
         memory_capture: Optional[bool] = None,
+        raise_errors: Optional[bool] = None,
     ) -> str:
         """
         Run the agent with the given query using the new manager architecture.
@@ -6746,10 +6766,31 @@ class MemAgent:
                 it, and the model's ``entity_memory_upsert`` and ``remember``
                 calls are refused with a short explanation. The turn is still
                 recorded in its conversation.
+            raise_errors: ``True`` raises a failure (a model provider error,
+                a bug) instead of returning "I encountered an error: ..." as
+                the answer. ``None`` follows ``agent.raise_errors`` (off by
+                default). Running out of steps is an answer, not an error.
 
         Returns:
             The agent's response
         """
+        if raise_errors is not None:
+            token = _RAISE_ERRORS.set(bool(raise_errors))
+            try:
+                return self.run(
+                    query,
+                    memory_id=memory_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    context=context,
+                    tool_context=tool_context,
+                    observability_context=observability_context,
+                    retrieval_policy=retrieval_policy,
+                    trace_tags=trace_tags,
+                    memory_capture=memory_capture,
+                )
+            finally:
+                _RAISE_ERRORS.reset(token)
         trace_tags = normalize_trace_tags(trace_tags)
         if memory_capture is not None:
             previous_capture = self._memory_capture_override
@@ -6936,6 +6977,7 @@ class MemAgent:
                 session_for(self) is not None
                 or delegated_execution.get()
                 or get_tool_context().get("_memorizz_harness_native")
+                or self._raises_errors()
             ):
                 raise
             error_response = f"I apologize, but I encountered an error: {str(e)}"
@@ -7088,6 +7130,7 @@ class MemAgent:
                 cache_bypass_reason = "invalid_explicit_plan"
         cache_metadata = self._semantic_cache_metadata(cache_context)
         if self.cache_manager.enabled:
+            self._wire_cache_verifier()
             cached_response = self.cache_manager.get_cached_response(
                 query,
                 thread_id,
@@ -8026,6 +8069,8 @@ class MemAgent:
                 raise
             if raise_on_provider_error and is_provider_error:
                 raise
+            if self._raises_errors():
+                raise
             yield f"I apologize, but I encountered an error: {str(e)}"
         finally:
             if trace_initialized:
@@ -8480,6 +8525,9 @@ class MemAgent:
         except Exception as exc:
             logger.error("Error storing workflow: %s", exc)
             return False
+        if record_id and self._active_retrieval_policy().is_sealed:
+            # Recalled inside this thread only (RetrievalPolicy.workflow_scope).
+            self._mark_sealed(MemoryType.WORKFLOW_MEMORY, [record_id])
         if self.continual_learning_manager:
             try:
                 self.continual_learning_manager.record_run_outcome(
@@ -10105,11 +10153,18 @@ class MemAgent:
             "selected_count": 0,
         }
 
+        # Read routing: a decision model says which kinds of memory this
+        # request needs; None searches every store.
+        routes = self._read_routes(query, policy)
+
+        def needs(kind: str) -> bool:
+            return routes is None or routes.get(kind, 1.0) >= policy.read_threshold
+
         # Learned-skill retrieval (continual learning). Reset the turn's
         # attribution first so a retrieval failure — or no match — never
         # inherits the previous run's skill IDs.
         self._activated_skill_ids = []
-        if self.skill_retrieval and self.skillbox:
+        if self.skill_retrieval and self.skillbox and needs("procedural"):
             try:
                 if self.continual_learning_manager:
                     scored_skills = self._timed_memory_read(
@@ -10263,9 +10318,33 @@ class MemAgent:
                         len(self.knowledge_base_ids),
                         self.agent_id,
                     )
+                from .memory_routing import PROCEDURES_NAMESPACE
+
                 if (
                     MemoryType.KNOWLEDGE_BASE in active
                     and policy.knowledge_base_scope != "disabled"
+                    and not needs("semantic")
+                    and needs("procedural")
+                ):
+                    # Procedures the user stated live in the knowledge base,
+                    # in their own namespace.
+                    if (
+                        policy.knowledge_base_scope != "namespace"
+                        or not policy.knowledge_base_namespaces
+                        or PROCEDURES_NAMESPACE in policy.knowledge_base_namespaces
+                    ):
+                        candidate_sources.append(
+                            (
+                                MemoryType.KNOWLEDGE_BASE,
+                                "knowledge_base",
+                                None,
+                                PROCEDURES_NAMESPACE,
+                            )
+                        )
+                elif (
+                    MemoryType.KNOWLEDGE_BASE in active
+                    and policy.knowledge_base_scope != "disabled"
+                    and needs("semantic")
                 ):
                     if policy.knowledge_base_scope == "namespace":
                         namespaces = policy.knowledge_base_namespaces
@@ -10297,6 +10376,7 @@ class MemAgent:
                 if (
                     MemoryType.CONVERSATION_MEMORY in active
                     and policy.conversation_scope != "disabled"
+                    and needs("episodic")
                 ):
                     candidate_sources.append(
                         (
@@ -10308,6 +10388,16 @@ class MemAgent:
                             else None,
                             None,
                         )
+                    )
+                if (
+                    MemoryType.WORKFLOW_MEMORY in active
+                    and getattr(policy, "workflow_scope", "disabled") != "disabled"
+                    and needs("procedural")
+                ):
+                    # Workflow rows name their thread as origin_thread_id, so
+                    # the thread is checked per row (_recallable_workflow).
+                    candidate_sources.append(
+                        (MemoryType.WORKFLOW_MEMORY, "workflow", None, None)
                     )
 
                 for (
@@ -10343,6 +10433,10 @@ class MemAgent:
                                 sealed_elsewhere(row, self._current_thread_id)
                             ):
                                 continue
+                            if memory_type == MemoryType.WORKFLOW_MEMORY:
+                                row = self._recallable_workflow(row, policy)
+                                if row is None:
+                                    continue
                             candidates.append((source, row))
 
                 if candidates:
@@ -10386,10 +10480,15 @@ class MemAgent:
                     "selected_count": len(selected),
                     "query_variants": list(retrieval_queries),
                 }
+                if routes is not None:
+                    self._last_retrieval_stats["read_routes"] = {
+                        kind: round(value, 4) for kind, value in routes.items()
+                    }
 
         if (
             include_entity_memory
             and policy.entity_scope != "disabled"
+            and needs("semantic")
             and self.learning_control_plane is None
             and self._entity_memory_enabled
             and self.entity_memory_manager
@@ -11005,6 +11104,11 @@ class MemAgent:
                 or get_tool_context().get("_memorizz_harness_native")
             ):
                 raise
+            if self._raises_errors():
+                # Kept as the answer path keeps it, then raised.
+                if "workflow" in locals():
+                    self._persist_workflow_run(workflow)
+                raise
 
             # Store workflow even on error if it exists
             if "workflow" in locals():
@@ -11012,6 +11116,36 @@ class MemAgent:
 
             self._mark_interaction_error("provider_error")
             return f"I encountered an error while processing your request: {str(e)}"
+
+    def _recallable_workflow(self, row: Any, policy: Any) -> Optional[Dict[str, Any]]:
+        """A past workflow as a recall candidate, or None when it may not be
+        recalled here: a learned skill covers it, or it ran in another thread
+        while recall stays in this one, or that thread was sealed."""
+        from ..long_term.procedural.workflow.workflow import workflow_recall_text
+        from ..retrieval import SEALED_STATE
+
+        if not isinstance(row, dict) or row.get("promoted_skill_id"):
+            return None
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        origin = str(
+            row.get("origin_thread_id") or metadata.get("origin_thread_id") or ""
+        )
+        here = str(self._current_thread_id or "")
+        if not origin or origin != here:
+            if policy.workflows_in_thread_only:
+                return None
+            state = row.get("retention_state") or metadata.get("retention_state")
+            if str(state or "").strip().lower() == SEALED_STATE:
+                return None
+        text = workflow_recall_text(row)
+        return {**row, "text": text, "content": text}
+
+    def _raises_errors(self) -> bool:
+        """Whether this call raises a failure instead of answering with it."""
+        override = _RAISE_ERRORS.get()
+        if override is not None:
+            return override
+        return bool(getattr(self, "raise_errors", False))
 
     def _mark_interaction_error(self, code: str) -> None:
         """Flag this turn's reply as a failure message rather than an answer.
@@ -11369,7 +11503,7 @@ class MemAgent:
 
             Use this whenever the user's question could be answered by
             previously ingested reference material (PDFs, docs, notes).
-            Returns the top matching chunks ordered by semantic similarity.
+            Returns the top matching chunks, most relevant first.
 
             Parameters:
                 query: natural-language question or phrase to search for.
@@ -11384,39 +11518,58 @@ class MemAgent:
                     "message": "No knowledge base entries are attached to this agent.",
                 }
             try:
+                limit = max(1, min(int(limit), 50))
+            except (TypeError, ValueError):
+                limit = 5
+            # With a reranker, more candidates are fetched than returned, so
+            # it can promote a passage vector search ranked lower.
+            rerank = _memory_reranker(
+                query,
+                agent_id=getattr(self, "agent_id", None),
+                provider=getattr(self, "memory_provider", None),
+                config=getattr(self, "reranker", None),
+            )
+            fetch = min(max(limit * 4, 20), 50) if rerank is not None else limit
+            try:
                 raw = self._retrieve_knowledge_candidates(
                     self._knowledge_base_instance(),
                     query=query,
                     namespace=namespace,
-                    limit=limit,
+                    limit=fetch,
                     kb_ids=kb_ids,
                 )
             except Exception as exc:
                 logger.warning("knowledge_base_lookup failed: %s", exc)
                 return {"matches": [], "error": str(exc)}
 
+            entries = [
+                entry for entry in raw if self._knowledge_entry_in_scope(entry, kb_ids)
+            ]
+            from ..reranking import rerank_rows
+
+            ranked = rerank_rows(
+                entries, rerank, text_of=lambda entry: str(entry.get("content") or "")
+            )
+            scored = (
+                ranked if ranked is not None else [(None, entry) for entry in entries]
+            )
             # Sanitize via the module-level helper so CLOB/LOB values from
             # the provider never reach the LLM's json.dumps path.
             matches: List[Dict[str, Any]] = []
-            for entry in raw:
-                if not self._knowledge_entry_in_scope(entry, kb_ids):
-                    continue
+            for rerank_score, entry in scored[:limit]:
                 entry_kb_id = entry.get("knowledge_base_id") or entry.get(
                     "knowledgeBaseId"
                 )
-                matches.append(
-                    _to_jsonable(
-                        {
-                            "content": entry.get("content") or "",
-                            "namespace": entry.get("namespace"),
-                            "knowledge_base_id": entry_kb_id,
-                            "chunk_index": entry.get("chunk_index"),
-                            "chunk_count": entry.get("chunk_count"),
-                        }
-                    )
-                )
-                if len(matches) >= limit:
-                    break
+                match = {
+                    "content": entry.get("content") or "",
+                    "namespace": entry.get("namespace"),
+                    "knowledge_base_id": entry_kb_id,
+                    "chunk_index": entry.get("chunk_index"),
+                    "chunk_count": entry.get("chunk_count"),
+                }
+                if rerank_score is not None:
+                    match["rerank_score"] = round(rerank_score, 4)
+                matches.append(_to_jsonable(match))
 
             logger.info(
                 "knowledge_base_lookup returned %d match(es) (kb_ids=%d, query=%r)",
@@ -12534,6 +12687,7 @@ class MemAgent:
             model=self.background_model,
             config=self.memory_consolidation,
             knowledge_base_ids=getattr(self, "knowledge_base_ids", None) or (),
+            decision_model=getattr(self, "decision_model", None),
         )
 
     def _keep_consolidation_plan(self, plan: Any) -> None:
@@ -12895,14 +13049,156 @@ class MemAgent:
         return self
 
     def with_reranker(self, reranker: Any):
-        """Rerank what the agent recalls: ``"voyage"``, ``"cohere"``,
-        ``"openai_decisions"`` (optionally ``"voyage:rerank-2.5-lite"``),
-        ``"finetuned:<run id>"``, ``"off"``, or None to follow the store.
-        Returns the agent."""
+        """Rerank what the agent recalls and what knowledge_base_lookup
+        returns: ``"voyage"``, ``"cohere"``, ``"openai_decisions"``,
+        ``"huggingface"`` (optionally with a model, as in
+        ``"huggingface:cross-encoder/ms-marco-MiniLM-L6-v2"``),
+        ``"finetuned:<run id>"``, ``"off"``, your own reranker (a function
+        ``(query, texts) -> scores`` or a ``CrossEncoder``), or None to follow
+        the store. Returns the agent."""
         from ..reranking import RerankerConfig
 
         self.reranker = RerankerConfig.from_value(reranker)
         return self
+
+    def with_decision_model(self, decision_model: Any):
+        """The decision model that features switched on with ``True`` ask:
+        ``"d1"`` (on this machine), ``"liquid"``, ``"jev"``,
+        ``"openai_decisions"``, ``"finetuned:<run id>"``, ``"llm"`` (the
+        background model), ``"auto"``, your own function, or None. See
+        :mod:`memorizz.decision_models`. Returns the agent."""
+        from ..decision_models import DecisionModelConfig
+
+        self.decision_model = DecisionModelConfig.from_value(decision_model)
+        self._deciders = {}
+        return self
+
+    def _decider(self, value: Any, feature: str) -> Any:
+        """The :class:`~memorizz.decision_models.Decider` a feature's switch
+        names (``True``: the agent's decision model), or None when it is off
+        or no model can answer (logged once per feature)."""
+        from ..decision_models import Decider, resolve
+
+        if isinstance(value, Decider):
+            return value
+        try:
+            config = resolve(value, getattr(self, "decision_model", None))
+        except (TypeError, ValueError) as exc:
+            self._decision_unavailable(feature, exc)
+            return None
+        if config is None:
+            return None
+        cache = self.__dict__.setdefault("_deciders", {})
+        key = (config, id(config.function))
+        found = cache.get(key)
+        if found is not None:
+            return found
+        from ..learning.consolidation import text_generator
+
+        model = self.background_model
+        if model is None and config.backend == "llm":
+            model = self.model
+        label = None
+        try:
+            settings = model.get_config() if model is not None else None
+            if isinstance(settings, dict) and settings.get("model"):
+                label = str(settings["model"])
+        except Exception:
+            pass
+        try:
+            found = Decider(
+                config,
+                provider=self.memory_provider,
+                generate=text_generator(model),
+                model_label=label,
+            )
+        except (TypeError, ValueError) as exc:
+            self._decision_unavailable(feature, exc)
+            return None
+        cache[key] = found
+        return found
+
+    def _read_routes(self, query: Any, policy: Any) -> Optional[Dict[str, float]]:
+        """P(needed) for episodic, semantic and procedural memory, from the
+        policy's read router; None (search everything) when routing is off
+        or the model gave no answer."""
+        setting = getattr(policy, "read_routing", None)
+        text = str(query or "").strip()
+        if setting is None or not text:
+            return None
+        decider = self._decider(setting, "read routing")
+        if decider is None:
+            return None
+        from ..decision_models import READ_ROUTES, probability_yes
+
+        try:
+            answers = self._timed_memory_read(
+                "read_routing", decider.decide, text[:4000], READ_ROUTES
+            )
+        except Exception as exc:
+            logger.warning("Read routing failed; searching every store: %s", exc)
+            return None
+        routes: Dict[str, float] = {}
+        for kind in READ_ROUTES:
+            value = probability_yes(answers.get(kind))
+            if value is None:
+                return None
+            routes[kind] = value
+        return routes
+
+    def _wire_cache_verifier(self) -> None:
+        """Give the semantic cache the agent's decision model for its
+        verifier (the background model and fine-tuned models need the
+        agent)."""
+        cache = getattr(getattr(self, "cache_manager", None), "cache_instance", None)
+        if (
+            cache is None
+            or getattr(cache.config, "verifier", None) is None
+            or getattr(cache, "verify", None) is not None
+        ):
+            return
+        cache.verify = self._verify_cached_answer
+
+    def _verify_cached_answer(self, query: str, entry: Any) -> Optional[float]:
+        from ..decision_models import CACHE_SERVES, cache_state
+
+        cache = self.cache_manager.cache_instance
+        decider = self._decider(cache.config.verifier, "the semantic cache verifier")
+        if decider is None:
+            return None
+        return decider.yes(
+            cache_state(query, str(getattr(entry, "response", "") or "")[:4000]),
+            CACHE_SERVES,
+        )
+
+    def _tool_selector(self) -> Optional[Callable[..., Any]]:
+        """The tool router's selector while ``ContextPolicy.tool_selection``
+        is on: a decision model picks the tool a request needs, or none."""
+        policy = getattr(self, "context_policy", None)
+        if policy is None or policy.tool_selection is None:
+            return None
+        return self._select_tools
+
+    def _select_tools(
+        self, query: str, options: Dict[str, str]
+    ) -> Optional[Dict[str, float]]:
+        from ..decision_models import option_probabilities, tool_question
+
+        decider = self._decider(self.context_policy.tool_selection, "tool selection")
+        if decider is None:
+            return None
+        answer = decider.decide(query, {"tool": tool_question(options)})["tool"]
+        return option_probabilities(answer)
+
+    def _decision_unavailable(self, feature: str, exc: BaseException) -> None:
+        warned = self.__dict__.setdefault("_decision_warnings", set())
+        if feature not in warned:
+            warned.add(feature)
+            logger.warning(
+                "The decision model for %s is unavailable, so it is skipped: %s",
+                feature,
+                exc,
+            )
 
     def _register_memory_routing_tools(self) -> None:
         """The ``remember`` tool, while memory routing is on."""
@@ -13057,9 +13353,12 @@ class MemAgent:
         fallback: Optional[str],
         source: str,
         skip: Iterable[Dict[str, Any]] = (),
+        gate: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Route ``text`` and write it to the store it belongs in. ``skip``
-        holds the turn's own ``entity_memory_upsert`` calls, not redone."""
+        holds the turn's own ``entity_memory_upsert`` calls, not redone.
+        ``gate`` is the extraction gate's answer for a turn: a procedure goes
+        straight to procedure filing, without the router."""
         from ..learning.consolidation import text_generator
         from ..long_term.semantic.entity_memory import EntityMemory
         from ..memory_history import memory_change_context
@@ -13069,7 +13368,7 @@ class MemAgent:
             REMEMBERED_NAMESPACE,
             SHORT_TERM_MEMORY,
             clean_text,
-            extract_facts_in_parts,
+            extract_memories_in_parts,
             file_entity_facts,
             place,
             without_tool_writes,
@@ -13088,12 +13387,46 @@ class MemAgent:
             allowed += [KNOWLEDGE_BASE, SHORT_TERM_MEMORY]
         if fallback not in allowed:
             fallback = None
-        try:
-            answer = self._route_memory(body, memory_id)
-        except Exception as exc:
-            logger.warning("Memory routing failed: %s", exc)
-            answer = None
+        if gate and gate.get("kind") == "procedure":
+            answer = {
+                "memory_type": "skillbox",
+                "confidence": float(gate.get("kind_confidence") or 0.0),
+                "router": f"gate/{gate.get('model') or 'decision model'}",
+            }
+        else:
+            try:
+                answer = self._route_memory(body, memory_id)
+            except Exception as exc:
+                logger.warning("Memory routing failed: %s", exc)
+                answer = None
         placement = place(answer, config, allowed=tuple(allowed), fallback=fallback)
+        if (
+            placement.get("routed_to") == "skillbox"
+            and float(placement.get("confidence") or 0.0) >= config.min_confidence
+        ):
+            # A procedure: how the user wants a kind of task done.
+            filed = self._file_stated_procedures(
+                text,
+                memory_id=memory_id,
+                user_id=user_id,
+                thread_id=thread_id,
+                entity_memory_id=entity_memory_id,
+                sealed=sealed,
+                source=source,
+            )
+            if filed:
+                return {
+                    "stored": True,
+                    "memory_type": "procedure",
+                    "memory_id": memory_id,
+                    "procedures": filed,
+                    **{
+                        key: value
+                        for key, value in placement.items()
+                        if key not in {"memory_type", "reason", "next_step"}
+                    },
+                    "reason": f"Kept {len(filed)} procedure(s).",
+                }
         target = placement.get("memory_type")
         receipt: Dict[str, Any] = {
             "stored": False,
@@ -13128,7 +13461,7 @@ class MemAgent:
                             memory_id=entity_memory_id, user_id=user_id
                         )
                         policy = self.entity_policy
-                        facts, read = extract_facts_in_parts(
+                        found, read = extract_memories_in_parts(
                             str(text or ""),
                             generate,
                             policy.present(records) if policy.active else records,
@@ -13140,7 +13473,16 @@ class MemAgent:
                             thread_id=str(thread_id or ""),
                         )
                         receipt.update(read)
-                        facts = without_tool_writes(facts, list(skip))
+                        if found["procedures"]:
+                            receipt["procedures"] = self._file_procedures(
+                                found["procedures"],
+                                memory_id=memory_id,
+                                user_id=user_id,
+                                thread_id=thread_id,
+                                sealed=sealed,
+                                source=source,
+                            )
+                        facts = without_tool_writes(found["facts"], list(skip))
                     except Exception as exc:
                         logger.warning("Entity fact extraction failed: %s", exc)
                 if facts:
@@ -13155,6 +13497,13 @@ class MemAgent:
                     )
                 if receipt.get("facts"):
                     receipt.update(stored=True, memory_id=entity_memory_id)
+                    return receipt
+                if receipt.get("procedures"):
+                    receipt.update(
+                        stored=True,
+                        memory_type="procedure",
+                        reason=f"Kept {len(receipt['procedures'])} procedure(s).",
+                    )
                     return receipt
                 if fallback is None:
                     receipt["memory_type"] = None
@@ -13178,19 +13527,24 @@ class MemAgent:
             if thread_id:
                 metadata["thread_id"] = str(thread_id)
             if target == KNOWLEDGE_BASE:
-                from ..long_term.semantic.knowledge_base import KnowledgeBase
-
-                knowledge_base_id = KnowledgeBase(
-                    self.memory_provider
-                ).ingest_knowledge(
+                written = self._remember_knowledge(
                     body,
-                    REMEMBERED_NAMESPACE,
-                    chunking_strategy="none",
+                    namespace=REMEMBERED_NAMESPACE,
+                    memory_id=memory_id,
                     user_id=user_id,
                     metadata=metadata,
-                    embeddings="optional",
                 )
-                receipt.update(stored=True, knowledge_base_id=knowledge_base_id)
+                if not written.get("stored"):
+                    receipt.update(
+                        memory_type=None,
+                        **{
+                            key: value
+                            for key, value in written.items()
+                            if key != "stored"
+                        },
+                    )
+                    return receipt
+                receipt.update(written)
             elif target == SHORT_TERM_MEMORY:
                 from ..embeddings import get_embedding
 
@@ -13212,6 +13566,459 @@ class MemAgent:
                 )
                 receipt.update(stored=True, record_id=str(record_id))
         return receipt
+
+    # -- extraction gate, procedures, knowledge-base writes ----------------------
+
+    def _extraction_gate(self, text: str) -> Optional[Dict[str, Any]]:
+        """The extraction gate's answer for a user message: ``durable``
+        (P(worth keeping)), ``kind`` and ``kind_confidence``; None when no
+        gate is set or it could not answer (the message is read as usual)."""
+        setting = getattr(self.memory_routing, "extraction_gate", None)
+        if setting is None:
+            return None
+        decider = self._decider(setting, "the extraction gate")
+        if decider is None:
+            return None
+        from ..decision_models import (
+            DURABLE,
+            MEMORY_KIND,
+            option_probabilities,
+            probability_yes,
+        )
+
+        try:
+            answers = decider.decide(
+                str(text)[:4000], {"durable": DURABLE, "kind": MEMORY_KIND}
+            )
+        except Exception as exc:
+            logger.warning("The extraction gate failed; reading the message: %s", exc)
+            return None
+        durable = probability_yes(answers.get("durable"))
+        if durable is None:
+            return None
+        kinds = option_probabilities(answers.get("kind")) or {}
+        kind, kind_confidence = next(iter(kinds.items()), (None, 0.0))
+        return {
+            "durable": durable,
+            "kind": kind,
+            "kind_confidence": float(kind_confidence),
+            "model": decider.label,
+        }
+
+    def _file_stated_procedures(
+        self,
+        text: str,
+        *,
+        memory_id: str,
+        user_id: Optional[str],
+        thread_id: Optional[str],
+        entity_memory_id: Optional[str],
+        sealed: bool,
+        source: str,
+    ) -> List[Dict[str, Any]]:
+        """Read the procedures ``text`` states (background model) and file
+        them."""
+        from ..learning.consolidation import text_generator
+        from .memory_routing import extract_memories_in_parts
+
+        generate = text_generator(self.background_model or self.model)
+        if generate is None or sealed:
+            return []
+        records: List[Dict[str, Any]] = []
+        if self._entity_memory_enabled and entity_memory_id:
+            try:
+                from ..long_term.semantic.entity_memory import EntityMemory
+
+                records = EntityMemory(self.memory_provider).list_entities(
+                    memory_id=entity_memory_id, user_id=user_id
+                )
+            except Exception:
+                records = []
+        try:
+            found, _read = extract_memories_in_parts(
+                str(text or ""),
+                generate,
+                records,
+                source="what the user wrote" if source == "turn" else "a note",
+                thread_id=str(thread_id or ""),
+            )
+        except Exception as exc:
+            logger.warning("Procedure extraction failed: %s", exc)
+            return []
+        return self._file_procedures(
+            found["procedures"],
+            memory_id=memory_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            sealed=sealed,
+            source=source,
+        )
+
+    def _file_procedures(
+        self,
+        procedures: Sequence[Dict[str, Any]],
+        *,
+        memory_id: str,
+        user_id: Optional[str],
+        thread_id: Optional[str],
+        sealed: bool,
+        source: str,
+    ) -> List[Dict[str, Any]]:
+        """Keep the procedures a user stated where this agent reads
+        procedures: as skills when it recalls skills, else as notes in its
+        knowledge base (namespace ``procedures``). A procedure stated again
+        under the same name replaces the old one, which is kept and hidden.
+        Nothing from a sealed conversation is kept."""
+        if not procedures or sealed or self.memory_provider is None:
+            return []
+        from ..memory_history import memory_change_context
+        from .memory_routing import PROCEDURES_NAMESPACE, procedure_text
+
+        filed: List[Dict[str, Any]] = []
+        as_skills = self.skillbox is not None and bool(self.skill_retrieval)
+        with memory_change_context(
+            actor=f"agent:{self.agent_id}",
+            source=f"memory_routing:{source}",
+            agent_id=self.agent_id,
+            label="Remembered (procedure)",
+        ):
+            for procedure in procedures:
+                text = procedure_text(procedure)
+                try:
+                    if as_skills:
+                        filed.append(
+                            self._procedure_as_skill(
+                                procedure, text, user_id, thread_id
+                            )
+                        )
+                        continue
+                    metadata = {
+                        "memory_id": memory_id,
+                        "agent_id": self.agent_id,
+                        "source": f"memory_routing:{source}",
+                        "memory_kind": "procedure",
+                        "procedure_name": procedure["name"],
+                        "evidence": procedure.get("evidence"),
+                    }
+                    if thread_id:
+                        metadata["thread_id"] = str(thread_id)
+                    written = self._remember_knowledge(
+                        text,
+                        namespace=PROCEDURES_NAMESPACE,
+                        memory_id=memory_id,
+                        user_id=user_id,
+                        metadata=metadata,
+                        replaces_name=procedure["name"],
+                    )
+                    filed.append(
+                        {
+                            "name": procedure["name"],
+                            "stored_as": "knowledge_base",
+                            "namespace": PROCEDURES_NAMESPACE,
+                            **written,
+                        }
+                    )
+                except Exception as exc:
+                    logger.warning("Keeping a procedure failed: %s", exc)
+        return filed
+
+    def _procedure_as_skill(
+        self,
+        procedure: Dict[str, Any],
+        text: str,
+        user_id: Optional[str],
+        thread_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """A stated procedure as an active skill of this user; a skill of the
+        same name stated before is deprecated (kept, no longer recalled)."""
+        from ..long_term.procedural.skillbox import Skill, SkillStatus
+
+        name = procedure["name"]
+        when = str(procedure.get("when") or "").strip()
+        previous = [
+            skill
+            for skill in self.skillbox.list_skills(statuses=(SkillStatus.ACTIVE,))
+            if skill.name.casefold() == name.casefold() and skill.user_id == user_id
+        ]
+        skill = Skill(
+            name=name,
+            description=(f"When {when}" if when else name)[:400],
+            content=text,
+            queries=[item for item in (when, procedure.get("evidence")) if item],
+            agent_id=self.agent_id,
+            user_id=user_id,
+            status=SkillStatus.ACTIVE,
+            version=max([item.version for item in previous] or [0]) + 1,
+            injection_role="user",
+            baseline={
+                "stated_by_user": True,
+                **({"thread_id": str(thread_id)} if thread_id else {}),
+            },
+        )
+        skill_id = self.skillbox.add_skill(skill)
+        for item in previous:
+            self.skillbox.set_status(
+                item.skill_id,
+                SkillStatus.DEPRECATED,
+                reason=f"the user stated a new version ({skill.skill_id})",
+            )
+        return {
+            "name": name,
+            "stored_as": "skill",
+            "skill_id": skill.skill_id,
+            "record_id": str(skill_id),
+            "version": skill.version,
+            **({"replaced": [item.skill_id for item in previous]} if previous else {}),
+        }
+
+    def _remember_knowledge(
+        self,
+        body: str,
+        *,
+        namespace: str,
+        memory_id: str,
+        user_id: Optional[str],
+        metadata: Dict[str, Any],
+        replaces_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Write one note to the knowledge base.
+
+        With ``MemoryRoutingConfig.dedupe_writes`` a decision model first
+        compares it with the closest notes of this memory: the same fact is
+        not written again, one it refines or contradicts is hidden from
+        recall (kept, ``superseded_by`` the new note) and another fact about
+        the same subject is linked (``related_ids``). ``replaces_name``
+        hides the procedure of that name stated before.
+        """
+        from ..long_term.semantic.knowledge_base import KnowledgeBase
+
+        knowledge = KnowledgeBase(self.memory_provider)
+        relations = self._relate_to_stored(
+            knowledge,
+            body,
+            namespace=namespace,
+            memory_id=memory_id,
+            user_id=user_id,
+        )
+        same = next((item for item in relations if item["action"] == "skip"), None)
+        if same is not None:
+            return {
+                "stored": False,
+                "already_known": same["stored_id"],
+                "relations": relations,
+                "reason": "The knowledge base already says this.",
+            }
+        linked = [item["stored_id"] for item in relations if item["action"] == "link"]
+        if linked:
+            metadata = {**metadata, "related_ids": linked}
+        knowledge_base_id = knowledge.ingest_knowledge(
+            body,
+            namespace,
+            chunking_strategy="none",
+            user_id=user_id,
+            metadata=metadata,
+            embeddings="optional",
+        )
+        replaced = [
+            (item["stored_id"], item["relation"])
+            for item in relations
+            if item["action"] in {"update", "supersede"}
+        ]
+        if replaces_name:
+            replaced += [
+                (row_id, "restated")
+                for row_id in self._procedure_rows(
+                    knowledge,
+                    replaces_name,
+                    memory_id=memory_id,
+                    user_id=user_id,
+                    exclude=knowledge_base_id,
+                )
+                if row_id not in {stored for stored, _ in replaced}
+            ]
+        hidden = [
+            row_id
+            for row_id, relation in replaced
+            if self._supersede_knowledge(
+                row_id, by=knowledge_base_id, relation=relation
+            )
+        ]
+        out: Dict[str, Any] = {"stored": True, "knowledge_base_id": knowledge_base_id}
+        if relations:
+            out["relations"] = relations
+        if hidden:
+            out["superseded"] = hidden
+        if linked:
+            out["related_ids"] = linked
+        return out
+
+    # Notes compared with a new one, how alike they must be to be asked, and
+    # how sure the model must be before a relation changes anything.
+    RELATION_CANDIDATES = 3
+    RELATION_MIN_SIMILARITY = 0.5
+    RELATION_MIN_CONFIDENCE = 0.5
+
+    def _relate_to_stored(
+        self,
+        knowledge: Any,
+        body: str,
+        *,
+        namespace: str,
+        memory_id: str,
+        user_id: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """How ``body`` relates to its closest notes in this memory, one
+        entry per note the decision model judged: ``stored_id``,
+        ``relation``, ``confidence`` and ``action`` (skip, update, supersede,
+        link or insert). Empty when dedupe is off or the model failed."""
+        setting = getattr(self.memory_routing, "dedupe_writes", None)
+        if setting is None:
+            return []
+        decider = self._decider(setting, "write dedupe")
+        if decider is None:
+            return []
+        from ..decision_models import (
+            RELATION,
+            RELATION_ACTIONS,
+            option_probabilities,
+            relation_state,
+        )
+        from ..learning.consolidation import _flag, _row_id, _row_text
+        from .utils.context_dedup import is_suppressed
+
+        try:
+            rows = knowledge.retrieve_knowledge_by_query(
+                body,
+                namespace=namespace,
+                limit=self.RELATION_CANDIDATES * 3,
+                user_id=user_id,
+            )
+        except Exception as exc:
+            logger.warning("Write dedupe could not search the knowledge base: %s", exc)
+            return []
+        candidates = []
+        for row in rows or []:
+            score = row.get("score")
+            if (
+                is_suppressed(row)
+                or not _row_id(row)
+                or not _row_text(row)
+                or row.get("memory_id") not in (None, memory_id)
+                or (
+                    isinstance(score, (int, float))
+                    and not isinstance(score, bool)
+                    and float(score) < self.RELATION_MIN_SIMILARITY
+                )
+            ):
+                continue
+            candidates.append(row)
+            if len(candidates) >= self.RELATION_CANDIDATES:
+                break
+        if not candidates:
+            return []
+        try:
+            answers = decider.decide_many(
+                [
+                    (relation_state(body, _row_text(row)[:2000]), {"r": RELATION})
+                    for row in candidates
+                ]
+            )
+        except Exception as exc:
+            logger.warning("Write dedupe failed; writing as usual: %s", exc)
+            return []
+        out = []
+        for row, answer in zip(candidates, answers):
+            ranked = option_probabilities(answer.get("r"))
+            if not ranked:
+                continue
+            relation, confidence = next(iter(ranked.items()))
+            action = RELATION_ACTIONS[relation]
+            if float(confidence) < self.RELATION_MIN_CONFIDENCE:
+                action = "insert"  # unsure: written, nothing else changes
+            if action in {"update", "supersede"} and (
+                _flag(row, "pinned") or _flag(row, "verified")
+            ):
+                action = "link"  # a pinned note is never hidden
+            out.append(
+                {
+                    "stored_id": _row_id(row),
+                    "relation": relation,
+                    "confidence": round(float(confidence), 4),
+                    "action": action,
+                }
+            )
+        return out
+
+    def _procedure_rows(
+        self,
+        knowledge: Any,
+        name: str,
+        *,
+        memory_id: str,
+        user_id: Optional[str],
+        exclude: Optional[str] = None,
+    ) -> List[str]:
+        """Visible notes of the procedure ``name`` in this memory, other than
+        the note ``exclude`` (a knowledge_base_id) just written."""
+        from ..learning.consolidation import _row_id
+        from .memory_routing import PROCEDURES_NAMESPACE
+        from .utils.context_dedup import is_suppressed
+
+        try:
+            rows = knowledge.retrieve_knowledge_by_query(
+                name, namespace=PROCEDURES_NAMESPACE, limit=10, user_id=user_id
+            )
+        except Exception:
+            return []
+        wanted = name.casefold()
+        out = []
+        for row in rows or []:
+            metadata = (
+                row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            )
+            stated = row.get("procedure_name") or metadata.get("procedure_name")
+            if (
+                str(stated or "").casefold() == wanted
+                and row.get("memory_id") in (None, memory_id)
+                and not is_suppressed(row)
+                and _row_id(row)
+                and (exclude is None or row.get("knowledge_base_id") != exclude)
+            ):
+                out.append(_row_id(row))
+        return out
+
+    def _supersede_knowledge(self, row_id: str, *, by: str, relation: str) -> bool:
+        """Hide a knowledge-base note a newer one replaces. It is kept, with
+        ``superseded_by`` and the reason, and can be brought back."""
+        from .._time import utc_now_iso
+
+        try:
+            row = self.memory_provider.retrieve_by_id(row_id, MemoryType.KNOWLEDGE_BASE)
+        except Exception:
+            row = None
+        previous = (row or {}).get("retention_state") if isinstance(row, dict) else None
+        reason = {
+            "refines": "a newer note says it with more detail",
+            "contradicts": "a newer note says it is no longer true",
+            "restated": "the user stated this procedure again",
+        }.get(relation, relation)
+        try:
+            ok = self.memory_provider.update_by_id(
+                row_id,
+                {
+                    "retention_state": "suppressed",
+                    "suppressed_from": previous or "active",
+                    "suppressed_at": utc_now_iso(),
+                    "suppression_reason": reason,
+                    "superseded_by": by,
+                    "supersede_reason": relation,
+                },
+                MemoryType.KNOWLEDGE_BASE,
+            )
+        except Exception as exc:
+            logger.warning("Could not hide the replaced note %s: %s", row_id, exc)
+            return False
+        return ok is not False
 
     def _note_turn_for_routing(
         self,
@@ -13269,6 +14076,23 @@ class MemAgent:
                         return
                     current = queue.pop(0)
                 try:
+                    # The extraction gate: no model reads a message that
+                    # holds nothing worth keeping.
+                    gate = self._extraction_gate(current["text"])
+                    if (
+                        gate is not None
+                        and gate["durable"] < self.memory_routing.gate_threshold
+                    ):
+                        self._last_capture_gate = {**gate, "skipped": True}
+                        logger.info(
+                            "Memory capture skipped a message the gate judged "
+                            "not worth keeping (%.2f)",
+                            gate["durable"],
+                        )
+                        continue
+                    self._last_capture_gate = (
+                        {**gate, "skipped": False} if gate is not None else None
+                    )
                     if current.get("mode") == "entities":
                         receipt = self._capture_turn_entities(current)
                     else:
@@ -13283,6 +14107,7 @@ class MemAgent:
                             fallback=None,
                             source="turn",
                             skip=current.get("tool_writes") or (),
+                            gate=gate,
                         )
                     logger.info(
                         "Memory routing of a turn in %s: %s",
@@ -13349,6 +14174,8 @@ class MemAgent:
             source="entity_capture",
             change_source="entity_capture:turn",
             tool_writes=list(item.get("tool_writes") or []),
+            memory_id=item.get("memory_id"),
+            sealed=bool(item.get("sealed")),
         )
 
     def capture_entity_facts(
@@ -13415,13 +14242,17 @@ class MemAgent:
         tool_writes: Sequence[Dict[str, Any]] = (),
         confidence: float = 0.8,
         fallback_to_chat_model: bool = False,
+        memory_id: Optional[str] = None,
+        sealed: bool = False,
     ) -> Dict[str, Any]:
+        """Entity facts in ``text``, filed; with ``memory_id`` the procedures
+        it states are filed too (see :meth:`_file_procedures`)."""
         from ..learning.consolidation import text_generator
         from ..long_term.semantic.entity_memory import EntityMemory
         from ..memory_history import memory_change_context
         from .memory_routing import (
             clean_text,
-            extract_facts_in_parts,
+            extract_memories_in_parts,
             file_entity_facts,
             without_tool_writes,
         )
@@ -13445,7 +14276,7 @@ class MemAgent:
         policy = self.entity_policy
         self_record = policy.self_record(records)
         # The whole text, in parts: a long list of facts isn't cut short.
-        facts, read = extract_facts_in_parts(
+        found, read = extract_memories_in_parts(
             str(text or ""),
             generate,
             policy.present(records) if policy.active else records,
@@ -13453,8 +14284,24 @@ class MemAgent:
             thread_id=str(thread_id or ""),
         )
         receipt.update(read)
-        facts = without_tool_writes(facts, list(tool_writes or ()))
+        if memory_id and found["procedures"]:
+            receipt["procedures"] = self._file_procedures(
+                found["procedures"],
+                memory_id=memory_id,
+                user_id=user_id,
+                thread_id=thread_id,
+                sealed=sealed,
+                source=source,
+            )
+        facts = without_tool_writes(found["facts"], list(tool_writes or ()))
         if not facts:
+            if receipt.get("procedures"):
+                receipt.update(
+                    stored=True,
+                    memory_type="procedure",
+                    reason=f"Kept {len(receipt['procedures'])} procedure(s).",
+                )
+                return receipt
             receipt["reason"] = "No new entity fact rested on the user's words."
             return receipt
         with memory_change_context(
@@ -13571,6 +14418,9 @@ class MemAgent:
                 self.entity_policy.to_dict() if self.entity_policy.active else None
             ),
             "reranker": self.reranker.to_dict() if self.reranker else None,
+            "decision_model": (
+                self.decision_model.to_dict() if self.decision_model else None
+            ),
         }
 
     def _background_executor(self) -> ThreadPoolExecutor:
@@ -13814,7 +14664,10 @@ class MemAgent:
         self._submit_background(_touch, label="memory reinforcement")
 
     def _importance_rater(
-        self, *, generate: Optional[Callable[[str], str]] = None
+        self,
+        *,
+        generate: Optional[Callable[[str], str]] = None,
+        decide: Optional[Callable[[List[str]], List[Optional[float]]]] = None,
     ) -> ImportanceRater:
         """The importance rater: ``MEMORIZZ_IMPORTANCE_*`` settings overlaid
         with the policy's ``scoring.importance`` mapping when present."""
@@ -13823,7 +14676,25 @@ class MemAgent:
         overlay = scoring.get("importance") if isinstance(scoring, dict) else None
         if isinstance(overlay, dict):
             config = ImportanceConfig.from_mapping(overlay, base=config)
-        return ImportanceRater(config, generate=generate)
+        return ImportanceRater(config, generate=generate, decide=decide)
+
+    def _importance_decide(
+        self, config: Any
+    ) -> Optional[Callable[[List[str]], List[Optional[float]]]]:
+        """texts -> P(worth keeping) for the ``decision`` importance mode:
+        the decision model ``config.model`` names, else the agent's."""
+        decider = self._decider(
+            getattr(config, "model", None) or True, "importance ratings"
+        )
+        if decider is None:
+            return None
+        from ..decision_models import KEEP, probability_yes
+
+        def decide(texts: List[str]) -> List[Optional[float]]:
+            answers = decider.decide_many([(text, {"keep": KEEP}) for text in texts])
+            return [probability_yes(answer.get("keep")) for answer in answers]
+
+        return decide
 
     def _importance_generate(self) -> Optional[Callable[[str], str]]:
         """A one-prompt ``generate`` on the background model for LLM ratings."""
@@ -13873,6 +14744,10 @@ class MemAgent:
                 generate = self._importance_generate()
                 if generate is not None:
                     self._schedule_importance_rerating(rows, generate)
+            elif rows and rater.config.mode == "decision":
+                decide = self._importance_decide(rater.config)
+                if decide is not None:
+                    self._schedule_importance_rerating(rows, None, decide=decide)
             self._note_importance_for_reflection(
                 memory_id, total, user_id=user_id, thread_id=thread_id
             )
@@ -13882,16 +14757,18 @@ class MemAgent:
     def _schedule_importance_rerating(
         self,
         rows: List[Tuple[str, str, str]],
-        generate: Callable[[str], str],
+        generate: Optional[Callable[[str], str]],
+        *,
+        decide: Optional[Callable[[List[str]], List[Optional[float]]]] = None,
     ) -> None:
         provider = self.memory_provider
-        rater = self._importance_rater(generate=generate)
+        rater = self._importance_rater(generate=generate, decide=decide)
         unit_ids = [unit_id for unit_id, _text, _role in rows]
         items = [{"text": text, "role": role, "kind": role} for _id, text, role in rows]
 
         def _rerate() -> None:
             for unit_id, (importance, source) in zip(unit_ids, rater.rate_many(items)):
-                if importance is None or source != "llm":
+                if importance is None or source not in {"llm", "decision"}:
                     continue  # model unavailable: the stored heuristic stands
                 try:
                     provider.update_by_id(
@@ -14371,6 +15248,7 @@ class MemAgent:
         bypass_reason: Optional[str] = None,
     ) -> "SemanticCacheInspection":
         """Inspect cache provenance/freshness without returning cached content."""
+        self._wire_cache_verifier()
         return self.cache_manager.inspect(
             query,
             session_id=thread_id,

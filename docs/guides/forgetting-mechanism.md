@@ -51,14 +51,15 @@ selected = dedupe_and_select(
 ## Importance ratings
 
 The paper rates each memory's "poignancy" from 1 to 10 at creation. MemoRizz
-stores the rating as `importance` in `[0, 1]` and offers three rater modes
+stores the rating as `importance` in `[0, 1]` and offers four rater modes
 (`MEMORIZZ_IMPORTANCE_RATER`):
 
 | Mode | Behaviour |
 |---|---|
 | `off` | Nothing is stored; retrieval uses the default importance. |
 | `heuristic` | Deterministic and free: host-asserted facts and verified outcomes high, tool output low, decisions and corrections boosted. |
-| `llm` | The paper's prompt, answered by a small or local model (`MEMORIZZ_IMPORTANCE_MODEL`), batched and run off the user path, with the heuristic as fallback. |
+| `llm` | The paper's prompt, answered by a small or local model (`MEMORIZZ_IMPORTANCE_MODEL`), batched and run off the user path, with the heuristic as fallback. A reply that is a probability alone ("0.73") is taken as it is. |
+| `decision` | A [decision model](decision-models.md) asked whether the memory is worth keeping; P(yes) is the rating. `MEMORIZZ_IMPORTANCE_MODEL` names it (`d1`, `openai_decisions`, ...), else the agent's decision model. Run off the user path. |
 
 Ratings are immutable once stored; only a verified outcome raises one to 1.0.
 
@@ -142,6 +143,9 @@ The semantic cache keeps its own time-to-live (`ttl_hours`, default 24) and
 per-domain freshness windows. Expired entries are never served, expired rows
 are purged from the provider on preload and periodically on writes, and
 re-caching the same query updates the existing row instead of duplicating it.
+A cached answer is served from cosine similarity 0.9 by default; with a
+[verifier](decision-models.md#the-semantic-cache), a decision model checks
+each close entry's answer against the new question first.
 
 ## Provider parity
 

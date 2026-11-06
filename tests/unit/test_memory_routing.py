@@ -94,7 +94,7 @@ class _Model:
 
     def generate_text(self, prompt: str, instructions: Optional[str] = None) -> str:
         self.prompts.append(prompt)
-        if "durable facts the" in prompt and "sister" in prompt:
+        if "the facts the text below states" in prompt and "sister" in prompt:
             return json.dumps(
                 {
                     "facts": [

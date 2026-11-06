@@ -685,7 +685,7 @@ def test_semantic_query_failure_is_reported_as_degraded(
     assert result["retrieval"]["semantic_error_type"] == "RuntimeError"
 
 
-def test_tool_update_rejects_entity_id_outside_active_scope(
+def test_tool_update_never_reaches_an_entity_id_outside_active_scope(
     provider: InMemoryEntityProvider, entity_store: EntityMemory
 ):
     entity_id = entity_store.upsert_entity(
@@ -697,10 +697,11 @@ def test_tool_update_rejects_entity_id_outside_active_scope(
     )
     manager = EntityMemoryManager(provider)
 
-    with pytest.raises(ValueError, match="not found in the active entity scope"):
+    # Another tenant's ID with no name: refused, with what to do instead.
+    with pytest.raises(ValueError, match="Pass the entity's name instead"):
         manager.upsert_entity_from_tool(
             entity_id=entity_id,
-            name="user",
+            name=None,
             entity_type="person",
             attributes=[{"name": "secret", "value": "overwritten"}],
             relations=None,
@@ -708,8 +709,66 @@ def test_tool_update_rejects_entity_id_outside_active_scope(
             memory_id="primary-user-b",
             user_id="user-b",
         )
+    # With a name, the update lands on that name in the caller's own scope.
+    stored = manager.upsert_entity_from_tool(
+        entity_id=entity_id,
+        name="user",
+        entity_type="person",
+        attributes=[{"name": "secret", "value": "overwritten"}],
+        relations=None,
+        metadata=None,
+        memory_id="primary-user-b",
+        user_id="user-b",
+    )
 
+    assert stored != entity_id
     assert provider.records[entity_id]["attributes"][0]["value"] == "tenant-a-only"
+    own = entity_store.get_entity_by_name(
+        "user", memory_id="primary-user-b", user_id="user-b"
+    )
+    assert own["entity_id"] == stored
+    assert own["attributes"][0]["value"] == "overwritten"
+
+
+def test_tool_update_by_a_made_up_id_lands_on_the_named_entity(
+    provider: InMemoryEntityProvider, entity_store: EntityMemory
+):
+    """Live: the model passed an ID it had not looked up, the tool failed with
+    "entity_id was not found in the active entity scope", and the message
+    reached the answer."""
+    scope = {"memory_id": "traveller", "user_id": "traveller"}
+    trip_id = entity_store.upsert_entity(
+        name="current trip",
+        entity_type="trip",
+        attributes=[{"name": "nights", "value": "4"}],
+        **scope,
+    )
+    manager = EntityMemoryManager(provider)
+
+    by_name = manager.upsert_entity_from_tool(
+        entity_id="trip-001",
+        name="current trip",
+        entity_type="trip",
+        attributes=[{"name": "nights", "value": "5"}],
+        relations=None,
+        metadata=None,
+        **scope,
+    )
+    # A model that passes the name as the ID reaches the same record.
+    name_as_id = manager.upsert_entity_from_tool(
+        entity_id="current trip",
+        name=None,
+        entity_type="trip",
+        attributes=[{"name": "budget", "value": "1500 EUR"}],
+        relations=None,
+        metadata=None,
+        **scope,
+    )
+
+    assert by_name == name_as_id == trip_id
+    record = entity_store.get_entity(trip_id, **scope)
+    values = {item["name"]: item["value"] for item in record["attributes"]}
+    assert values == {"nights": "5", "budget": "1500 EUR"}
 
 
 def test_tool_update_forwards_host_identity_key(

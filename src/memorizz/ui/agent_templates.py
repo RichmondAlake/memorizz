@@ -48,6 +48,7 @@ TEXT_FIELDS = (
     "background_model",
     "reranker",
     "memory_routing",
+    "decision_model",
     "persona_name",
     "persona_role",
     "persona_goals",
@@ -78,6 +79,12 @@ CHECKBOX_FIELDS = (
     "continual_learning_shadow_evaluation",
     "automations_enabled",
     "memory_routing_capture",
+    "decision_extraction_gate",
+    "decision_read_routing",
+    "decision_tool_selection",
+    "decision_dedupe_writes",
+    "decision_relations",
+    "decision_cache_verifier",
 )
 
 _SECRET_KEY = re.compile(

@@ -220,11 +220,82 @@ def _chunk_semantic(
     return chunks or [text]
 
 
+DEFAULT_BOUNDARY_THRESHOLD = 0.5
+
+
+def _chunk_decision(
+    corpus: str,
+    decision_model: Any = None,
+    boundary_threshold: float = DEFAULT_BOUNDARY_THRESHOLD,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    **_: Any,
+) -> List[str]:
+    """Split where a decision model says a new topic, request or event
+    starts.
+
+    Each gap between sentences is shown with the sentences around it (three
+    on each side) and the model is asked whether the text after the gap is
+    about something else; a cut goes where P(yes) reaches
+    ``boundary_threshold``. Unlike ``"semantic"``, which cuts at the largest
+    similarity drops, sections that share vocabulary still separate. A chunk
+    is also cut before it grows past twice ``chunk_size`` characters.
+    ``decision_model`` is any decision model (see
+    :mod:`memorizz.decision_models`; None is ``"auto"``). One question per
+    gap: batched on this machine, in parallel against a hosted model. When
+    the model fails, the text is chunked by sentence instead.
+    """
+    from ...decision_models import (
+        CHUNK_BOUNDARY,
+        boundary_state,
+        decider,
+        probability_yes,
+    )
+
+    text = (corpus or "").strip()
+    if not text:
+        return []
+    sentences = [s.strip() for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+    if len(sentences) <= 1:
+        return sentences
+    try:
+        model = decider(True if decision_model is None else decision_model)
+        answers = model.decide_many(
+            [
+                (boundary_state(sentences, index), {"cut": CHUNK_BOUNDARY})
+                for index in range(len(sentences) - 1)
+            ]
+        )
+    except Exception as exc:
+        logger.warning(
+            "Decision chunking failed (%s); chunking by sentence instead", exc
+        )
+        return _chunk_sentence(corpus, chunk_size=chunk_size)
+    cuts = [
+        (probability_yes(answer.get("cut")) or 0.0) >= float(boundary_threshold)
+        for answer in answers
+    ]
+    limit = max(1, int(chunk_size)) * 2
+    chunks: List[str] = []
+    buffer: List[str] = []
+    for index, sentence in enumerate(sentences):
+        if buffer and len(" ".join(buffer)) + 1 + len(sentence) > limit:
+            chunks.append(" ".join(buffer))
+            buffer = []
+        buffer.append(sentence)
+        if index < len(cuts) and cuts[index]:
+            chunks.append(" ".join(buffer))
+            buffer = []
+    if buffer:
+        chunks.append(" ".join(buffer))
+    return chunks
+
+
 _BUILTIN_CHUNKERS: Dict[str, ChunkerFn] = {
     "fixed": _chunk_fixed,
     "sentence": _chunk_sentence,
     "paragraph": _chunk_paragraph,
     "semantic": _chunk_semantic,
+    "decision": _chunk_decision,
     "none": _chunk_none,
 }
 
@@ -277,6 +348,7 @@ class KnowledgeBase:
         user_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         embeddings: str = "required",
+        decision_model: Any = None,
     ) -> str:
         """
         Embed and save text content to the memory provider under the given namespace.
@@ -299,6 +371,8 @@ class KnowledgeBase:
               - "paragraph": split on blank lines
               - "semantic":  embed sentences and break at the largest topic shifts
                              (tuned by ``breakpoint_percentile``)
+              - "decision":  break where a decision model says a new topic
+                             starts (``decision_model``)
               - "none":      store the full corpus as a single document
             Or a callable ``(corpus, **kwargs) -> list[str]`` for custom logic.
         chunk_size : int, default 1000
@@ -324,6 +398,10 @@ class KnowledgeBase:
             ``"optional"`` stores the chunks without embeddings when the
             embedding model fails (none configured, say), and ``"off"`` never
             embeds; keyword search still finds those chunks.
+        decision_model : optional
+            The decision model the ``"decision"`` strategy asks: ``"d1"``,
+            ``"openai_decisions"``, ``"jev"``, ... (see
+            :mod:`memorizz.decision_models`); None is ``"auto"``.
 
         Returns:
         --------
@@ -348,6 +426,8 @@ class KnowledgeBase:
         chunker_options = {}
         if managed and chunker is _chunk_semantic:
             chunker_options["embedding_function"] = self.memory_provider.embed_text
+        if chunker is _chunk_decision and decision_model is not None:
+            chunker_options["decision_model"] = decision_model
         chunks = chunker(
             corpus,
             chunk_size=chunk_size,
@@ -624,6 +704,7 @@ class KnowledgeBase:
         user_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         embeddings: str = "required",
+        decision_model: Any = None,
     ) -> str:
         """Ingest a single file from disk, raw bytes, or a file-like object.
 
@@ -650,7 +731,7 @@ class KnowledgeBase:
         user_id:
             Tenant identifier forwarded to :meth:`ingest_knowledge`; see its
             docstring for behaviour. ``None`` preserves legacy semantics.
-        metadata, embeddings:
+        metadata, embeddings, decision_model:
             Forwarded to :meth:`ingest_knowledge`.
 
         Returns
@@ -685,6 +766,7 @@ class KnowledgeBase:
             user_id=user_id,
             metadata=metadata,
             embeddings=embeddings,
+            decision_model=decision_model,
         )
 
     def ingest_directory(
@@ -700,6 +782,7 @@ class KnowledgeBase:
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
         breakpoint_percentile: float = DEFAULT_SEMANTIC_BREAKPOINT_PERCENTILE,
         user_id: Optional[str] = None,
+        decision_model: Any = None,
     ) -> Dict[str, Any]:
         """Ingest every supported file under ``root``.
 
@@ -722,7 +805,8 @@ class KnowledgeBase:
         extensions:
             Whitelist of extensions to include. Defaults to every registered
             extractor — pass e.g. ``[".pdf"]`` to restrict the scan.
-        chunking_strategy, chunk_size, chunk_overlap, breakpoint_percentile:
+        chunking_strategy, chunk_size, chunk_overlap, breakpoint_percentile,
+        decision_model:
             Forwarded to :meth:`ingest_knowledge` for every file.
         user_id:
             Tenant identifier forwarded to every :meth:`ingest_file` call.
@@ -763,6 +847,7 @@ class KnowledgeBase:
                     chunk_overlap=chunk_overlap,
                     breakpoint_percentile=breakpoint_percentile,
                     user_id=user_id,
+                    decision_model=decision_model,
                 )
             except ExtractorError as exc:
                 entry["error"] = str(exc)

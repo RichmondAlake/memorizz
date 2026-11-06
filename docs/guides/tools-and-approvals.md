@@ -138,6 +138,34 @@ schemas. Scope and allowlists are applied before top-k retrieval. Trusted
 callables are rebound from an explicit registry or reviewed import reference;
 MemoRizz never unpickles executable code.
 
+### Offer no tool to an unrelated request
+
+Routing offers the `tool_top_k` closest tools however far they are, so a
+request unrelated to every tool is still offered some. Set
+`tool_min_similarity` to the least cosine similarity a tool needs:
+
+```python
+ContextPolicy(tool_top_k=2, tool_min_similarity=0.25)
+```
+
+A tool below it is not offered, and keyword matching doesn't bring it back.
+Good values depend on the embedding model and how tools are described, so
+measure a few requests with `agent.semantic_tool_router.preview(request)` and
+the scores from `toolbox.get_most_similar_tools(request)`. With
+`all-MiniLM-L6-v2` and five travel tools, relevant requests scored 0.28 to
+0.55 against the right tool, and "Find me a direct flight to Lisbon" scored
+0.24 against the closest one, so 0.25 left it with no tools. The cut-off
+applies when routing picks tools, not when every tool is sent (see
+[`stable_tool_list_tokens`](context-efficiency.md)).
+
+### Let a decision model pick the tool
+
+Ranking by meaning puts the closest topic first: for "Send the Q3 report to
+Sarah" the report tool outranks the email tool. With
+`ContextPolicy(tool_selection=True)`, a [decision model](decision-models.md#tool-routing)
+picks from the five closest tools, or none, and only that tool is offered
+(the runner-up too when it is within `tool_selection_margin`, 0.15).
+
 ## Large tool results
 
 ```python

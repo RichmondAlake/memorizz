@@ -20,10 +20,13 @@ class InternetSearchResult:
     score: Optional[float] = None
     raw: Optional[Dict[str, Any]] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # The page's own text, when the provider was asked for it (Tavily's
+    # include_raw_content); None otherwise.
+    content: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Return a serializable dict for tool / LLM consumption."""
-        return {
+        out = {
             "url": self.url,
             "title": self.title,
             "snippet": self.snippet,
@@ -31,6 +34,9 @@ class InternetSearchResult:
             "metadata": self.metadata or None,
             "raw": self.raw or None,
         }
+        if self.content:
+            out["content"] = self.content
+        return out
 
 
 @dataclass

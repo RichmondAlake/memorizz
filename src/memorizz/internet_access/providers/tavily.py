@@ -68,6 +68,9 @@ class TavilyProvider(InternetAccessProvider):
         resolved_include_raw_page = self._to_bool(
             merged_config.get("include_raw_page", False)
         )
+        resolved_include_raw_content = self._raw_content_format(
+            merged_config.get("include_raw_content", False)
+        )
 
         # The key is held on the instance only; ``get_config()`` (and so the
         # saved agent record) reports ``api_key_set`` instead of the value.
@@ -80,6 +83,7 @@ class TavilyProvider(InternetAccessProvider):
                 "max_content_chars": resolved_max_content_chars,
                 "include_raw_results": resolved_include_raw_results,
                 "include_raw_page": resolved_include_raw_page,
+                "include_raw_content": resolved_include_raw_content,
             }
         )
 
@@ -97,6 +101,9 @@ class TavilyProvider(InternetAccessProvider):
         self.max_content_chars = resolved_max_content_chars
         self.include_raw_results = resolved_include_raw_results
         self.include_raw_page = resolved_include_raw_page
+        # Search results carry each page's text (``content``), not just its
+        # snippet: False, "markdown" (True) or "text".
+        self.include_raw_content = resolved_include_raw_content
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -128,6 +135,11 @@ class TavilyProvider(InternetAccessProvider):
         ):
             if key in kwargs:
                 payload[key] = kwargs[key]
+        raw_content = self._raw_content_format(
+            kwargs.get("include_raw_content", self.include_raw_content)
+        )
+        if raw_content:
+            payload["include_raw_content"] = raw_content
 
         response = self._post("/search", payload, timeout=kwargs.get("timeout"))
         results = response.get("results") or response.get("data") or []
@@ -230,6 +242,17 @@ class TavilyProvider(InternetAccessProvider):
         if "answer" in item:
             metadata["answer"] = item.get("answer")
 
+        content, truncated, original_length = self._truncate_text(
+            item.get("raw_content") or None, self.max_content_chars
+        )
+        if truncated:
+            metadata.update(
+                {
+                    "content_truncated": True,
+                    "content_char_limit": self.max_content_chars,
+                    "content_original_characters": original_length,
+                }
+            )
         raw_payload = item if self.include_raw_results else None
         return InternetSearchResult(
             url=item.get("url") or "",
@@ -238,6 +261,7 @@ class TavilyProvider(InternetAccessProvider):
             score=item.get("score"),
             metadata=metadata,
             raw=raw_payload,
+            content=content,
         )
 
     def _extract_page_entry(self, response: Dict[str, Any]) -> Dict[str, Any]:
@@ -251,6 +275,18 @@ class TavilyProvider(InternetAccessProvider):
         if isinstance(candidates, dict):
             return candidates
         return response
+
+    @staticmethod
+    def _raw_content_format(value: Any) -> Any:
+        """Tavily's ``include_raw_content``: False, "markdown" or "text"."""
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"markdown", "text"}:
+                return text
+            if text in {"1", "true", "yes", "on"}:
+                return "markdown"
+            return False
+        return "markdown" if value else False
 
     @staticmethod
     def _to_bool(value: Any) -> bool:

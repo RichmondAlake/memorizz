@@ -44,7 +44,8 @@ Where a routed memory goes:
 
 | The router says | Filed as |
 |---|---|
-| `entity_memory` | Facts extracted by the background model, each resting on a phrase copied from the text, upserted on the person or thing (the user is `user`). Values already stored are skipped. |
+| `entity_memory` | Facts extracted by the background model, each resting on a phrase copied from the text, upserted on the person or thing (the user is `user`). Values already stored are skipped. Procedures the text states are kept too (below). |
+| `skillbox` | The procedures the text states ("To deploy, run the tests, tag the release, then post in #releases"): a skill of the user when the agent recalls skills, else a note in the knowledge base namespace `procedures`. |
 | `knowledge_base` | A knowledge-base entry in the namespace `remembered`, keyed to the agent's memory, so recall finds it. |
 | `short_term_memory` | A working note in short-term memory. |
 | `do_not_store` | Nothing. |
@@ -57,6 +58,12 @@ capture files nothing, and `remember` keeps the text in the knowledge base.
 A sealed conversation (`retrieval_policy="sealed"`) never writes to shared
 stores: its facts go to the conversation's own entity scope, and nothing
 reaches the knowledge base.
+
+A decision model can sit in front of all this: `extraction_gate` skips the
+messages with nothing worth keeping before any model reads them, and
+`dedupe_writes` compares a new knowledge-base note with the closest stored
+ones (the same fact is not written again; one that is no longer true is
+replaced). See [Decision Models](decision-models.md).
 
 `remember` returns a receipt:
 
@@ -188,7 +195,10 @@ agent.with_reranker("cohere")  # change it on a live agent
 | `"voyage"` | Voyage `rerank-2.5` (or `rerank-2.5-lite`) | `VOYAGE_API_KEY` |
 | `"cohere"` | Cohere `rerank-v3.5` | `COHERE_API_KEY` |
 | `"openai_decisions"` | `gpt-6-luna` answers "is this relevant?" for every candidate, in one request | `OPENAI_API_KEY` |
+| `"huggingface"` | `cross-encoder/ms-marco-MiniLM-L6-v2` on Hugging Face Inference Providers; `"huggingface:<model id>"` picks another `text-ranking` model | `HF_TOKEN`, or a token saved by `hf auth login` |
+| `"d1"`, `"liquid"`, `"jev"` | A [decision model](decision-models.md) asked whether each candidate gives useful evidence for the request; P(yes) is the score. `"d1"` runs `LiquidAI/d1-2B` on this machine | torch and transformers; `LIQUID_API_KEY`; `TYPESAFE_API_KEY` |
 | `"finetuned:<run id>"` | A reranker or relevance model trained in MemoRizz | a trained run |
+| A function or `CrossEncoder` | Your own reranker, see below | |
 | `"off"` | None | |
 
 The reranker scores the candidates recall found, and its score replaces the
@@ -196,6 +206,48 @@ relevance part of the ranking; recency and importance still apply. A hosted
 reranker adds one request (about 0.2 to 0.5 s) to each turn that recalls
 memories; when it fails, recall keeps its own order. Each reranked candidate's
 score is in the turn's memory selection trace (`rerank_score`).
+
+The `knowledge_base_lookup` tool uses the same reranker. With one, it fetches
+four times as many passages as it returns (at least 20, at most 50), reranks
+them and returns the best, each with its `rerank_score`. Without one it
+returns vector search's order.
+
+### Hugging Face
+
+```python
+agent = MemAgent(..., reranker="huggingface:cross-encoder/ms-marco-MiniLM-L6-v2")
+```
+
+The model must be served as `text-ranking` by the `hf-inference` provider;
+the model page's *Inference Providers* panel says whether it is. Cross-encoders
+return logits, which MemoRizz turns into 0 to 1 scores with a sigmoid. The
+first request after the model has been idle can take a few seconds while
+Hugging Face loads it.
+
+### Your own reranker
+
+Pass a function that takes the query and the candidate texts and returns one
+score per text, or any object with `predict(pairs)`, such as
+sentence-transformers' `CrossEncoder`:
+
+```python
+from sentence_transformers import CrossEncoder
+
+agent = MemAgent(..., reranker=CrossEncoder("cross-encoder/ms-marco-MiniLM-L6-v2"))
+
+
+def by_keywords(query, texts):
+    words = set(query.lower().split())
+    return [len(words & set(text.lower().split())) / len(words) for text in texts]
+
+
+agent.with_reranker(by_keywords)
+```
+
+Scores should be 0 to 1, higher meaning more relevant; scores outside that
+range are squashed with a sigmoid, which keeps their order. Your reranker runs
+in your process. Saving the agent stores only its name, so an agent loaded in
+another process doesn't rerank until it is passed `reranker=` again.
 
 MCP searches in a memory an agent owns use that agent's reranker, and MCP
 writes with `memory_type="auto"` into its memory use its router.

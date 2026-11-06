@@ -71,6 +71,7 @@ class MemAgentBuilder:
         self._persona_learning: Any = None
         self._memory_routing: Any = None
         self._reranker: Any = None
+        self._decision_model: Any = None
         self._approval_store = None
         self._delegation_config = None
         self._semantic_layer = None
@@ -563,11 +564,22 @@ class MemAgentBuilder:
         return self
 
     def with_reranker(self, reranker: Any) -> "MemAgentBuilder":
-        """Rerank what the agent recalls: ``"voyage"``, ``"cohere"``,
-        ``"openai_decisions"`` (or ``"voyage:rerank-2.5-lite"``),
-        ``"finetuned:<run id>"`` or ``"off"``. Without it the agent follows
-        the store's reranker, if any."""
+        """Rerank what the agent recalls and what knowledge_base_lookup
+        returns: ``"voyage"``, ``"cohere"``, ``"openai_decisions"``,
+        ``"huggingface"`` (or ``"huggingface:<model id>"``),
+        ``"finetuned:<run id>"``, ``"off"``, or your own reranker (a function
+        ``(query, texts) -> scores`` or a ``CrossEncoder``). Without it the
+        agent follows the store's reranker, if any."""
         self._reranker = reranker
+        return self
+
+    def with_decision_model(self, decision_model: Any) -> "MemAgentBuilder":
+        """The decision model that features switched on with ``True`` ask:
+        ``"d1"`` (on this machine), ``"liquid"``, ``"jev"``,
+        ``"openai_decisions"``, ``"finetuned:<run id>"``, ``"llm"`` (the
+        background model), ``"auto"`` or your own function. See
+        :mod:`memorizz.decision_models`."""
+        self._decision_model = decision_model
         return self
 
     def with_embedding_provider(
@@ -716,6 +728,7 @@ class MemAgentBuilder:
                 persona_learning=self._persona_learning,
                 memory_routing=self._memory_routing,
                 reranker=self._reranker,
+                decision_model=self._decision_model,
             )
             agent.environment_reports = {
                 key: dict(value) if isinstance(value, dict) else value

@@ -5,6 +5,7 @@
 import hashlib
 import inspect
 import logging
+import re
 import time
 import uuid
 from contextvars import ContextVar
@@ -24,13 +25,40 @@ from ..tool_cache import DEFAULT_FRESHNESS_BY_DOMAIN
 logger = logging.getLogger(__name__)
 
 
+#: Cosine similarity a cached question needs to serve its answer. Near
+#: misses ("today's weather" for "tomorrow's") score as high as paraphrases,
+#: so without a verifier the line is set where few of them pass.
+DEFAULT_SIMILARITY_THRESHOLD = 0.9
+#: With a verifier, the closest entries from this similarity are checked.
+DEFAULT_VERIFIED_SIMILARITY_THRESHOLD = 0.7
+
+_QUESTION_END = re.compile(r"[\s?!.,;:]+$")
+
+
+def normalized_question(text: Any) -> str:
+    """A question as an exact repeat is compared: case, spacing and the
+    closing punctuation do not count."""
+    return _QUESTION_END.sub("", " ".join(str(text or "").split()).casefold())
+
+
 @dataclass
 class SemanticCacheConfig:
-    """Configuration for semantic cache behavior."""
+    """Configuration for semantic cache behavior.
 
-    similarity_threshold: float = (
-        0.78  # Lowered for better matching with similar queries
-    )
+    ``verifier`` asks a decision model whether a cached answer correctly
+    answers the new question as it is asked (the same thing, place, time,
+    number and action), before it is served: ``True`` for the agent's
+    decision model, or one named ("d1", "openai_decisions", ...; see
+    :mod:`memorizz.decision_models`). The ``verify_top`` closest entries
+    above ``similarity_threshold`` are checked, best first; the first with
+    P(yes) of at least ``verify_threshold`` is served. When the verifier
+    cannot answer, nothing is served. ``similarity_threshold`` defaults to
+    0.9 without a verifier and 0.7 with one. A question that repeats a
+    cached one (case, spacing and closing punctuation aside) is served
+    without a check.
+    """
+
+    similarity_threshold: Optional[float] = None
     max_cache_size: int = 1000
     ttl_hours: float = 24.0
     enable_memory_provider_sync: bool = (
@@ -50,8 +78,22 @@ class SemanticCacheConfig:
         default_factory=lambda: dict(DEFAULT_FRESHNESS_BY_DOMAIN)
     )
     require_fingerprint_match: bool = True
+    verifier: Any = None
+    verify_top: int = 3
+    verify_threshold: float = 0.5
 
     def __post_init__(self) -> None:
+        from ..decision_models import feature_setting
+
+        self.verifier = feature_setting(self.verifier)
+        if self.similarity_threshold is None:
+            self.similarity_threshold = (
+                DEFAULT_VERIFIED_SIMILARITY_THRESHOLD
+                if self.verifier is not None
+                else DEFAULT_SIMILARITY_THRESHOLD
+            )
+        self.verify_top = max(1, min(int(self.verify_top), 10))
+        self.verify_threshold = max(0.0, min(float(self.verify_threshold), 1.0))
         if isinstance(self.scope, str):
             normalized_scope = self.scope.strip().lower()
             # ``scope="session"`` was part of the public configuration surface
@@ -230,6 +272,9 @@ class SemanticCache:
             "evictions": 0,
         }
         self._bypass_reasons: Dict[str, int] = {}
+        # (query, entry) -> P(serve), set by an agent with a verifier.
+        self.verify: Optional[Any] = None
+        self._decider: Any = None
         self.last_hit: Optional[Dict[str, Any]] = None
         self.last_inspection: Optional[SemanticCacheInspection] = None
 
@@ -308,9 +353,13 @@ class SemanticCache:
         limit: int = 10,
         user_id: Optional[str] = None,
         lookup_metadata: Optional[Dict[str, Any]] = None,
+        accept: Optional[Any] = None,
     ) -> Optional[SemanticCacheEntry]:
         """
         Search for similar cache entries using the memory provider's vector search capabilities.
+
+        ``accept(entry, similarity)`` (the verifier) can turn a candidate
+        down; the next one above the threshold is tried.
         """
         try:
             search_filter = {}
@@ -380,6 +429,8 @@ class SemanticCache:
                 if not self._fresh_for_metadata(best_match):
                     continue
                 if not self._metadata_matches(best_match, lookup_metadata):
+                    continue
+                if accept is not None and not accept(best_match, result_score):
                     continue
                 best_match.metadata["similarity"] = result_score
                 return best_match
@@ -553,6 +604,23 @@ class SemanticCache:
         key = self._generate_cache_key(query, session_id, user_id)
         entry = self.cache.get(key)
         if entry is None:
+            # The same question with other case, spacing or end punctuation.
+            wanted = normalized_question(query)
+            entry = next(
+                (
+                    candidate
+                    for candidate in self.cache.values()
+                    if normalized_question(candidate.query) == wanted
+                    and getattr(candidate, "user_id", None) == user_id
+                    and (
+                        not self.config.enable_session_scoping
+                        or not session_id
+                        or candidate.session_id == session_id
+                    )
+                ),
+                None,
+            )
+        if entry is None:
             return None
         if getattr(entry, "user_id", None) != user_id:
             return None
@@ -571,6 +639,58 @@ class SemanticCache:
         ):
             return None
         return entry
+
+    def _verifier(self) -> Optional[Any]:
+        """``(query, entry) -> P(the cached answer serves the query)``, from
+        the agent (``verify``) or the configured decision model."""
+        if self.config.verifier is None:
+            return None
+        if self.verify is not None:
+            return self.verify
+        if self._decider is None:
+            from ..decision_models import decider
+
+            try:
+                self._decider = decider(self.config.verifier)
+            except Exception as exc:
+                logger.warning("The semantic cache verifier is unavailable: %s", exc)
+                self._decider = False
+        if not self._decider:
+            return None
+        from ..decision_models import CACHE_SERVES, cache_state
+
+        model = self._decider
+        return lambda query, entry: model.yes(
+            cache_state(query, str(entry.response)[:4000]), CACHE_SERVES
+        )
+
+    def _acceptor(self, query: str, outcome: Dict[str, Any]) -> Optional[Any]:
+        """``accept(entry, similarity)`` while a verifier is set: a repeat of
+        the question passes, otherwise the verifier decides for the
+        ``verify_top`` closest entries; ``outcome`` records what it said."""
+        if self.config.verifier is None:
+            return None
+        verify = self._verifier()
+        wanted = normalized_question(query)
+
+        def accept(entry: SemanticCacheEntry, similarity: float) -> bool:
+            if normalized_question(entry.query) == wanted:
+                return True
+            if verify is None or outcome["checked"] >= self.config.verify_top:
+                return False
+            outcome["checked"] += 1
+            try:
+                served = verify(query, entry)
+            except Exception as exc:
+                logger.warning("Semantic cache verification failed: %s", exc)
+                outcome["errors"] += 1
+                return False
+            if served is None:
+                return False
+            outcome["verified"] = round(float(served), 4)
+            return float(served) >= self.config.verify_threshold
+
+        return accept
 
     def record_bypass(self, reason: str) -> None:
         normalized = str(reason or "policy").strip() or "policy"
@@ -622,6 +742,42 @@ class SemanticCache:
                 self.last_inspection.to_dict() if self.last_inspection else None
             ),
         }
+
+    def _ranked_in_memory(
+        self,
+        query: str,
+        threshold: float,
+        session_id: Optional[str],
+        user_id: Optional[str],
+        lookup_metadata: Optional[Dict[str, Any]],
+    ) -> List[Any]:
+        """In-memory entries in scope at or above ``threshold``, most similar
+        first, as ``(similarity, entry)``."""
+        query_embedding = self._get_or_generate_embedding(query)
+        ranked = []
+        for entry in self.cache.values():
+            # Tenant isolation: skip entries from other users.
+            if getattr(entry, "user_id", None) != user_id:
+                continue
+            if self.agent_id and entry.agent_id != self.agent_id:
+                continue
+            if self.memory_id and entry.memory_id != self.memory_id:
+                continue
+            if not self._fresh_for_metadata(entry):
+                continue
+            if not self._metadata_matches(entry, lookup_metadata):
+                continue
+            if (
+                self.config.enable_session_scoping
+                and session_id
+                and entry.session_id != session_id
+            ):
+                continue
+            similarity = self._cosine_similarity(query_embedding, entry.embedding)
+            if similarity >= threshold:
+                ranked.append((similarity, entry))
+        ranked.sort(key=lambda item: -item[0])
+        return ranked
 
     def _inspection(
         self,
@@ -704,6 +860,7 @@ class SemanticCache:
             lookup_metadata=lookup_metadata,
         )
         best_similarity = 1.0 if best_match is not None else 0.0
+        accept = self._acceptor(query, {"checked": 0, "errors": 0})
         if best_match is not None:
             pass
         elif self._should_use_memory_provider():
@@ -713,32 +870,17 @@ class SemanticCache:
                 session_id,
                 user_id=user_id,
                 lookup_metadata=lookup_metadata,
+                accept=accept,
             )
             if best_match is not None and isinstance(best_match.metadata, dict):
                 best_similarity = float(best_match.metadata.get("similarity") or 0.0)
         else:
-            query_embedding = self._get_or_generate_embedding(query)
-            for entry in self.cache.values():
-                if getattr(entry, "user_id", None) != user_id:
-                    continue
-                if self.agent_id and entry.agent_id != self.agent_id:
-                    continue
-                if self.memory_id and entry.memory_id != self.memory_id:
-                    continue
-                if not self._fresh_for_metadata(entry):
-                    continue
-                if not self._metadata_matches(entry, lookup_metadata):
-                    continue
-                if (
-                    self.config.enable_session_scoping
-                    and session_id
-                    and entry.session_id != session_id
-                ):
-                    continue
-                similarity = self._cosine_similarity(query_embedding, entry.embedding)
-                if similarity >= threshold and similarity > best_similarity:
-                    best_match = entry
-                    best_similarity = similarity
+            for similarity, entry in self._ranked_in_memory(
+                query, threshold, session_id, user_id, lookup_metadata
+            ):
+                if accept is None or accept(entry, similarity):
+                    best_match, best_similarity = entry, similarity
+                    break
         result = self._inspection(
             query,
             entry=best_match,
@@ -801,6 +943,8 @@ class SemanticCache:
                 lookup_metadata=lookup_metadata,
             )
             exact_match = best_match is not None
+            outcome: Dict[str, Any] = {"checked": 0, "errors": 0}
+            accept = None if exact_match else self._acceptor(query, outcome)
 
             # Decide whether to use memory provider or in-memory search
             should_use_provider = self._should_use_memory_provider()
@@ -819,11 +963,9 @@ class SemanticCache:
                     session_id,
                     user_id=user_id,
                     lookup_metadata=lookup_metadata,
+                    accept=accept,
                 )
             else:
-                # Generate query embedding for in-memory search (with caching)
-                query_embedding = self._get_or_generate_embedding(query)
-
                 logger.debug("Using in-memory search for semantic cache retrieval")
                 # Clean up expired entries first (only for in-memory)
                 self._cleanup_expired_entries()
@@ -833,39 +975,14 @@ class SemanticCache:
                     self.last_inspection = self._inspection(query)
                     return None
 
-                # In-memory search (original logic)
                 best_match = None
                 best_similarity = 0.0
-
-                for entry in self.cache.values():
-                    # Tenant isolation: skip entries from other users.
-                    if getattr(entry, "user_id", None) != user_id:
-                        continue
-                    if self.agent_id and entry.agent_id != self.agent_id:
-                        continue
-                    if self.memory_id and entry.memory_id != self.memory_id:
-                        continue
-
-                    if not self._fresh_for_metadata(entry):
-                        continue
-                    if not self._metadata_matches(entry, lookup_metadata):
-                        continue
-
-                    # Skip entries that don't match scope (only if session scoping is enabled)
-                    if (
-                        self.config.enable_session_scoping
-                        and session_id
-                        and entry.session_id != session_id
-                    ):
-                        continue
-
-                    similarity = self._cosine_similarity(
-                        query_embedding, entry.embedding
-                    )
-
-                    if similarity >= threshold and similarity > best_similarity:
-                        best_similarity = similarity
-                        best_match = entry
+                for similarity, entry in self._ranked_in_memory(
+                    query, threshold, session_id, user_id, lookup_metadata
+                ):
+                    if accept is None or accept(entry, similarity):
+                        best_match, best_similarity = entry, similarity
+                        break
 
             if best_match:
                 # Update usage statistics
@@ -893,6 +1010,11 @@ class SemanticCache:
                     "cache_key": best_match.cache_key,
                     "query": best_match.query,
                     "similarity": similarity,
+                    **(
+                        {"verified": outcome["verified"]}
+                        if "verified" in outcome
+                        else {}
+                    ),
                     "age_seconds": max(0.0, time.time() - best_match.timestamp),
                     "agent_id": best_match.agent_id,
                     "memory_id": best_match.memory_id,

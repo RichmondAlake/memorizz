@@ -64,6 +64,10 @@ MERGE_ENTITIES = "merge_entities"
 SUPPRESS_DUPLICATE = "suppress_duplicate"
 RETIRE_ATTRIBUTE = "retire_attribute"
 ADD_FACT = "add_fact"
+LINK_ROWS = "link_rows"
+
+#: Knowledge-base notes the agent wrote itself, which relations compare.
+RELATION_NAMESPACES = ("remembered", "procedures")
 
 AUTOMATIC_APPROVER = "memorizz:consolidation"
 
@@ -94,8 +98,35 @@ class ConsolidationConfig:
     max_entities: int = 40
     max_threads: int = 5
     max_messages_per_thread: int = 40
+    #: A decision model compares the agent's own knowledge-base notes in
+    #: pairs (the closest older notes of each): the same fact said again is
+    #: hidden, a note a newer one refines or contradicts is hidden (kept,
+    #: superseded by it), and another fact about the same subject is
+    #: linked. True uses the agent's decision model; a name ("d1", "jev",
+    #: ...) picks one. Runs in every pass, scheduled ones included.
+    relations: Any = None
+    relation_min_similarity: float = 0.5
+    #: A relation acts only when the model gives it at least this.
+    relation_threshold: float = 0.5
+    max_relation_pairs: int = 60
 
     def __post_init__(self) -> None:
+        from ..decision_models import feature_setting
+
+        object.__setattr__(self, "relations", feature_setting(self.relations))
+        object.__setattr__(
+            self,
+            "relation_min_similarity",
+            max(0.0, min(float(self.relation_min_similarity), 1.0)),
+        )
+        object.__setattr__(
+            self, "max_relation_pairs", max(1, min(int(self.max_relation_pairs), 500))
+        )
+        object.__setattr__(
+            self,
+            "relation_threshold",
+            max(0.0, min(float(self.relation_threshold), 1.0)),
+        )
         object.__setattr__(self, "enabled", _truthy(self.enabled))
         object.__setattr__(self, "auto_apply", _truthy(self.auto_apply))
         object.__setattr__(self, "review_attributes", _truthy(self.review_attributes))
@@ -127,7 +158,11 @@ class ConsolidationConfig:
         return cls(**data)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+        from ..decision_models import saved_setting
+
+        out = {name: getattr(self, name) for name in self.__dataclass_fields__}
+        out["relations"] = saved_setting(self.relations)
+        return out
 
 
 @dataclass(frozen=True)
@@ -193,6 +228,8 @@ class ConsolidationPlan:
             RETIRE_ATTRIBUTE: 0,
             ADD_FACT: 0,
         }
+        if any(op.kind == LINK_ROWS for op in self.ops):
+            counts[LINK_ROWS] = 0
         for op in self.ops:
             counts[op.kind] = counts.get(op.kind, 0) + 1
         return counts
@@ -362,8 +399,17 @@ def _op_label(op: "ConsolidationOp") -> str:
             else "Merged duplicates of " + str(names[0] if names else op.target_id)
         )
     if op.kind == SUPPRESS_DUPLICATE:
+        relation = details.get("relation")
+        if relation in {"refines", "contradicts"}:
+            return "Hid a note a newer one " + (
+                "says more about" if relation == "refines" else "contradicts"
+            )
+        if relation == "same":
+            return "Hid a note that says the same as an older one"
         kind = "summary" if op.memory_type == "summaries" else "knowledge-base chunk"
         return f"Hid a duplicate {kind}"
+    if op.kind == LINK_ROWS:
+        return "Linked two notes about the same subject"
     if op.kind == ADD_FACT:
         verb = "Updated" if details.get("replaces") is not None else "Added"
         return f"{verb} {details.get('entity')}.{details.get('attribute')}"
@@ -489,15 +535,19 @@ class MemoryConsolidator:
         model: Any = None,
         config: Optional[ConsolidationConfig] = None,
         knowledge_base_ids: Iterable[str] = (),
+        decision_model: Any = None,
     ) -> None:
         if provider is None:
             raise ValueError("Memory consolidation requires a memory provider")
+        from ..decision_models import DecisionModelConfig
         from ..long_term.semantic.entity_memory import EntityMemory
 
         self.provider = provider
         self.agent_id = str(agent_id or "").strip() or None
         self.model = model
         self.config = config or ConsolidationConfig()
+        #: The agent's decision model, for ``relations=True``.
+        self.decision_model = DecisionModelConfig.from_value(decision_model)
         self.knowledge_base_ids = frozenset(str(item) for item in knowledge_base_ids)
         self.entities = EntityMemory(provider)
 
@@ -569,6 +619,19 @@ class MemoryConsolidator:
             ops.extend(
                 self._duplicate_rows(
                     MemoryType.KNOWLEDGE_BASE, memory, user_id, warnings
+                )
+            )
+        if self.config.relations is not None:
+            # The agent's own notes of this memory and user only, so it runs
+            # in scheduled passes too.
+            ops.extend(
+                self._related_rows(
+                    memory,
+                    user_id,
+                    warnings,
+                    already={
+                        op.target_id for op in ops if op.kind == SUPPRESS_DUPLICATE
+                    },
                 )
             )
         generate = text_generator(self.model)
@@ -742,6 +805,162 @@ class MemoryConsolidator:
                             else "near-identical to an older summary of this thread"
                         ),
                         details={"duplicate_of": _row_id(original)},
+                    )
+                )
+        return ops
+
+    def _related_rows(
+        self,
+        memory_id: str,
+        user_id: Optional[str],
+        warnings: List[str],
+        already: set,
+    ) -> List[ConsolidationOp]:
+        """The agent's own notes in this memory and user, compared in pairs
+        with the closest older notes by a decision model (see
+        ``ConsolidationConfig.relations``)."""
+        from ..decision_models import (
+            RELATION,
+            decider,
+            option_probabilities,
+            relation_state,
+        )
+
+        try:
+            model = decider(
+                self.config.relations,
+                default=self.decision_model,
+                provider=self.provider,
+                generate=text_generator(self.model),
+                model_label=_model_label(self.model),
+            )
+        except (TypeError, ValueError) as exc:
+            warnings.append(f"relations skipped: {exc}")
+            return []
+        if model is None:
+            return []
+        try:
+            rows = self._rows(MemoryType.KNOWLEDGE_BASE, user_id)
+        except Exception as exc:
+            warnings.append(f"relations skipped: {type(exc).__name__}")
+            return []
+        notes = [
+            row
+            for row in rows
+            if _row_id(row)
+            and _row_id(row) not in already
+            and not is_suppressed(row)
+            and row.get("memory_id") == memory_id
+            and row.get("user_id") == user_id
+            and str(row.get("namespace") or "") in RELATION_NAMESPACES
+            and _row_text(row)
+        ]
+        without_vectors = sum(1 for row in notes if not row.get("embedding"))
+        if without_vectors:
+            warnings.append(
+                f"relations: {without_vectors} note(s) without an embedding skipped"
+            )
+        notes = [row for row in notes if row.get("embedding")]
+        notes.sort(
+            key=lambda row: (_row_time(row, MemoryType.KNOWLEDGE_BASE), _row_id(row))
+        )
+        pairs: List[Tuple[Dict, Dict]] = []
+        for index in range(len(notes) - 1, 0, -1):
+            newer = notes[index]
+            close = sorted(
+                (
+                    (_cosine(newer.get("embedding"), older.get("embedding")), older)
+                    for older in notes[:index]
+                ),
+                key=lambda item: -item[0],
+            )
+            for similarity, older in close[:3]:
+                if similarity >= self.config.relation_min_similarity:
+                    pairs.append((newer, older))
+            if len(pairs) >= self.config.max_relation_pairs:
+                warnings.append(
+                    f"relations: stopped at {self.config.max_relation_pairs} pairs"
+                )
+                break
+        # The newest notes are compared first (they are the likeliest to
+        # change something); the pairs are then settled oldest first, so a
+        # fact is replaced by the note that first changed it.
+        pairs = pairs[: self.config.max_relation_pairs][::-1]
+        if not pairs:
+            return []
+        try:
+            answers = model.decide_many(
+                [
+                    (
+                        relation_state(
+                            _row_text(newer)[:2000], _row_text(older)[:2000]
+                        ),
+                        {"r": RELATION},
+                    )
+                    for newer, older in pairs
+                ]
+            )
+        except Exception as exc:
+            warnings.append(f"relations failed: {type(exc).__name__}")
+            return []
+        ops: List[ConsolidationOp] = []
+        hidden: set = set()
+        for (newer, older), answer in zip(pairs, answers):
+            ranked = option_probabilities(answer.get("r"))
+            if not ranked:
+                continue
+            relation, confidence = next(iter(ranked.items()))
+            newer_id, older_id = _row_id(newer), _row_id(older)
+            if newer_id in hidden or older_id in hidden:
+                continue
+            if float(confidence) < self.config.relation_threshold:
+                continue  # unsure: leave both notes as they are
+            details = {"relation": relation, "confidence": round(float(confidence), 4)}
+            if relation == "same":
+                if _flag(newer, "pinned") or _flag(newer, "verified"):
+                    continue
+                hidden.add(newer_id)
+                ops.append(
+                    ConsolidationOp(
+                        kind=SUPPRESS_DUPLICATE,
+                        memory_type=MemoryType.KNOWLEDGE_BASE.value,
+                        target_id=newer_id,
+                        reason="says the same as an older note",
+                        details={**details, "duplicate_of": older_id},
+                    )
+                )
+            elif relation in {"refines", "contradicts"}:
+                if _flag(older, "pinned") or _flag(older, "verified"):
+                    continue
+                hidden.add(older_id)
+                ops.append(
+                    ConsolidationOp(
+                        kind=SUPPRESS_DUPLICATE,
+                        memory_type=MemoryType.KNOWLEDGE_BASE.value,
+                        target_id=older_id,
+                        reason=(
+                            "a newer note says it with more detail"
+                            if relation == "refines"
+                            else "a newer note says it is no longer true"
+                        ),
+                        details={**details, "duplicate_of": newer_id},
+                    )
+                )
+            elif relation == "complements":
+                linked = newer.get("related_ids") or (
+                    (newer.get("metadata") or {}).get("related_ids")
+                    if isinstance(newer.get("metadata"), Mapping)
+                    else None
+                )
+                if older_id in (linked or []):
+                    continue
+                ops.append(
+                    ConsolidationOp(
+                        kind=LINK_ROWS,
+                        memory_type=MemoryType.KNOWLEDGE_BASE.value,
+                        target_id=newer_id,
+                        reason="another fact about the same subject",
+                        details={**details, "related_id": older_id},
                     )
                 )
         return ops
@@ -1130,6 +1349,8 @@ class MemoryConsolidator:
             RETIRE_ATTRIBUTE: 0,
             ADD_FACT: 0,
         }
+        if any(op.kind == LINK_ROWS for op in plan.ops):
+            applied[LINK_ROWS] = 0
         errors: List[str] = []
         source = f"consolidation:{plan.plan_id}"
         # Retirements are applied per entity, one write each.
@@ -1198,8 +1419,29 @@ class MemoryConsolidator:
             self._suppress(op, plan.plan_id, approver, reason)
         elif op.kind == ADD_FACT:
             self._add_fact(op, plan, source)
+        elif op.kind == LINK_ROWS:
+            self._link(op, plan.plan_id)
         else:
             raise ValueError(f"unknown operation {op.kind}")
+
+    def _link(self, op: ConsolidationOp, plan_id: str) -> None:
+        memory_type = MemoryType(op.memory_type)
+        row = self.provider.retrieve_by_id(op.target_id, memory_type)
+        if not isinstance(row, dict):
+            raise ValueError("record no longer exists")
+        before = list(row.get("related_ids") or [])
+        related = list(dict.fromkeys([*before, op.details["related_id"]]))
+        ok = self.provider.update_by_id(
+            op.target_id,
+            {
+                "related_ids": related,
+                "related_ids_before": before,
+                "linked_by": plan_id,
+            },
+            memory_type,
+        )
+        if ok is False:
+            raise ValueError("provider refused the update")
 
     def _suppress(
         self,
@@ -1295,6 +1537,19 @@ class MemoryConsolidator:
             counts["rows"] = 0
             for memory_type in (MemoryType.SUMMARIES, MemoryType.KNOWLEDGE_BASE):
                 for row in self._rows(memory_type, user_id):
+                    if row.get("linked_by") == plan_id and _row_id(row):
+                        ok = self.provider.update_by_id(
+                            _row_id(row),
+                            {
+                                "related_ids": list(
+                                    row.get("related_ids_before") or []
+                                ),
+                                "linked_by": None,
+                            },
+                            memory_type,
+                        )
+                        if ok is not False:
+                            counts["rows"] += 1
                     if row.get("suppressed_by") != plan_id or not _row_id(row):
                         continue
                     ok = self.provider.update_by_id(
@@ -1314,6 +1569,7 @@ class MemoryConsolidator:
 __all__ = [
     "ADD_FACT",
     "AUTOMATIC_APPROVER",
+    "LINK_ROWS",
     "MERGE_ENTITIES",
     "RETIRE_ATTRIBUTE",
     "SUPPRESS_DUPLICATE",

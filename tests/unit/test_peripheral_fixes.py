@@ -82,6 +82,7 @@ _TAVILY_SAVED_CONFIG = {
     "max_content_chars": 12000,
     "include_raw_results": False,
     "include_raw_page": False,
+    "include_raw_content": False,
     "api_key_set": True,
 }
 

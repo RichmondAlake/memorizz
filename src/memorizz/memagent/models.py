@@ -54,6 +54,9 @@ class MemAgentModel(BaseModel):
     memory_routing: Optional[Dict[str, Any]] = None
     # The agent's own reranker (RerankerConfig); None follows the store's.
     reranker: Optional[Dict[str, Any]] = None
+    # The decision model features switched on with True ask
+    # (DecisionModelConfig); None: those features use "auto".
+    decision_model: Optional[Dict[str, Any]] = None
     # Which record entity facts about the user land on (EntityPolicy); None
     # is the default (records found by name).
     entity_policy: Optional[Dict[str, Any]] = None

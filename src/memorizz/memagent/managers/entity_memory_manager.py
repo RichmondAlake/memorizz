@@ -12,6 +12,15 @@ from ...long_term.semantic.entity_memory import EntityMemory
 logger = logging.getLogger(__name__)
 
 
+# What the model reads when it names an entity by an ID this conversation's
+# memory doesn't hold (a hallucinated or another scope's ID) and gives no name.
+UNKNOWN_ENTITY_ID = (
+    "No entity with that entity_id is in this conversation's memory. Pass the "
+    "entity's name instead (without entity_id), or find its ID with "
+    "entity_memory_lookup."
+)
+
+
 class EntityMemoryManager:
     """Simple wrapper that exposes entity memory operations to MemAgent."""
 
@@ -223,12 +232,19 @@ class EntityMemoryManager:
             # An LLM may only update an ID that it could resolve inside the
             # server-bound tenant scope. This prevents an attacker-supplied or
             # hallucinated ID from overwriting a different tenant in providers
-            # that use entity_id as their physical upsert key. With a canonical
-            # identity the host already names the record, so the unknown ID is
-            # dropped instead.
-            if not identity_key:
-                raise ValueError("entity_id was not found in the active entity scope.")
-            entity_id = None
+            # that use entity_id as their physical upsert key. The unknown ID
+            # is dropped, and the update lands by name inside this scope: the
+            # host's canonical identity, the name given, or a name the model
+            # passed as the ID.
+            if not identity_key and not name:
+                named = self._entity_memory.get_entity_by_name(
+                    entity_id, memory_id=memory_id, user_id=user_id
+                )
+                if not named or not named.get("entity_id"):
+                    raise ValueError(UNKNOWN_ENTITY_ID)
+                entity_id = named["entity_id"]
+            else:
+                entity_id = None
 
         result = self._entity_memory.upsert_entity_with_report(
             entity_id=entity_id,

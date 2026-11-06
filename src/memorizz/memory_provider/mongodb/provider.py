@@ -1734,7 +1734,21 @@ class MongoDBProvider(
         results = self._run_vector_search(
             self.toolbox_collection, pipeline, label="toolbox"
         )
-        return results if results else None
+        if not results:
+            return None
+        # Atlas scores (1 + cosine) / 2. Tool routing compares the score to a
+        # cosine cut-off (ContextPolicy.tool_min_similarity), as Oracle and
+        # the file store report it.
+        return [
+            (
+                {**row, "score": 2 * float(row["score"]) - 1}
+                if isinstance(row, dict)
+                and isinstance(row.get("score"), (int, float))
+                and not isinstance(row.get("score"), bool)
+                else row
+            )
+            for row in results
+        ]
 
     def retrieve_skillbox_item(
         self,

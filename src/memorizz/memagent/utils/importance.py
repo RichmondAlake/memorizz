@@ -18,6 +18,11 @@ signals (recency, importance, relevance). Three rater modes exist:
     The paper's prompt, answered by a small or local model, batched and
     meant to run off the user path (the embedding backfill worker). Falls
     back to the heuristic when the model is unavailable or answers badly.
+``decision``
+    A decision model asked whether the memory is worth keeping beyond the
+    conversation; P(yes) is the rating. ``model`` names it ("d1",
+    "openai_decisions", ...; see :mod:`memorizz.decision_models`), else the
+    agent's decision model. Rated off the user path, like ``llm``.
 
 Ratings are immutable once stored; only a verified outcome raises one.
 """
@@ -33,7 +38,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
-IMPORTANCE_MODES = ("off", "heuristic", "llm")
+IMPORTANCE_MODES = ("off", "heuristic", "llm", "decision")
 
 # Park et al. 2023, section 4.1 ("Importance"), with the agent's purpose added
 # so ratings are relative to what this agent is for rather than a human life.
@@ -117,8 +122,15 @@ def rating_to_importance(rating: Any) -> Optional[float]:
     return 0.1 if number == 1.0 else clamp_importance(number)
 
 
+_PROBABILITY_RE = re.compile(r"\s*(0?\.\d+)\s*")
+
+
 def parse_rating(text: Any) -> Optional[float]:
-    """Extract the first integer 1..10 from a model answer and map it to 0..1."""
+    """Extract the first integer 1..10 from a model answer and map it to 0..1.
+    An answer that is a probability alone ("0.73") is taken as it is."""
+    probability = _PROBABILITY_RE.fullmatch(str(text or ""))
+    if probability:
+        return min(1.0, max(0.0, float(probability.group(1))))
     match = _RATING_RE.search(str(text or ""))
     if not match:
         return None
@@ -219,9 +231,13 @@ class ImportanceRater:
         config: Optional[ImportanceConfig] = None,
         *,
         generate: Optional[Callable[[str], str]] = None,
+        decide: Optional[Callable[[List[str]], List[Optional[float]]]] = None,
     ) -> None:
         self.config = config or ImportanceConfig.from_env()
         self._generate = generate
+        # texts -> P(worth keeping) each (None when not answered), for the
+        # "decision" mode.
+        self._decide = decide
 
     @property
     def enabled(self) -> bool:
@@ -247,6 +263,10 @@ class ImportanceRater:
             rating = self._rate_with_model(text, kind=kind or role)
             if rating is not None:
                 return rating, "llm"
+        if self.config.mode == "decision" and self._decide is not None:
+            rating = self._rate_with_decision_model([text])[0]
+            if rating is not None:
+                return rating, "decision"
         return heuristic_importance(text, role=role, kind=kind), "heuristic"
 
     def rate_many(
@@ -257,6 +277,37 @@ class ImportanceRater:
         Each item is ``{"text", "role"?, "kind"?, "host_asserted"?, "verified"?}``.
         """
         results: List[Tuple[Optional[float], str]] = [(None, "pending")] * len(items)
+        if self.config.mode == "decision" and self._decide is not None:
+            asked = [
+                index
+                for index, item in enumerate(items)
+                if not item.get("verified") and not item.get("host_asserted")
+            ]
+            ratings = self._rate_with_decision_model(
+                [str(items[index].get("text") or "") for index in asked]
+            )
+            answered = dict(zip(asked, ratings))
+            for index, item in enumerate(items):
+                if index not in answered:  # verified or host-asserted
+                    results[index] = self.rate(
+                        item.get("text"),
+                        role=item.get("role"),
+                        kind=item.get("kind"),
+                        host_asserted=bool(item.get("host_asserted")),
+                        verified=bool(item.get("verified")),
+                    )
+                elif answered[index] is not None:
+                    results[index] = (answered[index], "decision")
+                else:
+                    results[index] = (
+                        heuristic_importance(
+                            item.get("text"),
+                            role=item.get("role"),
+                            kind=item.get("kind"),
+                        ),
+                        "heuristic",
+                    )
+            return results
         pending: List[int] = []
         for index, item in enumerate(items):
             if (
@@ -294,6 +345,19 @@ class ImportanceRater:
         return results
 
     # -- model calls ---------------------------------------------------------
+
+    def _rate_with_decision_model(self, texts: List[str]) -> List[Optional[float]]:
+        if not texts:
+            return []
+        try:
+            ratings = list(self._decide([text[:2000] for text in texts]))
+        except Exception as exc:
+            logger.warning("Importance rating failed; using heuristic: %s", exc)
+            return [None] * len(texts)
+        return [
+            None if rating is None else min(1.0, max(0.0, float(rating)))
+            for rating in (ratings + [None] * len(texts))[: len(texts)]
+        ]
 
     def _rate_with_model(self, text: Any, *, kind: Optional[str]) -> Optional[float]:
         prompt = IMPORTANCE_PROMPT.format(

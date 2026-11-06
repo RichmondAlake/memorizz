@@ -15,20 +15,33 @@ An agent's ``reranker`` setting is one of:
 - ``"cohere"`` (``COHERE_API_KEY``): ``rerank-v3.5``.
 - ``"openai_decisions"`` (``OPENAI_API_KEY``): ``gpt-6-luna`` answers "is
   this relevant?" for every candidate in one request.
+- ``"huggingface"`` (``HF_TOKEN``): a cross-encoder served by Hugging Face
+  Inference Providers, ``cross-encoder/ms-marco-MiniLM-L6-v2`` unless another
+  model id follows the colon.
+- ``"d1"`` (on this machine), ``"liquid"`` (``LIQUID_API_KEY``) or ``"jev"``
+  (``TYPESAFE_API_KEY``): a decision model asked whether each memory gives
+  useful evidence for the request (see :mod:`memorizz.decision_models`).
 - ``"finetuned"``: a reranker or relevance model trained in MemoRizz, by run
   id.
+- Your own reranker: a function ``(query, texts) -> scores``, or an object
+  with ``predict(pairs)`` such as sentence-transformers' ``CrossEncoder``.
+  Scores are 0 to 1, higher is more relevant; any other range is squashed
+  with a sigmoid. It lives in this process, so a saved agent loaded
+  elsewhere has none until it is passed again.
 
-Write it as ``"voyage"``, ``"voyage:rerank-2.5-lite"``, ``"finetuned:<run
-id>"`` or a mapping. A hosted reranker adds one request to each turn that
+Write it as ``"voyage"``, ``"voyage:rerank-2.5-lite"``,
+``"huggingface:<model id>"``, ``"finetuned:<run id>"``, a mapping or the
+reranker itself. A hosted reranker adds one request to each turn that
 recalls memories; when it fails, recall keeps its own order.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import os
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +57,34 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
         "env": "OPENAI_API_KEY",
         "models": ("gpt-6-luna",),
     },
+    "huggingface": {
+        "title": "Hugging Face",
+        "env": "HF_TOKEN",
+        "models": ("cross-encoder/ms-marco-MiniLM-L6-v2",),
+    },
+    # Decision models asked "is this relevant?" (memorizz.decision_models).
+    "d1": {"title": "Liquid d1", "env": None, "models": ("LiquidAI/d1-2B",)},
+    "liquid": {
+        "title": "Liquid d1 (hosted)",
+        "env": "LIQUID_API_KEY",
+        "models": ("d1.1",),
+    },
+    "jev": {
+        "title": "TypeSafe Jev",
+        "env": "TYPESAFE_API_KEY",
+        "models": ("jev-1.14.0",),
+    },
 }
-KINDS = ("off", "finetuned", *PROVIDERS)
+#: Rerankers that are decision models, by their decision-model backend.
+DECISION_RERANKERS = ("d1", "liquid", "jev")
+KINDS = ("off", "finetuned", "custom", *PROVIDERS)
 TIMEOUT_SECONDS = 15
+# Hugging Face loads a model on its first request after a while idle; the
+# request waits for it (x-wait-for-model) rather than failing with a 503.
+HF_TIMEOUT_SECONDS = 30
+HF_INFERENCE_URL = "https://router.huggingface.co/hf-inference/models/{model}"
+# Texts per Hugging Face request; longer lists are sent in batches.
+HF_BATCH = 32
 
 Scorer = Callable[[str, List[str]], List[float]]
 
@@ -58,6 +96,10 @@ class RerankerConfig:
     provider: str
     model: Optional[str] = None
     run_id: Optional[str] = None
+    # A custom reranker's scorer, in this process only (never saved).
+    function: Optional[Callable[..., Any]] = field(
+        default=None, compare=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.provider not in KINDS:
@@ -73,6 +115,9 @@ class RerankerConfig:
             return value
         if value is False:
             return cls("off")
+        custom = _custom_scorer(value)
+        if custom is not None:
+            return cls("custom", model=_custom_name(value), function=custom)
         if isinstance(value, str):
             text = value.strip()
             if not text or text.lower() in {"default", "store", "follow"}:
@@ -117,10 +162,48 @@ class RerankerConfig:
             return "off"
         if self.provider == "finetuned":
             return f"fine-tuned · {self.run_id}"
+        if self.provider == "custom":
+            return f"custom · {self.model or 'reranker'}"
         return f"{PROVIDERS[self.provider]['title']} · {self.model_name}"
 
 
+def _custom_scorer(value: Any) -> Optional[Scorer]:
+    """``(query, texts) -> scores`` for a reranker passed as an object, or None
+    for a setting (a name, a mapping)."""
+    if isinstance(value, (str, bytes, Mapping, bool)) or value is None:
+        return None
+    predict = getattr(value, "predict", None)
+    if callable(predict):  # sentence-transformers CrossEncoder and alike
+        return lambda query, texts: predict([(query, text) for text in texts])
+    if callable(value):
+        return value
+    return None
+
+
+def _custom_name(value: Any) -> str:
+    name = getattr(value, "__name__", None)
+    if not name or name == "<lambda>":
+        name = getattr(value, "model_name", None) or type(value).__name__
+    return str(name)
+
+
+def _hf_token() -> str:
+    token = os.environ.get("HF_TOKEN", "").strip()
+    if not token:
+        try:  # a token saved by `hf auth login`
+            from huggingface_hub import get_token
+
+            token = (get_token() or "").strip()
+        except Exception:
+            token = ""
+    if not token:
+        raise ValueError("HF_TOKEN is required for the Hugging Face reranker")
+    return token
+
+
 def _key(provider: str) -> str:
+    if provider == "huggingface":
+        return _hf_token()
     env = PROVIDERS[provider]["env"]
     key = os.environ.get(env)
     if not key:
@@ -130,7 +213,9 @@ def _key(provider: str) -> str:
     return key
 
 
-def _from_results(results: List[Mapping[str, Any]], count: int) -> List[float]:
+def _from_results(
+    results: List[Mapping[str, Any]], count: int, key: str = "relevance_score"
+) -> List[float]:
     scores = [0.0] * count
     seen = set()
     for row in results:
@@ -138,9 +223,30 @@ def _from_results(results: List[Mapping[str, Any]], count: int) -> List[float]:
         if not 0 <= index < count or index in seen:
             raise ValueError("The reranker returned an unknown candidate")
         seen.add(index)
-        scores[index] = float(row["relevance_score"])
+        scores[index] = float(row[key])
     if len(seen) != count:
         raise ValueError("The reranker left candidates out")
+    return scores
+
+
+def _sigmoid(value: float) -> float:
+    if value >= 0:
+        return 1.0 / (1.0 + math.exp(-value))
+    exp = math.exp(value)
+    return exp / (1.0 + exp)
+
+
+def _unit_scores(values: Sequence[Any], count: int) -> List[float]:
+    """Scores from 0 to 1: a list outside that range is squashed with a
+    sigmoid, which keeps its order (recall blends relevance with recency and
+    importance, so the scale matters)."""
+    scores = [float(value) for value in values]
+    if len(scores) != count:
+        raise ValueError("The reranker returned the wrong number of scores")
+    if any(not math.isfinite(score) for score in scores):
+        raise ValueError("The reranker returned a score that is not a number")
+    if any(score < 0.0 or score > 1.0 for score in scores):
+        scores = [_sigmoid(score) for score in scores]
     return scores
 
 
@@ -194,17 +300,115 @@ def _decisions(model: str) -> Scorer:
     return score
 
 
+def _huggingface(model: str) -> Scorer:
+    """A Hugging Face ``text-ranking`` model on its hf-inference provider. It
+    returns cross-encoder logits, which become 0 to 1 with a sigmoid, the
+    reading these models are trained for."""
+
+    def score(query: str, texts: List[str]) -> List[float]:
+        import requests
+
+        token = _key("huggingface")
+        url = HF_INFERENCE_URL.format(model=model)
+        scores: List[float] = []
+        for start in range(0, len(texts), HF_BATCH):
+            batch = texts[start : start + HF_BATCH]
+            response = requests.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "x-wait-for-model": "true",
+                },
+                json={"inputs": {"query": query, "texts": batch}},
+                timeout=HF_TIMEOUT_SECONDS,
+            )
+            if not response.ok:
+                raise RuntimeError(
+                    f"Hugging Face reranker returned HTTP {response.status_code}"
+                    + _hf_error(response)
+                )
+            rows = response.json()
+            if not isinstance(rows, list):
+                raise ValueError("The Hugging Face reranker returned no scores")
+            logits = _from_results(rows, len(batch), key="score")
+            scores.extend(_sigmoid(value) for value in logits)
+        return scores
+
+    return score
+
+
+def _hf_error(response: Any) -> str:
+    """Hugging Face's own reason, such as an unknown model, kept short."""
+    try:
+        message = str((response.json() or {}).get("error") or "").strip()
+    except Exception:
+        return ""
+    return f": {message[:160]}" if message else ""
+
+
+def _decision_model(backend: str, model: Optional[str]) -> Scorer:
+    """A decision model asked, for each text, whether it gives useful
+    evidence for the query; P(yes) is the score."""
+
+    def score(query: str, texts: List[str]) -> List[float]:
+        from .decision_models import (
+            RELEVANT,
+            Decider,
+            DecisionModelConfig,
+            probability_yes,
+            relevance_state,
+        )
+
+        decider = Decider(DecisionModelConfig(backend, model))
+        answers = decider.decide_many(
+            [
+                (relevance_state(query, str(text)[:4000]), {"relevant": RELEVANT})
+                for text in texts
+            ]
+        )
+        scores = []
+        for answer in answers:
+            value = probability_yes(answer.get("relevant"))
+            if value is None:
+                raise ValueError("The decision model gave no relevance answer")
+            scores.append(value)
+        return scores
+
+    return score
+
+
+def _custom(function: Callable[..., Any]) -> Scorer:
+    def score(query: str, texts: List[str]) -> List[float]:
+        return _unit_scores(list(function(query, list(texts))), len(texts))
+
+    return score
+
+
 def scorer(config: RerankerConfig, provider: Any = None) -> Optional[Scorer]:
-    """``(query, texts) -> scores`` for a reranker setting, or None (off, or
-    a fine-tuned model that cannot be loaded here)."""
+    """``(query, texts) -> scores`` for a reranker setting, or None (off, a
+    custom reranker passed in another process, or a fine-tuned model that
+    cannot be loaded here)."""
     if config.provider == "off":
         return None
+    if config.provider == "custom":
+        if config.function is None:
+            logger.warning(
+                "The custom reranker %r is not in this process; pass it again "
+                "with reranker= to rerank",
+                config.model,
+            )
+            return None
+        return _custom(config.function)
     if config.provider == "voyage":
         return _voyage(config.model_name)
     if config.provider == "cohere":
         return _cohere(config.model_name)
     if config.provider == "openai_decisions":
         return _decisions(config.model_name)
+    if config.provider == "huggingface":
+        return _huggingface(config.model_name)
+    if config.provider in DECISION_RERANKERS:
+        return _decision_model(config.provider, config.model)
     if provider is None:
         return None
     from .finetune import reranking, routing
@@ -264,10 +468,52 @@ def reranker_for(
     return lambda texts: score(str(query), [str(t) for t in texts])
 
 
+def _local_ready() -> bool:
+    """torch and transformers are installed, so d1 can run here."""
+    import importlib.util
+
+    return all(
+        importlib.util.find_spec(name) is not None for name in ("torch", "transformers")
+    )
+
+
 def available(environ: Optional[Mapping[str, str]] = None) -> Dict[str, bool]:
     """Which hosted rerankers have a key set."""
     env = os.environ if environ is None else environ
-    return {name: bool(env.get(spec["env"])) for name, spec in PROVIDERS.items()}
+    keys = {
+        name: (bool(env.get(spec["env"])) if spec["env"] else _local_ready())
+        for name, spec in PROVIDERS.items()
+    }
+    if environ is None and not keys["huggingface"]:
+        try:  # or a token saved by `hf auth login`
+            keys["huggingface"] = bool(_hf_token())
+        except ValueError:
+            pass
+    return keys
+
+
+def rerank_rows(
+    rows: Sequence[Any],
+    rerank: Optional[Callable[[List[str]], List[float]]],
+    *,
+    text_of: Callable[[Any], str],
+) -> Optional[List[tuple]]:
+    """``(score, row)`` pairs, most relevant first, or None without a
+    reranker or when it fails (callers keep their own order)."""
+    if rerank is None or not rows:
+        return None
+    try:
+        scores = [float(value) for value in rerank([text_of(row) for row in rows])]
+    except Exception as exc:  # a broken reranker never breaks the search
+        logger.warning("Reranker failed; keeping the search order: %s", exc)
+        return None
+    if len(scores) != len(rows):
+        logger.warning(
+            "Reranker returned %d scores for %d rows", len(scores), len(rows)
+        )
+        return None
+    order = sorted(range(len(rows)), key=lambda index: (-scores[index], index))
+    return [(scores[index], rows[index]) for index in order]
 
 
 __all__ = [
@@ -275,6 +521,7 @@ __all__ = [
     "PROVIDERS",
     "RerankerConfig",
     "available",
+    "rerank_rows",
     "reranker_for",
     "scorer",
 ]

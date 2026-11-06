@@ -172,8 +172,8 @@
                 <p class="form-hint">When on, Gemma 4 / DeepSeek-R1 / Qwen3-thinking emit a separate reasoning trace before the final answer (shown in the playground's trace timeline). Off by default for snappier replies — thinking can take 30–60 s before any visible content on CPU-only setups.</p>
             </div>
             {% set memory_models = builder_context.memory_models if builder_context is defined and builder_context and builder_context.memory_models else {} %}
-            <details class="builder-subsection" id="memory-models" {% if background_model|default('') or reranker|default('') or memory_routing|default('') %}open{% endif %}>
-                <summary>Memory models<span class="builder-subsection-desc">The background model, the reranker and the memory router</span></summary>
+            <details class="builder-subsection" id="memory-models" {% if background_model|default('') or reranker|default('') or memory_routing|default('') or decision_model|default('') %}open{% endif %}>
+                <summary>Memory models<span class="builder-subsection-desc">The background model, the reranker, the memory router and the decision model</span></summary>
                 <div class="section-body">
                     <input type="hidden" name="memory_models_form" value="1">
                 <div class="form-grid" id="background-model">
@@ -230,6 +230,32 @@
                                 Route what the user says after each turn
                             </label>
                             <p class="form-hint">Files each memory in the store it belongs in: facts about people and things in entity memory, policies and reference facts in the knowledge base, nothing for small talk. Runs after the reply, so turns are not slower, and adds a <code>remember</code> tool for facts the agent finds itself.</p>
+                        </div>
+                    </div>
+                    <div class="form-grid" id="decision-model">
+                        <div class="form-group">
+                            <label for="decision_model">Decision model</label>
+                            <select id="decision_model" name="decision_model">
+                                {% for group in memory_models.get('decision_model', []) %}
+                                {% if group.label %}<optgroup label="{{ group.label }}">{% endif %}
+                                {% for option in group.options %}
+                                <option value="{{ option.value }}" {% if option.value == (decision_model|default('')) %}selected{% endif %}>{{ option.label }}</option>
+                                {% endfor %}
+                                {% if group.label %}</optgroup>{% endif %}
+                                {% endfor %}
+                            </select>
+                            <p class="form-hint">A small model that answers a yes-or-no or multiple-choice question about memory, with a probability for each answer. It is asked only where you switch it on. If it fails, the agent carries on as it would without it.</p>
+                        </div>
+                        <div class="form-group decision-features">
+                            <span class="form-label">Ask it</span>
+                            {% set features_on = decision_features|default([]) %}
+                            {% for feature in memory_models.get('decision_features', []) %}
+                            <label class="checkbox-group">
+                                <input type="checkbox" name="decision_{{ feature.value }}" value="on" {% if feature.value in features_on %}checked{% endif %}>
+                                {{ feature.label }}
+                            </label>
+                            {% endfor %}
+                            <p class="form-hint">Each switch adds a request where it runs: one per turn before reading or recalling, one per close cached answer or stored note compared. Tool selection offers only the tool it picks. The consolidation check runs when memory consolidation does (Memory upkeep); the cached-answer check needs the semantic cache.</p>
                         </div>
                     </div>
                 </div>

@@ -130,7 +130,10 @@ class _Background:
     def generate_text(self, prompt: str, instructions: Optional[str] = None) -> str:
         self.prompts.append(prompt)
         facts = []
-        if "durable facts the text" in prompt and "allergic to peanuts" in prompt:
+        if (
+            "the facts the text below states" in prompt
+            and "allergic to peanuts" in prompt
+        ):
             facts = [
                 {
                     "entity": "Ines",
@@ -270,7 +273,7 @@ def test_capture_is_off_without_a_background_model_or_when_opted_out(
     agent.run(FACTS_MESSAGE, memory_id="memory-1", thread_id="t2", user_id="u1")
     assert agent.wait_for_memory_upkeep(timeout=10)
     assert _facts(agent.memory_provider, user_id="u1") == {}
-    assert not [p for p in background.prompts if "durable facts the text" in p]
+    assert not [p for p in background.prompts if "the facts the text below states" in p]
     agent.close()
 
 

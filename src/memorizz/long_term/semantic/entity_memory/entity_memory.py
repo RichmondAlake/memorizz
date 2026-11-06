@@ -257,6 +257,9 @@ class EntityAttribute(BaseModel):
     #: Set or confirmed by the user. A write that is not pinned (the chat
     #: model, entity capture, memory routing) never replaces a pinned value.
     pinned: bool = False
+    #: What kind of memory capture took it for: ``preference``, ``fact`` or
+    #: ``event``. None when it was not said.
+    kind: Optional[str] = None
     #: Earlier values of this attribute, newest first, each with its
     #: ``value``, ``confidence``, ``source``, ``thread_id`` and ``updated_at``
     #: (at most ``ATTRIBUTE_HISTORY_LIMIT``). Prompts and vectors never read it.
@@ -2244,6 +2247,7 @@ class EntityMemory:
             for field, empty in (
                 ("thread_id", None),
                 ("pinned", False),
+                ("kind", None),
                 ("history", []),
             ):
                 if payload.get(field) == empty:

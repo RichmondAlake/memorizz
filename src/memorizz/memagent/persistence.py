@@ -178,6 +178,8 @@ def save_agent(agent):
             memory_consolidation=(
                 agent.memory_consolidation.to_dict()
                 if agent.memory_consolidation.enabled
+                # Relations also apply to passes run by hand.
+                or getattr(agent.memory_consolidation, "relations", None) is not None
                 else None
             ),
             persona_learning=(
@@ -194,6 +196,11 @@ def save_agent(agent):
             reranker=(
                 agent.reranker.to_dict()
                 if getattr(agent, "reranker", None) is not None
+                else None
+            ),
+            decision_model=(
+                agent.decision_model.to_dict()
+                if getattr(agent, "decision_model", None) is not None
                 else None
             ),
             entity_policy=(
@@ -571,11 +578,15 @@ def _serialize_semantic_cache_config(agent):
             if hasattr(agent.cache_manager.cache_instance, "config"):
                 config = agent.cache_manager.cache_instance.config
                 if hasattr(config, "__dict__"):
+                    from ..decision_models import saved_setting
+
                     config_dict = config.__dict__.copy()
                     # Convert enums to strings for serialization
                     for key, value in config_dict.items():
                         if hasattr(value, "value"):  # Enum
                             config_dict[key] = value.value
+                    # A verifier function is saved by name only.
+                    config_dict["verifier"] = saved_setting(config_dict.get("verifier"))
                     return config_dict
     except Exception as e:
         logger.warning(f"Failed to serialize semantic cache config: {e}")
@@ -784,6 +795,7 @@ def _saved_settings(saved_memagent: Any) -> Dict[str, Any]:
         "persona_learning": _dict_or_none(field("persona_learning")),
         "memory_routing": _dict_or_none(field("memory_routing")),
         "reranker": _dict_or_none(field("reranker")),
+        "decision_model": _dict_or_none(field("decision_model")),
         "entity_policy": _dict_or_none(field("entity_policy")),
         "tools": field("tools"),
         "persona": field("persona"),
@@ -1110,9 +1122,39 @@ def _refresh_memory_models(agent, memory_routing, reranker, entity_policy) -> No
     from .memory_routing import MemoryRoutingConfig
 
     agent.memory_routing = MemoryRoutingConfig.from_value(memory_routing)
-    agent.reranker = RerankerConfig.from_value(reranker)
+    saved = RerankerConfig.from_value(reranker)
+    current = getattr(agent, "reranker", None)
+    # A custom reranker is saved by name only; the one passed to this agent
+    # in this process stays.
+    if not (
+        saved is not None
+        and saved.provider == "custom"
+        and isinstance(current, RerankerConfig)
+        and current.provider == "custom"
+        and current.function is not None
+    ):
+        agent.reranker = saved
     agent.entity_policy = EntityPolicy.from_value(entity_policy)
     agent._register_memory_routing_tools()
+
+
+def _refresh_decision_model(agent, decision_model) -> None:
+    from ..decision_models import DecisionModelConfig
+
+    saved = DecisionModelConfig.from_value(decision_model)
+    current = getattr(agent, "decision_model", None)
+    # A custom decision model is saved by name only; the function passed to
+    # this agent in this process stays.
+    if (
+        saved is not None
+        and saved.backend == "custom"
+        and isinstance(current, DecisionModelConfig)
+        and current.backend == "custom"
+        and current.function is not None
+    ):
+        return
+    if saved != current:
+        agent.with_decision_model(saved)
 
 
 def _refresh_persona(agent, persona) -> None:
@@ -1218,6 +1260,9 @@ def _refresh_policies(agent, tool_result, context, completion, retrieval) -> Non
         router.max_attempts_per_call = max(1, int(policy.max_tool_attempts_per_call))
         router.sticky_limit = max(0, int(policy.sticky_tool_limit))
         router.stable_under_tokens = max(0, int(policy.stable_tool_list_tokens))
+        router.min_similarity = policy.tool_min_similarity
+        router.selector = agent._tool_selector()
+        router.selection_margin = policy.tool_selection_margin
 
 
 def _refresh_tool_cache(agent, value) -> None:
@@ -1415,6 +1460,7 @@ _REFRESH_STEPS: Tuple[Tuple[Tuple[str, ...], Callable[..., None]], ...] = (
     (("llm_config", "context_window_tokens"), _refresh_model),
     (("background_llm_config", "memory_consolidation"), _refresh_background),
     (("memory_routing", "reranker", "entity_policy"), _refresh_memory_models),
+    (("decision_model",), _refresh_decision_model),
     (("tools",), _code_owned),
     (("persona",), _refresh_persona),
     (("persona_learning",), _refresh_persona_learning),

@@ -197,6 +197,7 @@ agent.capture_entity_facts(
 - `"sentence"` — packs sentences up to `chunk_size` characters
 - `"paragraph"` — splits on blank lines
 - `"semantic"` — embeds each sentence and breaks at the largest topic shifts, tuned by `breakpoint_percentile` (default 95; lower = more chunks)
+- `"decision"` — asks a decision model, at each gap between sentences, whether a new topic starts there (`decision_model="d1"`, `boundary_threshold=0.5`); sections that share vocabulary still separate. See [Decision Models](../guides/decision-models.md#chunking)
 - `"none"` — stores the corpus as a single document
 - A callable `(corpus, **kwargs) -> list[str]` for custom logic
 

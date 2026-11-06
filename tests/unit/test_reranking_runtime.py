@@ -116,9 +116,19 @@ def test_the_agent_passes_its_own_reranker_to_recall(monkeypatch):
     assert captured == {"config": RerankerConfig("voyage"), "agent_id": "a1"}
 
 
-def test_available_reports_keys():
+def test_available_reports_keys(monkeypatch):
+    monkeypatch.setattr(reranking, "_local_ready", lambda: False)
     assert reranking.available({"VOYAGE_API_KEY": "x"}) == {
         "voyage": True,
         "cohere": False,
         "openai_decisions": False,
+        "huggingface": False,
+        "d1": False,
+        "liquid": False,
+        "jev": False,
     }
+    assert reranking.available({"HF_TOKEN": "hf_x"})["huggingface"] is True
+    assert reranking.available({"TYPESAFE_API_KEY": "t"})["jev"] is True
+    # d1 runs on this machine: it needs torch and transformers, not a key.
+    monkeypatch.setattr(reranking, "_local_ready", lambda: True)
+    assert reranking.available({})["d1"] is True

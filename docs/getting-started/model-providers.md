@@ -173,6 +173,10 @@ and should not come from model output or an unvalidated user field.
   Test instruction precedence with the exact model used in deployment.
 - Set `raise_on_provider_error=True` on `run_stream()` when a service must
   receive an exception after the typed terminal event.
+- By default a failed turn answers with "I encountered an error: ...". Build
+  the agent with `raise_errors=True`, or pass `run(..., raise_errors=True)`
+  for one call, to get the exception instead. Running out of steps is still
+  an answer.
 
 ## Verify resolved state
 

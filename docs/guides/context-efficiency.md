@@ -253,6 +253,7 @@ The scopes:
 | `conversation_scope` | `memory` (every thread of the memory), `thread`, `disabled` | `memory` |
 | `knowledge_base_scope` | `memory` (the attached knowledge bases), `namespace` (only `knowledge_base_namespaces`), `disabled` | `memory` |
 | `entity_scope` | `memory` (facts shared by the memory's threads), `thread` (a thread's facts stay in it, both written and recalled), `disabled` (not recalled automatically; the entity tools still work) | `memory` |
+| `workflow_scope` | `memory` (past workflows from every thread of the memory and user), `thread` (this thread's only), `disabled` | `disabled` |
 
 A string works too:
 
@@ -265,6 +266,41 @@ A string works too:
 - `"memory"`, `"namespace"` and `"disabled"` are the other shortcuts.
 
 The learning control plane's evidence pack follows the same policy.
+
+### Search only the memory a request needs
+
+`RetrievalPolicy(read_routing=True)` asks a decision model, before recall,
+whether the request needs episodic, semantic or procedural memory, and skips
+the stores it doesn't need: "What's 2 + 2?" searches nothing. See
+[Decision Models](decision-models.md#before-recall-read-routing).
+
+### Recall past workflows
+
+An agent with workflow memory stores each turn that calls tools: the request,
+each tool call with its arguments and result, and the outcome. With
+`workflow_scope` set, recall offers those workflows alongside the other
+memories, one line each:
+
+```python
+agent = MemAgent(
+    ...,
+    memory_types=[MemoryType.CONVERSATION_MEMORY, MemoryType.WORKFLOW_MEMORY],
+    retrieval_policy=RetrievalPolicy(workflow_scope="memory"),
+)
+```
+
+```text
+• [workflow 2026-11-05; id=…] Earlier task "Will it rain in Lisbon during my
+  trip?": weather_outlook({"place": "Lisbon", …}) worked;
+  exchange_rate({"base": "GBP", …}) failed: ECB feed timed out. Outcome: failure.
+```
+
+Tool results are left out, because they can be long and go stale. A workflow
+that a learned skill covers isn't recalled, since the skill is shown instead.
+Workflows stay with the memory and user they ran for. With a thread-scoped or
+sealed policy, recall uses only the current thread's workflows, and a sealed
+thread's workflows are never recalled in another thread. They compete for
+`max_items` with the other memories.
 
 ### How much text each memory keeps
 

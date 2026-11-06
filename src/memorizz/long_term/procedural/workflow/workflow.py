@@ -60,6 +60,77 @@ def workflow_embedding_text(row: Dict[str, Any]) -> str:
     ).strip()
 
 
+#: Characters of each tool call's arguments, and of a failure's reason, the
+#: recalled text keeps.
+_RECALL_ARGUMENT_CHARS = 80
+#: Tool calls the recalled text names; more are counted.
+_RECALL_TOOL_LIMIT = 8
+
+
+def _loaded(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return None
+    return value
+
+
+def _short(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def workflow_recall_text(row: Dict[str, Any]) -> str:
+    """One line for a past workflow recalled into the prompt: the request,
+    each tool call with its arguments and whether it worked, and the outcome.
+    Results are left out: they can be long and go stale."""
+    steps = _loaded(row.get("steps"))
+    calls: List[str] = []
+    if isinstance(steps, dict):
+        for name, step in steps.items():
+            if not isinstance(step, dict):
+                continue
+            tool = str(name).split(": ", 1)[-1]
+            arguments = step.get("arguments")
+            if isinstance(arguments, dict) and arguments:
+                shown = _short(
+                    json.dumps(arguments, ensure_ascii=False, default=str),
+                    _RECALL_ARGUMENT_CHARS,
+                )
+            else:
+                shown = ""
+            outcome = _loaded(step.get("tool_outcome"))
+            failed = step.get("error") is not None or (
+                isinstance(outcome, dict) and outcome.get("ok") is False
+            )
+            status = (
+                f"failed: {_short(step.get('error'), _RECALL_ARGUMENT_CHARS)}"
+                if failed and step.get("error")
+                else "failed"
+                if failed
+                else "worked"
+            )
+            calls.append(f"{tool}({shown}) {status}")
+    shown_calls = calls[:_RECALL_TOOL_LIMIT]
+    if len(calls) > _RECALL_TOOL_LIMIT:
+        shown_calls.append(f"and {len(calls) - _RECALL_TOOL_LIMIT} more calls")
+    outcome = row.get("outcome")
+    if isinstance(outcome, dict):
+        outcome = outcome.get("value")
+    elif isinstance(outcome, WorkflowOutcome):
+        outcome = outcome.value
+    request = _short(
+        row.get("user_query") or row.get("description") or row.get("name"), 200
+    )
+    text = f'Earlier task "{request}"' if request else "Earlier task"
+    if shown_calls:
+        text += ": " + "; ".join(shown_calls)
+    if outcome:
+        text += f". Outcome: {outcome}"
+    return text + "."
+
+
 # Workflow outcome enum
 class WorkflowOutcome(Enum):
     SUCCESS = "success"

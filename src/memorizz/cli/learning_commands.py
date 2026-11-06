@@ -303,7 +303,7 @@ def consolidate(
     raw_json: bool = typer.Option(False, "--json"),
 ):
     """Plan (and with --apply, make) a memory consolidation; every change is reversible."""
-    from ..learning.consolidation import MemoryConsolidator
+    from ..learning.consolidation import ConsolidationConfig, MemoryConsolidator
 
     if apply and not (approved_by or "").strip():
         raise typer.BadParameter("--apply needs --approved-by")
@@ -315,6 +315,10 @@ def consolidate(
             agent_id=agent_id,
             model=None if no_model else _consolidation_model(record, model),
             knowledge_base_ids=record.get("knowledge_base_ids") or (),
+            config=ConsolidationConfig.from_value(
+                record.get("memory_consolidation") or None
+            ),
+            decision_model=record.get("decision_model") or None,
         )
         plan = consolidator.plan(
             memory_id=memory_id,
