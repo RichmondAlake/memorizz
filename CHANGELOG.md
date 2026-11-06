@@ -1,5 +1,114 @@
 # Changelog
 
+## 0.17.24 — 2026-11-06
+
+### Added
+
+- **Decision models.** A decision model answers a yes-or-no or
+  multiple-choice question about a piece of text, with a probability for
+  every answer. MemoRizz can now ask one wherever a similarity score and a
+  fixed threshold decided before. `MemAgent(decision_model=...)` (or
+  `with_decision_model`) takes `"d1"` (`LiquidAI/d1-2B` on this machine),
+  `"liquid"`, `"jev"`, `"openai_decisions"`, `"finetuned:<run id>"`, `"llm"`
+  (the background model), `"auto"` or your own function. Each feature below is
+  off until you turn it on, `True` uses the agent's model, and when the model
+  fails the feature falls back to what MemoRizz did before. The numbers are
+  from the decision-model notebooks, d1 against what MemoRizz did before.
+  Guide: [Decision models](docs/guides/decision-models.md).
+  - **An extraction gate.** `MemoryRoutingConfig(extraction_gate=True)` asks
+    whether a message holds anything worth keeping, and what kind, before any
+    model reads it for facts. It skipped 23 of 60 extraction calls.
+  - **Procedures.** Fact extraction also keeps procedures the user states
+    ("To deploy, run the tests, tag the release, then post in #releases"): as
+    the user's skill when the agent recalls skills, else as a knowledge-base
+    note in the namespace `procedures`. Said again, the new version replaces
+    the old. Facts also carry their kind (preference, fact or event).
+  - **Read routing.** `RetrievalPolicy(read_routing=True)` asks whether a
+    request needs episodic, semantic or procedural memory, and searches only
+    those: right stores 0.45 to 0.67, two-store requests 0 to 8 of 12.
+  - **A semantic cache verifier.** `SemanticCacheConfig(verifier=True)` checks
+    a close entry's answer against the new question before serving it: 47 of
+    48 lookups right, against 28 for cosine at 0.9. A question that repeats a
+    cached one, apart from case, spacing and closing punctuation, is served
+    without a check.
+  - **Write dedupe.** `MemoryRoutingConfig(dedupe_writes=True)` compares a new
+    knowledge-base note with the closest stored ones. The same fact is not
+    written again; one it refines or contradicts is hidden and kept,
+    `superseded_by` the new note; another fact about the same subject is
+    linked.
+  - **Consolidation relations.** `ConsolidationConfig(relations=True)` does the
+    same for the agent's own stored notes in every pass: actions right 0.20 to
+    0.88, contradictions caught 0 to 10 of 10.
+  - **Tool selection.** `ContextPolicy(tool_selection=True)` picks the tool a
+    request needs, or none, from the five closest: right tool first 0.71 to
+    0.96, wrong tool calls 4 to 0.
+  - **Decision chunking.** `chunking_strategy="decision"` cuts where the model
+    says a new topic starts. It found 5 of 7 topic changes, against 3 for
+    percentile chunking, with the same retrieval hit rate.
+  - **Decision rerankers and importance.** `reranker="d1"`, `"liquid"` or
+    `"jev"` asks whether each memory helps answer the request. The importance
+    mode `"decision"` rates a memory by P(worth keeping).
+  - **On the agent form.** *Model → Memory models* has a Decision model picker
+    and a switch for each feature that asks it. Agent templates keep both.
+- **A Hugging Face reranker.** `reranker="huggingface"` reranks with
+  `cross-encoder/ms-marco-MiniLM-L6-v2` on Hugging Face Inference Providers,
+  using `HF_TOKEN` or a token saved by `hf auth login`.
+  `"huggingface:<model id>"` picks another `text-ranking` model. Hugging Face
+  returns logits, which become 0 to 1 scores.
+  Guide: [Memory routing](docs/guides/memory-routing.md#hugging-face).
+- **Your own reranker.** `reranker=` also takes a function
+  `(query, texts) -> scores`, or an object with `predict(pairs)` such as
+  sentence-transformers' `CrossEncoder`. It runs in your process and is saved
+  by name only.
+- **A relevance cut-off for tool routing.**
+  `ContextPolicy(tool_min_similarity=0.25)` offers a tool only when it is at
+  least that similar to the request, so an unrelated request is offered no
+  tools at all. Before, routing always offered the `tool_top_k` closest
+  tools. MongoDB now reports toolbox scores as cosine similarity, like Oracle
+  and the file store.
+  Guide: [Tools and approvals](docs/guides/tools-and-approvals.md#offer-no-tool-to-an-unrelated-request).
+- **Recall of past workflows.** `RetrievalPolicy(workflow_scope="memory")`, or
+  `"thread"`, puts past workflows among the recalled memories, one line each:
+  the request, each tool call and whether it worked, and the outcome. It is off
+  by default. It stays with the memory and user the workflow ran for, keeps to
+  the current thread under a thread-scoped or sealed policy, and never recalls
+  a sealed thread's workflows elsewhere.
+  Guide: [Context efficiency](docs/guides/context-efficiency.md#recall-past-workflows).
+- **Page text from Tavily.** `TavilyProvider(config={"include_raw_content": True})`
+  returns each result's page text in `result.content`, as well as the snippet,
+  cut to `max_content_chars`.
+- **`raise_errors`.** `MemAgent(raise_errors=True)`, or `run(..., raise_errors=True)`
+  for one call, raises a failure instead of answering with "I encountered an
+  error: ...".
+
+### Changed
+
+- **The semantic cache serves an answer from cosine similarity 0.9, not
+  0.78.** At 0.78 it served today's weather for "tomorrow" and Q2 revenue for
+  Q3. With a verifier the default is 0.7. Saved agents keep the threshold they
+  were saved with.
+- A tool selector turns off the whole-list shortcut
+  (`stable_tool_list_tokens`), which would otherwise send every tool.
+- `knowledge_base_lookup` uses the agent's reranker. With one, it fetches more
+  passages than it returns, reranks them and returns each with its
+  `rerank_score`.
+
+### Fixed
+
+- An importance rating that a model gave as a probability ("0.73") was read
+  as no rating at all. It is now taken as it is.
+- Entity capture kept nothing from a message such as "For this trip only, I
+  want a window seat", because it skipped anything temporary. Facts that hold
+  for a trip, booking or project are now kept on that thing, and the user's
+  own preference stays as it was. Passing remarks ("I'm exhausted today") are
+  still skipped.
+- `entity_memory_upsert` failed with "entity_id was not found in the active
+  entity scope" when the model passed an ID it hadn't looked up, and the
+  message reached the answer. With a name, the update now lands on that name
+  inside the conversation's own memory, and a name passed as the ID is found
+  by name. With neither, the model is told how to find the entity. Another
+  tenant's record still can't be reached.
+
 ## 0.17.23 — 2026-11-02
 
 ### Changed
