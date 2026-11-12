@@ -1,5 +1,314 @@
 # Changelog
 
+## 0.17.25 — 2026-11-12
+
+### Added
+
+- **A Mac app.** `MemoRizz.app` (in `MemoRizz.dmg`, from the website's
+  *Download for Mac* button) shows the local UI in its own window. It runs
+  `memorizz ui` and stops it on quit, or shows a UI already running, and
+  offers to install MemoRizz with uv when it isn't installed. It is a
+  universal binary for macOS 13 or later, signed but not yet notarized, so
+  the first launch needs *Open Anyway* in System Settings → Privacy &
+  Security. `packaging/macos/build.sh` builds it.
+  Guide: [Local UI](docs/getting-started/local-ui.md#the-mac-app).
+
+- **Search on every page of the local UI.** The field in the new top bar
+  (⌘K on a Mac, Ctrl+K elsewhere) finds any page, any agent in the connected
+  store and actions such as *Create agent* and *Switch theme*. The bar stays
+  in view as a page scrolls, and section indexes and detail panes pin under
+  it. With nothing typed, search lists the pages you opened last.
+- **Keyboard shortcuts for the local UI.** Press `?` (or the keyboard button
+  in the top bar) for the list, which includes the shortcuts of the page you
+  are on. Press `g` then a letter to open a page: `g a` Agents, `g t`
+  Observability, `g s` Settings and so on. Neither fires while you type in a
+  field.
+- **Change from the period before, on the Overview.** Runs, success rate,
+  run time p95, model calls, tokens and spend each show how they moved
+  against the same length of time before the selected range. The figure is
+  left out when the earlier period holds no runs or was not read in full.
+
+- **Tool descriptions that improve with use.** `agent.review_tools()` reads
+  an agent's tool calls and proposes a revision for each tool that needs
+  one: a usage note for a calling error that repeats, and example requests
+  for wordings that should have reached the tool (it served them although
+  routing would not have offered it, or the user had to ask again). The
+  model proposes and the code checks each item against the calls it cites.
+  Revisions wait for `apply_tool_revision`, record the ranks they changed,
+  and `undo_tool_revision` takes one back. SDK only for now.
+  Guide: [Tool learning](docs/guides/tool-learning.md).
+- **An agent can read its own records.** `agent.workflow_runs()`,
+  `agent.tool_calls()` and `agent.learned_skills()` return what that agent
+  wrote, oldest first, with filters for conversation, outcome, tool, time
+  and count. A store is shared, and until now the only read was
+  `provider.list_all`, which returns every agent's records and left the
+  filtering to the caller. `provider.list_for_agent(memory_type, agent_id)`
+  is the scoped read underneath.
+- **The refine cycle verifies, propagates, reviews tools and re-embeds.**
+  Four jobs join the cycle, making eleven: notes are checked against the
+  conversations they cite and flagged when unsupported
+  (`agent.unverified_notes()`); skills and notes that still state a
+  replaced value are flagged after the entity jobs; tool revisions are
+  proposed (`refine_tool_review`); and records that changed are embedded
+  again. None of them changes text without a person. A proposed standing
+  rule is listed in the report and waits for its owner.
+- **Entity facts are confirmed, dated twice and followed.**
+  - *Confirmations.* A stored value that is stated again is no longer a
+    no-op: the fact gains `confirmations` and `last_seen`, without changing
+    its value, source or dates. Consolidation plans it as `reinforce_fact`.
+  - *Two clocks.* Each value keeps when it became true (`valid_from`) and
+    when memory recorded it (`recorded_at`). A write marked
+    `correction: True`, or one with the same `valid_from`, is a correction
+    of the record and not a change in the world.
+    `EntityMemory.value_as_of(attribute, when, known_at=...)` answers "what
+    was the limit in September" and "what did we believe then".
+  - *Stale references.* When a value is superseded, the skills and notes
+    that still mention the old one are flagged, never rewritten:
+    `agent.stale_references()`, `resolve_stale_reference`,
+    `dismiss_stale_reference`.
+- **Tool learning: "not for this" lines, example calls and usage flags.**
+  From requests that went to one tool and had to be served by another, a
+  review proposes "Not for …; use <tool>" on the first. It builds an
+  example call shape from successful calls, with formats in place of
+  values. `agent.tool_usage_flags()` lists tools that are offered and never
+  called, or never offered at all. A learned example request replaces a
+  synthetic one worded the same, and at the cap displaces the oldest
+  synthetic one instead of being refused.
+- **Persona learning can read a team, and propose standing rules.**
+  `across_users` reviews every user's conversations and requires quotes
+  from `min_users` people, so one person's taste is not a pattern.
+  `standing_rules` adds a tier between guardrails and goals: a rule is
+  proposed from corrections people keep making, is never applied on its
+  own, needs a named owner (`rule_owners`), may not go against a guardrail,
+  and can be undone. Both are off by default.
+- **Five notebooks on continual learning in token space**, in
+  `examples/continual_learning`: workflows to skills, persona evolution,
+  entity evolution, toolbox augmentation and evolution, and the refine
+  cycle. All five run on one fictional insurer, Calderwood Insurance, whose
+  people, systems, codes and limits live in `calderwood_world.py`.
+
+- **Verified outcomes gate skill promotion.** A run your application
+  confirmed (through `workflow_outcome_evaluator` or
+  `record_task_outcome(verified=True)`) is stored as `outcome_verified`, and
+  `min_verified_outcomes` is a fifth promotion gate. It is off by default
+  (0); set it to 2 once the host reports outcomes.
+- **A holdout on active skills.** One matching thread in ten
+  (`holdout_rate`, 0.1) runs without the skill, so each skill has a
+  with-and-without figure. A skill whose side is lower by more than chance
+  explains (`holdout_flag_z`, 1.0) after 20 runs a side gets a review flag; nothing is demoted on it. The share is set per agent with `agent.set_holdout()`,
+  `memorizz learning holdout`, the Skills page or `holdout_rate` on
+  `memorizz_update_agent`. `holdout_exempt` keeps a
+  skill out, and a skill the user stated is exempt.
+- **Duplicate skills are rejected at validation**, when a new skill's
+  applicability embedding is within 0.85 of a live one. The report names the
+  existing skill.
+- **Persona guardrails.** `Persona(guardrails=[...])` and
+  `agent.set_persona_guardrails(...)` keep up to 12 rules that are rendered
+  first in the system prompt and that no learning path can write: the
+  model's `update_persona` tool, persona learning and the refine cycle are
+  refused.
+- **Entity facts keep their history, with dates.** A replaced value stays
+  with `valid_from` and `valid_to`, 20 per attribute
+  (`EntityPolicy(attribute_history_limit=...)`).
+- **Aliases from merges.** The name of a record merged into another becomes
+  an alias of the survivor, and a later mention of it resolves there.
+- **Refine cycle.** `MemAgent(refine_cycle=True)` runs upkeep as one ordered cycle
+  (`agent.refine()`, `memorizz learning refine`, `/refine`, the
+  `memorizz_refine` MCP tool) in place of the separate turn counters, and
+  `agent.schedule_refine_cycle()` puts it on the automation worker. Each cycle
+  stores one report: per job its status, changes, tokens and the plans
+  waiting for review, which now survive a restart.
+  Guide: [Refine cycle](docs/guides/refine-cycle.md).
+- **The local UI shows all of it**: a fifth gate and a verified marker on
+  workflow trajectories, a *With and without* panel on active skills,
+  guardrails on personas, a dated timeline with weaker writes and aliases on
+  entities, and a *Refine cycles* section on the Learning control plane.
+- **`eval/learning_loop/mechanisms.py`** runs each change before and after on
+  generated scenarios, without a model.
+- **Your name, once.** The person button in the local UI's top bar keeps
+  your name in the browser. It fills the approver field of every approval,
+  review and undo form, and signs your changes in the activity log. The same
+  menu has a *Compact tables* switch for more rows on screen.
+- **Activity log.** *Admin → Activity* lists every change made through the
+  UI: who, what, which record and when, with filters and CSV export. The
+  Overview shows the newest six. Chat messages are not listed, and message
+  text, form values and secrets are never written. The log is
+  `~/.memorizz/audit/ui_activity.jsonl` (`MEMORIZZ_UI_ACTIVITY_LOG` moves it).
+- **Budget meter in the sidebar.** With a monthly budget set, every page
+  shows this month's spend against it at the foot of the sidebar.
+- **Run drawer.** Selecting a recent run opens its status, duration, calls,
+  tokens, cost and IDs in a side drawer, with links to the full trace and
+  the agent, instead of leaving the page.
+- **Observability opens on recent runs.** The Traces tab lists the last 7
+  days of runs first. How the trace data was read (coverage, query path,
+  host integrations) moved into a *Data source and coverage* section.
+- **Row menus and CSV export.** Agent and memory rows have a *⋮* menu, and
+  every table page has *Export CSV* for the rows shown.
+- **Choose what the Overview compares with**: the period before, the same
+  time yesterday or the same time last week. Charts say what they cover and
+  how they moved, and the Tools and Models tables show a trend line per row.
+- **Customize the Overview.** Hide or reorder its sections; the layout is
+  kept in the browser.
+- **Preview pane in the playground.** A reply that contains an HTML page, an
+  SVG, Markdown, JSON, CSV or a long block of code gets an *Open preview*
+  button. The pane shows it rendered beside the conversation, with the
+  source, copy and download. HTML runs in a sandbox with no access to
+  MemoRizz, and its scripts stay off until you turn them on.
+- **The Playground opens on a composer.** Type a message, pick the agent
+  that answers, and the conversation opens in that agent's playground with
+  the message sent. Suggestions, the agents you used last and the full agent
+  table follow. An empty conversation shows the agent's mark and the same
+  suggestions.
+- **An inbox in the local UI's top bar.** The bell counts what is waiting
+  for a person and links to each: tool calls and harness runs held for
+  approval, consolidation plans and persona changes to review, automations
+  whose last run failed and failure alerts that are firing.
+- **Switch store without the connect page.** Select the store name in the
+  top bar or the sidebar to list the FileSystem stores on this computer and
+  connect to another.
+- **First steps on a new store.** The Overview lists five steps from an
+  empty store to a scheduled agent and ticks each as it is done. It goes
+  away once the store is in use, or when you hide it.
+- **Filter chips and saved views on table pages.** Each filter in use shows
+  as a removable chip. *Views* keeps the filters, sort order and time range
+  under a name, in the browser.
+- **Actions on several rows.** Tick agents to add them to favorites, copy
+  their IDs or delete them (the agent records only: memories, conversations
+  and traces are kept). Tick memory records to copy or download them as
+  JSON, and two recent runs of one agent to compare them.
+- **Shares on the Overview.** Each agent, tool and model row shows its part
+  of the window's spend (or of runs and calls when nothing is priced).
+
+### Changed
+
+- **Learned example requests are no longer shown to the model.** They are
+  retrieval keys: routing searches them, and the "Also asked for as" line
+  that put a user's wording in the prompt is off by default. Turn it back on
+  with `agent.configure_tool_learning(show_learned_examples=True)`. Tool
+  learning has not been in a release, so nothing shipped changes.
+
+- **`Toolbox.register_tool(augment=True)` makes one checked model call.**
+  It used to make three and store the replies as they came, which could
+  leave conversational text in a tool's description and example requests.
+  The description and six example requests now come from one JSON reply
+  that is checked; the docstring is kept as written and the argument schema
+  comes from the code. A tool row is embedded from its description and
+  example requests as well as its name and arguments.
+
+- **A source rule decides which entity value stands.** A write replaces the
+  current value only when its source is trusted at least as much: 3 pinned
+  or written by the host through the SDK, 2 stated by a user, 1 inferred,
+  from a tool or by consolidation. A weaker write that disagrees is kept in
+  the history as not applied. **This changes behaviour:** a value written
+  through `EntityMemory.upsert_entity` is level 3 and is no longer replaced
+  by what a user says later; pass `source_level=2` to seed a value that
+  conversation may update.
+- **`holdout_rate` defaults to 0.1**, so after upgrading one matching thread
+  in ten runs without an active skill. Set it to 0 to keep every matching
+  thread on the skill.
+- **Oracle:** migration `014_learning_spec_columns.sql` adds
+  `workflow_memory.outcome_verified`, `workflow_memory.skills_held_out` and
+  `personas.guardrails`. The provider adds them at startup when missing.
+
+- **The local UI's navigation is grouped.** The sidebar lists its pages under
+  Build, Memory, Connect, Operate and Admin, the first item is named
+  Overview like its page, and the store, the theme switch and Disconnect
+  share one row at its foot. Folded to icons, each item names itself on
+  hover and a group opens the sidebar. Summary figures use one numeral style
+  on every page.
+- **The top bar says where you are.** It shows the sidebar group and area a
+  page belongs to (*Memory / Continual learning*), and the area links back
+  to its first page. Page headers lost the label above the title and are
+  shorter, so tables and charts start higher on every page.
+- **Empty pages point to the next step.** Empty states carry an icon, and an
+  empty memory type links to the playground and to import.
+- **Evalground's setup panels are tabs.** Suggested experiments, datasets,
+  the agent evaluation, Terminal-Bench and history share one row; select a
+  tab to open it. The header and the start cards no longer repeat each
+  other, and an empty Automations page shows one *Create automation*
+  button.
+- **Setting a monthly budget** is one line on Usage & cost until you open
+  it, so the charts are not pushed down.
+- **The Learning control plane leads with its events.** Memory consolidation
+  and Persona learning fold to one row each above the event table, showing
+  their schedule and how many plans wait for review. A panel opens itself
+  when a plan is waiting or a link points at it. With the event pane open,
+  Compile streams and the forgetting plan stack instead of sharing a row, so
+  the stream table no longer runs past its panel.
+- **The theme follows your system** until you choose light or dark, and the
+  connect and sign-in pages now follow it too. They were redrawn to match
+  the rest of the UI.
+- **Disconnect asks first**, and the UI no longer opens browser pop-ups.
+  Removing an MCP server or its credentials, deleting fine-tuning data or
+  models and downloading or removing a local model ask in the page and name
+  what is kept. Calling an MCP tool from the MCP page takes its JSON
+  arguments in a dialog that refuses invalid JSON, and a call held for
+  approval shows the reason, the tool, the arguments hash and the expiry
+  beside the approver's identity, with *Approve and run*, *Reject* and
+  *Decide later*. Approving in the playground and renaming a fine-tuned
+  model use the same dialog.
+- **`memorizz ui` opens the UI in your browser** once the server is running.
+  `--no-open` or `MEMORIZZ_UI_OPEN_BROWSER=false` skips that, and it is
+  skipped over SSH, in CI and on a Linux machine without a display.
+
+### Fixed
+
+- **A fact aimed at a record its own consolidation plan merged away** no
+  longer fails or starts a stray record. It lands on the copy the merge
+  kept, once.
+- **An older statement no longer replaces a newer value when the model
+  spells the entity its own way.** Consolidation compares when the user
+  said something with when the stored value was written, but looked the
+  stored value up under the model's spelling ("counter_fraud_unit" for
+  "Counter Fraud Unit") and found nothing to compare with, so Monday's
+  "sits in Leeds" could replace Wednesday's "moved to Manchester". It now
+  looks the value up under the name memory holds.
+- **A value an entity has already replaced no longer comes back under a
+  new attribute name.** Consolidation could re-add Tuesday's "Leeds" as
+  `location` beside `office_location = Manchester`. A stated fact whose
+  value the record has superseded since it was said is now left out.
+- **A write below host level no longer changes an entity's type.** Turn
+  capture could relabel a record from "team" to "organization", which kept
+  two records for one team from being merged.
+- **On Oracle, a run's originating conversation is now stored**
+  (migration 015, which also adds the column for standing rules). Without
+  it, tool learning could not see a request that had to be made twice.
+- **A distilled skill keeps an argument that is the same in every run.**
+  The distiller is told to write shapes, never values, so it also dropped
+  constants a procedure depends on (a status code such as `Q12`), and the
+  skill was rejected or promoted unusable. Short argument values identical
+  across every successful run are now listed for it as constants to keep.
+  Values long enough to be a leaked reference stay forbidden.
+- **The skill judge is no longer asked about failed runs it was not
+  shown.** With only successful runs in front of it, it could reject a
+  sound skill for not handling failures it had no evidence of.
+
+- **New chat no longer reports "Could not load thread history".** A
+  conversation is saved with its first message; until then the playground
+  now shows it as empty instead of as a failed load.
+- **The phone menu's links work again.** Below 768px the page dimmer sat
+  above the open side menu and took every click.
+- **A light-theme page no longer flashes dark while it loads**, and
+  scrolling past the end of a page no longer shows a black edge. Date
+  pickers, menus and scrollbars now match the chosen theme rather than the
+  system's.
+- **The harness page on a phone or a narrow window** could grow to hundreds
+  of screens when a long session was selected, because its step list had no
+  height limit under the run list. The steps now scroll inside the list.
+- **A Claude Code run's token count on the harness page** left out the
+  prompt tokens read from and written to the cache, so the detail pane could
+  show a few hundred tokens for a run the Compare view put at tens of
+  thousands. Both now count the same way.
+- **The harness Compare view** no longer lists the judge, evaluation time and
+  evaluation cost rows as dashes before any run has been judged.
+- **Ctrl+C stops `memorizz ui` at once.** With a page open (the playground's
+  live turns, an Oracle container's logs), the first Ctrl+C used to wait for
+  the page's event stream to close, up to five minutes, and a second one
+  force-quit with two tracebacks of `CancelledError` ("Exception in ASGI
+  application"). The streams now end on the first Ctrl+C, a request still
+  running after three seconds is cancelled, and stopping prints no
+  traceback.
+
 ## 0.17.24 — 2026-11-06
 
 ### Added
