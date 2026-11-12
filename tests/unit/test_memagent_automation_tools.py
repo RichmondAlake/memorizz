@@ -213,7 +213,7 @@ def test_create_automation_timezone_cascade(monkeypatch):
 
     # 1. Explicit timezone wins
     _patch_store(monkeypatch)
-    agent = MemAgent(memory_provider=object(), default_timezone="US/Eastern")
+    agent = MemAgent(memory_provider=object(), default_timezone="America/New_York")
     job = agent.create_automation(
         name="T1",
         schedule_type="one_shot",
@@ -224,13 +224,13 @@ def test_create_automation_timezone_cascade(monkeypatch):
 
     # 2. Falls back to agent default
     _patch_store(monkeypatch)
-    agent2 = MemAgent(memory_provider=object(), default_timezone="US/Pacific")
+    agent2 = MemAgent(memory_provider=object(), default_timezone="America/Los_Angeles")
     job2 = agent2.create_automation(
         name="T2",
         schedule_type="one_shot",
         query_template="Hi",
     )
-    assert job2.timezone == "US/Pacific"
+    assert job2.timezone == "America/Los_Angeles"
 
     # 3. Falls back to env var
     _patch_store(monkeypatch)

@@ -14,7 +14,9 @@ permissions:
 
 jobs:
   browser:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to Ubuntu 26.04, which the pinned Playwright
+    # has no Chromium build for.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
