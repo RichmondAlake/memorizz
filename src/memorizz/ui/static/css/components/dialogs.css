@@ -31,6 +31,79 @@
     color: var(--text-secondary);
 }
 
+.mz-dialog--prompt {
+    width: min(520px, calc(100vw - 32px));
+    max-width: none;
+}
+
+.mz-dialog-facts {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 6px 14px;
+    margin: 0 0 16px;
+    padding: 12px 14px;
+    font-size: 0.85rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+}
+
+.mz-dialog-facts dt {
+    color: var(--text-muted);
+}
+
+.mz-dialog-facts dd {
+    margin: 0;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+
+.mz-dialog-label {
+    display: block;
+    margin: 0 0 6px;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+
+.mz-dialog-input {
+    display: block;
+    width: 100%;
+    min-height: 36px;
+    padding: 8px 10px;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 0.9rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    resize: vertical;
+}
+
+.mz-dialog-input.mono {
+    font-family: var(--console-mono, ui-monospace, monospace);
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+
+.mz-dialog-input:focus-visible {
+    border-color: var(--accent-primary);
+    outline: 2px solid color-mix(in srgb, var(--accent-primary) 35%, transparent);
+    outline-offset: 0;
+}
+
+.mz-dialog-input[aria-invalid="true"] {
+    border-color: var(--accent-danger);
+}
+
+.mz-dialog-error {
+    min-height: 18px;
+    margin: 6px 0 10px;
+    color: var(--accent-danger);
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+
 .mz-dialog-actions {
     display: flex;
     justify-content: flex-end;

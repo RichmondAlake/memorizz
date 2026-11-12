@@ -1,0 +1,13 @@
+flowchart LR
+    subgraph DAY["The day"]
+        T[Transcripts] --- M[(Memory as written:<br/>duplicates, stale skills,<br/>old notes, loose ends)]
+    end
+    DAY --> C{{Refine cycle:<br/>eleven jobs, one order}}
+    C --> G1["Check, then tidy the facts<br/>1 Verify notes<br/>2 Entities<br/>3 Stated facts<br/>4 Stale references"]
+    G1 --> G2["Tools and skills<br/>5 Tool review<br/>6 Skill staleness<br/>7 Promotion<br/>8 Skill review"]
+    G2 --> G3["Identity<br/>9 Persona learning"]
+    G3 --> G4["Housekeeping<br/>10 Compact and re-embed<br/>11 Retention"]
+    G4 --> R[/One report/]
+    R --> A[Applied to memory]
+    R --> F[Flagged:<br/>a person reads]
+    R --> W[Waiting:<br/>a person approves]

@@ -1,0 +1,12 @@
+flowchart TD
+    A["Two handlers relay<br/>a Desk Lead's correction"] --> B["The review looks<br/>for corrections"]
+    B --> C{"Real lines, written after<br/>a reply, by two people?"}
+    C -- "no" --> X["Nothing proposed"]
+    C -- "yes" --> D{"Sells, leaks, names a person<br/>or undercuts a guardrail?"}
+    D -- "yes" --> X
+    D -- "no" --> E["Proposal waits<br/>(not in the prompt)"]
+    E --> F{"Is the approver<br/>a rule owner?"}
+    F -- "no" --> W["Refused:<br/>keeps waiting"]
+    F -- "yes" --> G["Standing rule,<br/>new persona version"]
+    G --> H["In every prompt: after the<br/>guardrails, before the goals"]
+    G -. "undo" .-> I["Rule removed,<br/>another new version"]

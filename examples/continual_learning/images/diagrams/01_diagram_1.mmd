@@ -1,0 +1,14 @@
+flowchart LR
+    R[Agent run] --> W[(Workflow memory)]
+    W --> C[Canonicalise into<br/>trajectory classes]
+    C --> G{Gates: repeats,<br/>succeeds, varied wording,<br/>confirmed, recent?}
+    G -- no --> W
+    G -- yes --> D[Distil and validate<br/>a SKILL.md]
+    D --> S[Shadow:<br/>stored, not injected]
+    S -- a person activates --> A[Active skill]
+    A --> I[Injected into<br/>matching turns]
+    I --> R
+    A --> M{Monitor:<br/>still succeeding?}
+    M -- yes --> A
+    M -- no --> X[Demoted: raw workflows<br/>recalled again]
+    X --> W

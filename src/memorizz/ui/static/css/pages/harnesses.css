@@ -1366,6 +1366,18 @@ details[open].panel.hx-launch > summary {
     list-style: none;
 }
 
+/* Stacked under the run list (narrow windows) the detail pane has no height
+   of its own, so a long session's steps scroll inside the list instead of
+   stretching the page by thousands of rows. */
+@media (max-width: 1100px) {
+    .fleet-pane .hx-traj > .hx-traj-list {
+        max-height: 70vh;
+        padding-right: 4px;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+}
+
 .hx-traj-step {
     position: relative;
     display: grid;

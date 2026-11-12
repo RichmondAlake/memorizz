@@ -1859,6 +1859,8 @@ async def agent_live_turns(
     tail = LiveTail(agent_id, memory_id.strip() or None)
     deadline = time.monotonic() + max(0.0, min(wait, 300.0))
 
+    from ..shutdown import requested as stopping
+
     async def events():
         yield "retry: 2000\n\n"
         beat = time.monotonic()
@@ -1866,7 +1868,8 @@ async def agent_live_turns(
             for event in await run_in_threadpool(tail.poll):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             now = time.monotonic()
-            if now >= deadline or await request.is_disconnected():
+            # Ctrl+C ends the stream at once: the server waits for it.
+            if now >= deadline or stopping() or await request.is_disconnected():
                 return
             if now - beat >= 15:
                 yield ": keep-alive\n\n"

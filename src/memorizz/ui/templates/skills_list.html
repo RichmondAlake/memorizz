@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}Learned skills - Memorizz{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/pages/learning.css?v=11">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/learning.css?v=12">{% endblock %}
 
 {% block content %}
 {% from '_ui.html' import page_header, empty_state, id_chip %}
@@ -146,6 +146,63 @@
                 <div><dt title="The skill was in context but the run took a different path">Deviations</dt><dd class="{{ 'is-warn' if skill.deviations else '' }}">{{ skill.deviations }}</dd></div>
                 <div><dt title="Success rate frozen at promotion time">Baseline</dt><dd>{% if skill.baseline.success_rate is defined %}{{ '%.0f'|format(skill.baseline.success_rate * 100) }}%{% else %}—{% endif %}</dd></div>
             </dl>
+
+            {% if skill.status == 'active' %}
+            {% set h = skill.holdout %}
+            <h3 class="fleet-detail-title">With and without</h3>
+            <div class="lw-holdout{% if h.flag %} is-flagged{% endif %}">
+                {% for side, label in (('with', 'With the skill'), ('without', 'Without it')) %}
+                <div class="lw-holdout-side">
+                    <span class="lw-holdout-label">{{ label }}</span>
+                    <strong>{{ h[side].label }}</strong>
+                    <span class="lw-holdout-bar" role="img" aria-label="{{ label }}: {{ h[side].label }} success over {{ h[side].runs }} runs"><span style="width: {{ h[side].percent }}%"></span></span>
+                    <span class="lw-holdout-runs">{{ h[side].successes }} of {{ h[side].runs }} run{{ '' if h[side].runs == 1 else 's' }}</span>
+                </div>
+                {% endfor %}
+                <div class="lw-holdout-result">
+                    <span class="lw-holdout-label">Difference</span>
+                    <strong class="{{ 'is-bad' if h.flag else ('is-good' if h.difference is not none and h.difference > 0 and h.enough else '') }}">{{ h.difference_label }}</strong>
+                    <span class="pill{{ '' if h.verified else ' pill--warning' }}" title="{{ 'Counts only runs whose outcome your application confirmed.' if h.verified else 'Your application has not confirmed outcomes on both sides, so each run\'s own result is used.' }}">{{ 'Verified' if h.verified else 'Unverified' }}</span>
+                </div>
+            </div>
+            {% if h.flag %}
+            <p class="lw-note lw-note--bad">Review this skill: with at least {{ h.min_runs }} runs on each side, requests do better without it by more than chance would explain. Nothing is demoted on this figure; demote it above if you agree.</p>
+            {% elif h.exempt %}
+            <p class="lw-note">Exempt from the holdout{% if skill.stated_by_user %}, because the user stated this procedure{% endif %}: it is injected on every matching thread, so there is no "without" side to compare.</p>
+            {% elif not h.rate_setting %}
+            <p class="lw-note">The holdout is off for this agent, so nothing is being withheld to compare against. Turn it on under Holdout settings below.</p>
+            {% elif not h.enough %}
+            <p class="lw-note">{{ '%.0f'|format(h.rate_setting * 100) }}% of matching threads run without this skill, so it can be compared. The figure counts once each side has {{ h.min_runs }} runs.</p>
+            {% endif %}
+            <form method="post" action="/continual-learning/skills/{{ skill.skill_id }}/holdout-exempt" class="lw-holdout-form">
+                <input type="hidden" name="exempt" value="{{ '0' if h.exempt else '1' }}">
+                <button type="submit" class="btn btn-sm" title="{{ 'Let the holdout withhold this skill on a share of threads again' if h.exempt else 'For a skill that must never be withheld, such as one that touches payments or safety' }}">{{ 'Include in the holdout' if h.exempt else 'Exempt from the holdout' }}</button>
+            </form>
+            {% if skill.agent_id %}
+            <details class="lw-holdout-settings">
+                <summary>Holdout settings for {{ skill.agent_label }}</summary>
+                <form method="post" action="/continual-learning/agents/{{ skill.agent_id }}/holdout" class="lw-holdout-fields">
+                    <label>
+                        <span>Threads that run without a skill</span>
+                        <span class="lw-holdout-input"><input type="number" name="rate_percent" min="0" max="100" step="1" value="{{ '%g'|format(h.rate_percent) }}" required><span aria-hidden="true">%</span></span>
+                        <small>10% is the default. 0 turns the holdout off.</small>
+                    </label>
+                    <label>
+                        <span>Runs needed on each side</span>
+                        <span class="lw-holdout-input"><input type="number" name="min_runs" min="1" step="1" value="{{ h.min_runs }}" required></span>
+                        <small>Before a skill can be flagged.</small>
+                    </label>
+                    <label>
+                        <span>Flag margin</span>
+                        <span class="lw-holdout-input"><input type="number" name="flag_z" min="0" max="5" step="0.1" value="{{ '%g'|format(h.flag_z) }}" required></span>
+                        <small>Standard errors. 0 flags any lower figure; higher flags fewer.</small>
+                    </label>
+                    <p class="lw-note">Applies to every skill of this agent.</p>
+                    <button type="submit" class="btn btn-sm btn-primary">Save holdout settings</button>
+                </form>
+            </details>
+            {% endif %}
+            {% endif %}
 
             {% if skill.status == 'shadow' %}
             <h3 class="fleet-detail-title">Shadow evaluation</h3>

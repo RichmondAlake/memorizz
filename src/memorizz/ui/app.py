@@ -1080,6 +1080,10 @@ def create_app(
         try:
             with history_scope:
                 response = await call_next(request)
+            if request.method.upper() not in _SAFE_METHODS:
+                from .activity import record as record_activity
+
+                record_activity(request, response.status_code, principal)
             if path.startswith("/traces") and response.status_code in {401, 403}:
                 audit_trace_view(
                     request, "trace_access_denied", content_mode="metadata"
@@ -1103,6 +1107,9 @@ def create_app(
     from .routers.timers import router as timers_router
 
     app.include_router(timers_router)
+    from .routers.shell_api import router as shell_api_router
+
+    app.include_router(shell_api_router)
 
     from .routers.failures import router as failures_router
 
@@ -1353,6 +1360,61 @@ def create_app(
             context = _connect_context(request, provider_type, error, fields)
             return templates.TemplateResponse("connect.html", context)
 
+    @app.get("/activity", response_class=HTMLResponse)
+    @app.get("/activity.csv")
+    async def activity_page(request: Request):
+        """Changes made through this UI, newest first."""
+        from . import activity
+        from . import dashboard as dash
+        from .trace_access import current_principal
+
+        if current_principal.get().restricted:
+            raise HTTPException(status_code=403, detail="Not available")
+        rows = activity.recent(activity.MAX_READ)
+        if request.url.path.endswith(".csv"):
+            import csv
+            import io
+
+            from fastapi.responses import Response
+
+            out = io.StringIO()
+            writer = csv.writer(out)
+            writer.writerow(["timestamp", "actor", "area", "action", "target", "path"])
+            for row in rows:
+                writer.writerow(
+                    [
+                        row.get(key, "")
+                        for key in (
+                            "timestamp",
+                            "actor",
+                            "area",
+                            "action",
+                            "target",
+                            "path",
+                        )
+                    ]
+                )
+            return Response(
+                out.getvalue(),
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": 'attachment; filename="memorizz-activity.csv"'
+                },
+            )
+        return templates.TemplateResponse(
+            "activity.html",
+            {
+                "request": request,
+                "provider_type": _state["provider_type"],
+                "rows": rows,
+                "log_path": str(activity.log_path()),
+                "areas": sorted({row.get("area", "Other") for row in rows}),
+                "actors": sorted({row["actor"] for row in rows}),
+                "active_page": "activity",
+                **dash.template_helpers(),
+            },
+        )
+
     @app.get("/disconnect")
     async def disconnect():
         """Disconnect from the current provider."""
@@ -1366,6 +1428,7 @@ def create_app(
         load: bool = False,
         start: Optional[str] = None,
         end: Optional[str] = None,
+        compare: str = "previous",
     ):
         """Show live run health for the platform, then its inventory."""
         if not _state["provider"]:
@@ -1384,7 +1447,10 @@ def create_app(
             load=load,
             start=start,
             end=end,
+            compare_to=compare,
         )
+        from . import activity
+
         return templates.TemplateResponse(
             "dashboard.html",
             {
@@ -1394,6 +1460,8 @@ def create_app(
                 "embedding_check": _state.get("embedding_check") or {},
                 "schema_note": _state.get("schema_note"),
                 "stats": stats,
+                "getting_started": dash.getting_started(stats),
+                "recent_activity": activity.recent(6),
                 "active_page": "dashboard",
                 **context,
                 **dash.template_helpers(),
@@ -2436,21 +2504,32 @@ def _get_memory_stats() -> Dict[str, int]:
     return stats
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8765, startup_connect="env"):
+def run_server(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    startup_connect="env",
+    open_browser: Optional[bool] = None,
+):
     """Run the Memorizz UI server.
 
     ``startup_connect`` is what to connect to before the first page loads:
     ``"env"`` (the default) for the store the environment names, a dict from
     ``memorizz ui`` flags, or None to start on the connect page.
+    ``open_browser`` opens the UI in the browser once it is listening; None
+    does so unless ``MEMORIZZ_UI_OPEN_BROWSER=false``, over SSH, in CI or on
+    a Linux machine without a display (see :mod:`memorizz.ui.shutdown`).
     """
-    import uvicorn
+    from .shutdown import browser_url, browser_wanted, serve
 
     app = create_app(startup_connect=startup_connect)
     app.state.port = port
     app.state.announce_startup = True
+    opening = browser_wanted(open_browser)
     print("\n🧠 Memorizz Local UI")
-    print(f"   Running at: http://{host}:{port}")
+    print(f"   Running at: {browser_url(host, port)}")
     if app.state.read_only_mode:
         print("   Read-only: changes are turned off")
+    if opening:
+        print("   Opening it in your browser (memorizz ui --no-open to skip)")
     print("   Press Ctrl+C to stop\n", flush=True)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    serve(app, host, port, open_browser=opening)

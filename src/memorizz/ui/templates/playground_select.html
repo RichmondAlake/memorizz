@@ -1,25 +1,81 @@
 {% extends "base.html" %}
 
 {% block title %}Playground - Memorizz{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/pages/playground-select.css?v=2">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/playground-select.css?v=3">{% endblock %}
 
 {% block content %}
 {% from '_ui.html' import page_header, empty_state %}
 {% set l = launcher %}
-{% call page_header('Playground', 'Choose an agent to open an interactive session with its memory, tools and trace timeline.', 'Agents') %}
-    <a class="btn" href="/agents/new" data-mutates>Create agent</a>
-{% endcall %}
-
 {% if l.agents %}
-<div class="fleet-tape pg-tape" role="list" aria-label="Agent activity">
-    <div role="listitem"><span>Agents</span><strong>{{ l.total }}</strong></div>
-    <div role="listitem"><span>Used in 24 hours</span><strong class="{{ 'is-good' if l.used_day else '' }}">{{ l.used_day }}</strong></div>
-    <div role="listitem"><span>Used in 7 days</span><strong>{{ l.used_week }}</strong></div>
-    <div role="listitem"><span>Threads</span><strong>{{ l.threads }}</strong></div>
-    <div role="listitem"><span>Models</span><strong>{{ l.models }}</strong></div>
-    <div role="listitem" class="fleet-tape-meta"><span>Last conversation</span><strong>{{ relative_time(l.last_activity, generated_at) if l.last_activity else '—' }}</strong></div>
-</div>
+{#- A chat home: say what you want, pick who answers, and the conversation
+    opens in that agent's playground with the message already sent. -#}
+{% set first = l.agents[0] %}
+<section class="chat-home" aria-labelledby="chat-home-title">
+    <span class="chat-home-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 3a3 3 0 0 0-3 3v.3A3.7 3.7 0 0 0 4 9.7V10a4 4 0 0 0 1.2 2.9A4 4 0 0 0 4 16v.3A3.7 3.7 0 0 0 6 19.7V20a3 3 0 0 0 3 3"/>
+            <path d="M15 3a3 3 0 0 1 3 3v.3A3.7 3.7 0 0 1 20 9.7V10a4 4 0 0 1-1.2 2.9A4 4 0 0 1 20 16v.3a3.7 3.7 0 0 1-2 3.4V20a3 3 0 0 1-3 3"/>
+            <path d="M9 12h6"/><path d="M12 3v18"/>
+        </svg>
+    </span>
+    <h1 id="chat-home-title">What should <span id="chat-home-name">{{ first.name }}</span> work on?</h1>
+    <p class="chat-home-sub">Send a first message and the conversation opens with the agent's memory, tools and trace beside it.</p>
 
+    <form class="chat-home-composer" id="chat-home-form" action="/agents/{{ first.agent_id }}/playground" method="get">
+        <label for="chat-home-input" class="visually-hidden">Message</label>
+        <textarea id="chat-home-input" name="prompt" rows="2" placeholder="Message {{ first.name }}…" autofocus data-mutates></textarea>
+        <div class="chat-home-row">
+            <label class="chat-home-agent" title="The agent that answers">
+                <span class="visually-hidden">Agent</span>
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 8V4.5M9.5 13h.01M14.5 13h.01"/></svg>
+                <select id="chat-home-agent" aria-label="Agent">
+                    {% for agent in l.agents %}<option value="{{ agent.agent_id }}" data-name="{{ agent.name }}" data-model="{{ agent.model }}">{{ agent.name }}</option>{% endfor %}
+                </select>
+            </label>
+            <span class="chat-home-model mono" id="chat-home-model">{{ first.model or '' }}</span>
+            <span class="chat-home-spacer"></span>
+            <a class="chat-home-open" id="chat-home-open" href="/agents/{{ first.agent_id }}/playground">Open without a message</a>
+            <button type="submit" class="chat-home-send" id="chat-home-send" data-mutates aria-label="Send message" title="Send (Enter)" disabled>
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5.5 11.5 12 5l6.5 6.5"/></svg>
+            </button>
+        </div>
+    </form>
+
+    <div class="chat-home-starters" role="group" aria-label="Suggestions">
+        {% set starters = [
+            ('What do you remember about me?', 'M12 8v4l2.5 2.5M3.5 12a8.5 8.5 0 1 0 2.6-6.1M3.5 4.5v4h4'),
+            ('Which tools can you use?', 'M14.5 6.5a4 4 0 0 0-5.4 5.1L4 16.7V20h3.3l5.1-5.1a4 4 0 0 0 5.1-5.4l-2.6 2.6-2.4-.6-.6-2.4z'),
+            ('Summarize our previous conversations.', 'M5 6h14M5 12h14M5 18h9'),
+        ] %}
+        {% for text, icon in starters %}
+        <button type="button" class="chat-home-starter" data-starter="{{ text }}"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ icon }}"/></svg>{{ text }}</button>
+        {% endfor %}
+    </div>
+</section>
+
+{% set recent = l.agents|selectattr('last_run')|list %}
+{% if recent %}
+<section class="chat-home-recent" aria-labelledby="chat-home-recent-title">
+    <h2 class="chat-home-heading" id="chat-home-recent-title">Jump back in</h2>
+    <div class="chat-home-cards">
+        {% for agent in recent[:4] %}
+        <a class="chat-home-card" href="/agents/{{ agent.agent_id }}/playground">
+            <span class="chat-home-avatar" aria-hidden="true">{{ agent.name[:1]|upper }}</span>
+            <span class="chat-home-card-text">
+                <strong>{{ agent.name }}</strong>
+                <span>{{ relative_time(agent.last_run, generated_at) }} · {{ agent.threads }} conversation{{ '' if agent.threads == 1 else 's' }}</span>
+            </span>
+            <span class="chat-home-card-model mono">{{ agent.model or '—' }}</span>
+        </a>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+
+<div class="chat-home-all">
+    <h2 class="chat-home-heading">All agents <span>{{ l.total }}</span></h2>
+    <a class="btn btn-sm" href="/agents/new" data-mutates>Create agent</a>
+</div>
 <div class="fleet-bar">
     <label class="fleet-search">
         <kbd aria-hidden="true">/</kbd>
@@ -68,6 +124,7 @@
     <p class="fleet-none" id="pg-none" hidden>No agents match this filter.</p>
 </div>
 {% else %}
+{{ page_header('Playground', 'Choose an agent to open an interactive session with its memory, tools and trace timeline.') }}
 {{ empty_state('No agents yet', 'Create an agent, or save one from Python with agent.save(), to start a playground session.', '/agents/new', 'Create agent') }}
 {% endif %}
 
@@ -77,6 +134,54 @@ document.addEventListener('DOMContentLoaded', function() {
     if (!table) return;
     const open = function(row) { window.location.href = '/agents/' + encodeURIComponent(row.dataset.key) + '/playground'; };
     MemorizzMonitor.init({ table: 'pg-table', keys: { Enter: open } });
+
+    // The composer: the picker says who answers, Enter sends.
+    const form = document.getElementById('chat-home-form');
+    const input = document.getElementById('chat-home-input');
+    const picker = document.getElementById('chat-home-agent');
+    const send = document.getElementById('chat-home-send');
+    const AGENT_KEY = 'memorizz_ui_home_agent';
+    function sync() {
+        const option = picker.options[picker.selectedIndex];
+        const base = '/agents/' + encodeURIComponent(picker.value) + '/playground';
+        form.action = base;
+        document.getElementById('chat-home-open').href = base;
+        document.getElementById('chat-home-name').textContent = option.dataset.name;
+        document.getElementById('chat-home-model').textContent = option.dataset.model || '';
+        input.placeholder = 'Message ' + option.dataset.name + '…';
+        send.disabled = !input.value.trim();
+    }
+    try {
+        const remembered = localStorage.getItem(AGENT_KEY);
+        if (remembered && Array.from(picker.options).some(function(option) { return option.value === remembered; })) picker.value = remembered;
+    } catch (_) {}
+    picker.addEventListener('change', function() {
+        try { localStorage.setItem(AGENT_KEY, picker.value); } catch (_) {}
+        sync();
+        input.focus();
+    });
+    input.addEventListener('input', function() {
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, 220) + 'px';
+        send.disabled = !input.value.trim();
+    });
+    input.addEventListener('keydown', function(event) {
+        if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+            event.preventDefault();
+            if (input.value.trim()) form.requestSubmit();
+        }
+    });
+    form.addEventListener('submit', function(event) {
+        if (!input.value.trim()) event.preventDefault();
+    });
+    document.querySelectorAll('.chat-home-starter').forEach(function(button) {
+        button.addEventListener('click', function() {
+            input.value = button.dataset.starter;
+            input.dispatchEvent(new Event('input'));
+            input.focus();
+        });
+    });
+    sync();
     // A launcher: one click (or tap) on a row opens that agent's playground.
     table.tBodies[0].addEventListener('click', function(event) {
         if (event.target.closest('a, button')) return;

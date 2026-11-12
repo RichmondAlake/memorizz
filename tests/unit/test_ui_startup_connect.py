@@ -294,4 +294,5 @@ def test_run_local_read_only_sets_the_switch_the_server_reads(home, monkeypatch)
         "host": "127.0.0.1",
         "port": 8796,
         "startup_connect": None,
+        "open_browser": None,
     }

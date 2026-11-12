@@ -1,0 +1,25 @@
+sequenceDiagram
+    autonumber
+    participant P as Tom (handler)
+    participant A as Ada (MemAgent)
+    participant S as Skill store
+    participant L as Chat model
+    participant T as Beacon, Ringfence, Tally
+    participant W as Workflow memory
+    participant B as Background model
+
+    P->>A: "CW-431803 is agreed. Pay it."
+    A->>S: is there an active skill for this request?
+    S-->>A: SKILL.md (or nothing)
+    A->>L: instruction + skill + request + tool schemas
+    loop until the model stops calling tools
+        L-->>A: call this tool
+        A->>T: run it
+        T-->>A: result
+    end
+    A-->>P: reply
+    A->>W: store the run: steps, results, outcome graded by your evaluator
+    Note over W,B: Later, off the user's turn
+    W->>B: the runs of one trajectory class that cleared the gates
+    B-->>S: a SKILL.md, checked by code, stored in shadow
+    Note over S: A person activates it. Only then does step 3 return it.

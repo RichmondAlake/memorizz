@@ -66,6 +66,13 @@ def _default_stats() -> Dict[str, Any]:
         # capped by the monitor's drift window. Avoids re-querying workflow
         # memory to compute the rolling success rate.
         "recent_outcomes": [],
+        # The holdout: outcomes of matching runs with the skill injected and
+        # with it withheld. ``verified_*`` count only runs whose outcome a
+        # host or an evaluator confirmed.
+        "holdout": {
+            "with": _default_holdout_side(),
+            "without": _default_holdout_side(),
+        },
         # Passive SHADOW evaluation is deliberately separate from active
         # attribution.  These counters are reconciled from the auditable
         # ``Workflow.shadow_evaluations`` records, never from
@@ -82,6 +89,65 @@ def _default_stats() -> Dict[str, Any]:
     }
 
 
+def _default_holdout_side() -> Dict[str, int]:
+    return {"runs": 0, "successes": 0, "verified_runs": 0, "verified_successes": 0}
+
+
+def holdout_summary(
+    stats: Optional[Dict[str, Any]], min_runs: int = 20, flag_z: float = 1.0
+) -> Dict[str, Any]:
+    """The with-and-without figure for one skill.
+
+    Verified outcomes are used when both sides have some; otherwise the
+    run's own outcome, labelled unverified. ``flag`` is set when each side
+    has at least ``min_runs`` runs and the skill's side is lower by more
+    than chance explains: ``flag_z`` standard errors of the difference
+    (0 flags any negative difference; higher flags fewer skills that make
+    no difference and misses more that do harm). A
+    person then decides, nothing is demoted on this figure.
+    """
+    holdout = (stats or {}).get("holdout") or {}
+    sides = {
+        name: {**_default_holdout_side(), **(holdout.get(name) or {})}
+        for name in ("with", "without")
+    }
+    verified = all(side["verified_runs"] > 0 for side in sides.values())
+    summary: Dict[str, Any] = {"verified": verified}
+    for name, side in sides.items():
+        runs = side["verified_runs"] if verified else side["runs"]
+        successes = side["verified_successes"] if verified else side["successes"]
+        summary[name] = {
+            "runs": int(runs),
+            "successes": int(successes),
+            "rate": (successes / runs) if runs else None,
+        }
+    with_side, without_side = summary["with"], summary["without"]
+    summary["enough"] = (
+        with_side["runs"] >= min_runs and without_side["runs"] >= min_runs
+    )
+    summary["difference"] = (
+        with_side["rate"] - without_side["rate"]
+        if with_side["rate"] is not None and without_side["rate"] is not None
+        else None
+    )
+    margin = 0.0
+    if summary["difference"] is not None and flag_z > 0:
+        # Standard error of the difference between two success rates, with
+        # one pseudo-run on each side so 0% and 100% still carry some doubt.
+        variance = 0.0
+        for side in (with_side, without_side):
+            rate = (side["successes"] + 0.5) / (side["runs"] + 1)
+            variance += rate * (1 - rate) / side["runs"]
+        margin = float(flag_z) * variance**0.5
+    summary["margin"] = margin
+    summary["flag"] = bool(
+        summary["enough"]
+        and summary["difference"] is not None
+        and summary["difference"] < -margin
+    )
+    return summary
+
+
 def _merge_stats(stats: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Merge persisted stats with defaults, including the nested channel.
 
@@ -92,7 +158,20 @@ def _merge_stats(stats: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     supplied = dict(stats or {})
     defaults = _default_stats()
     supplied_shadow = supplied.pop("shadow", None)
+    supplied_holdout = supplied.pop("holdout", None)
     defaults.update(supplied)
+    if isinstance(supplied_holdout, dict):
+        defaults["holdout"] = {
+            name: {
+                **_default_holdout_side(),
+                **(
+                    supplied_holdout.get(name)
+                    if isinstance(supplied_holdout.get(name), dict)
+                    else {}
+                ),
+            }
+            for name in ("with", "without")
+        }
     defaults["shadow"] = {
         **_default_stats()["shadow"],
         **(supplied_shadow if isinstance(supplied_shadow, dict) else {}),
@@ -160,6 +239,25 @@ class Skill:
         self.embedding = (
             self._generate_embedding() if embedding is _UNSET else embedding
         )
+
+    @property
+    def stated_by_user(self) -> bool:
+        """The user stated this procedure; it was not distilled from runs."""
+        return bool((self.baseline or {}).get("stated_by_user"))
+
+    @property
+    def holdout_exempt(self) -> bool:
+        """Never withheld by the holdout. A skill the user stated is exempt
+        unless someone turned that off, because the user asked for it.
+
+        Kept in ``baseline`` so it is stored by every provider without a
+        schema change."""
+        value = (self.baseline or {}).get("holdout_exempt")
+        return self.stated_by_user if value is None else bool(value)
+
+    @holdout_exempt.setter
+    def holdout_exempt(self, value: bool) -> None:
+        self.baseline = {**(self.baseline or {}), "holdout_exempt": bool(value)}
 
     def _generate_embedding(self) -> List[float]:
         """Embed APPLICABILITY semantics only: name + description +

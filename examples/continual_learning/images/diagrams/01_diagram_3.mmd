@@ -1,0 +1,16 @@
+flowchart TD
+    R(["A handler asks:<br/>'Pay CW-431207'"]) --> L["1 · beacon_lookup_claim<br/>read the claim from Beacon"]
+    L --> T{"2 · check_tpa<br/>is the amount within<br/>the handler's limit?"}
+    T -- "no, over the limit" --> S["3 · refer_senior<br/>hand it to a Senior Handler"]
+    S --> SE(["STOP path<br/>nothing is paid"])
+    T -- "yes" --> X{"3 · ringfence_screen<br/>is the payee clear<br/>of sanctions?"}
+    X -- "no, potential match (RFN-110)" --> F["4 · refer_financial_crime<br/>freeze it and refer"]
+    F --> FE(["HOLD path<br/>nothing is paid,<br/>customer not told why"])
+    X -- "yes, clear" --> P["4 · tally_release<br/>release the payment in Tally"]
+    P --> Q["5 · beacon_set_status<br/>mark the claim Q12 (paid)"]
+    Q --> QE(["PAY path<br/>done"])
+    subgraph D["Tools on no path"]
+        C["beacon_close_claim"]
+        N["notify_customer"]
+        A["raise_amber_pack"]
+    end

@@ -124,11 +124,81 @@ def _entity_scope(agent_id: str) -> str:
     return str((policy or {}).get("entity_scope") or "memory")
 
 
+def _refine_cycle(agent_id: str) -> Any:
+    """A refine cycle handle for reading an agent's stored runs. It needs only
+    the provider and the agent's ID, so no model is loaded."""
+    from types import SimpleNamespace
+
+    from ...learning.refine import RefineCycle
+
+    return RefineCycle(
+        SimpleNamespace(memory_provider=_state["provider"], agent_id=agent_id)
+    )
+
+
 def _pending_consolidations(agent_id: str) -> Dict[str, Any]:
-    """Plans the agent's background schedule left for review in this process."""
+    """Plans left for review: those the background schedule made in this
+    process, and those a refine cycle stored with its run (which outlive a
+    restart)."""
+    from ...learning.consolidation import ConsolidationPlan
     from ...memagent.core import _shared_upkeep
 
-    return _shared_upkeep(_state["provider"], agent_id).plans
+    plans = dict(_shared_upkeep(_state["provider"], agent_id).plans)
+    try:
+        for item in _refine_cycle(agent_id).pending_plans():
+            if item.get("kind") == "consolidation" and item.get("plan"):
+                plans.setdefault(
+                    str(item["plan_id"]), ConsolidationPlan.from_dict(item["plan"])
+                )
+    except Exception as exc:
+        logger.debug("Stored refine plans unavailable: %s", exc)
+    return plans
+
+
+def _forget_pending_consolidation(agent_id: str, plan_id: str) -> None:
+    """Drop a reviewed plan from the process and from its refine run."""
+    from ...memagent.core import _shared_upkeep
+
+    _shared_upkeep(_state["provider"], agent_id).plans.pop(plan_id, None)
+    try:
+        cycle = _refine_cycle(agent_id)
+        for item in cycle.pending_plans():
+            if str(item.get("plan_id")) == str(plan_id):
+                cycle.resolve_pending(item["run_id"], plan_id)
+    except Exception as exc:
+        logger.debug("Refine run pending list not updated: %s", exc)
+
+
+def _refine_panel(agent_id: str, schedule: Any) -> Dict[str, Any]:
+    """The Refine cycles section: whether upkeep runs as a cycle, the runs so
+    far and what they left waiting."""
+    settings = schedule if isinstance(schedule, dict) else {}
+    panel: Dict[str, Any] = {
+        "enabled": bool(settings.get("refine_cycle")),
+        "interval_hours": settings.get("refine_interval_hours") or 24,
+        "runs": [],
+        "waiting": 0,
+        "scheduled": False,
+        "next_run_at": None,
+    }
+    try:
+        cycle = _refine_cycle(agent_id)
+        panel["runs"] = cycle.list_runs(limit=8)
+        panel["waiting"] = len(cycle.pending_plans())
+    except Exception as exc:
+        logger.debug("Refine runs unavailable: %s", exc)
+    try:
+        from ..app import _get_automation_store_for_ui
+
+        store = _get_automation_store_for_ui()
+        for job in store.list_jobs(agent_id=agent_id, enabled=None) if store else []:
+            if job.action_type == "refine_cycle":
+                panel["scheduled"] = bool(job.enabled)
+                panel["next_run_at"] = job.next_run_at
+                panel["job_id"] = job.job_id
+    except Exception as exc:
+        logger.debug("Refine schedule unavailable: %s", exc)
+    return panel
 
 
 def _applied_consolidations(agent_id: str, limit: int = 8) -> list:
@@ -297,9 +367,13 @@ async def learning_control_plane_page(
             )
         except Exception as exc:
             logger.debug("Persona learning panel data failed: %s", exc)
+    refine: Dict[str, Any] = {}
+    if selected:
+        refine = _refine_panel(selected, consolidation.get("schedule"))
     return templates.TemplateResponse(
         "learning_control_plane.html",
         {
+            "refine": refine,
             "suppressed": suppressed,
             "consolidation": consolidation,
             "persona_learning": persona_learning,
@@ -730,7 +804,7 @@ async def apply_consolidation(
         result = _consolidator(agent_id, with_model=False).apply(
             plan, approved_by=approved_by, reason=reason
         )
-        _pending_consolidations(agent_id).pop(plan_id, None)
+        _forget_pending_consolidation(agent_id, plan_id)
         applied = sum(result.applied.values())
         _last_actions[agent_id] = {
             "kind": "consolidation-applied",
@@ -788,3 +862,115 @@ async def restore_consolidation(
 
 
 __all__ = ["router"]
+
+
+@router.post("/learning-control-plane/refine")
+async def run_refine_cycle(
+    agent_id: str = Form(...),
+    dry_run: Optional[str] = Form(None),
+    memory_id: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    thread_id: Optional[str] = Form(None),
+):
+    """Run one refine cycle now: the upkeep jobs once, in their fixed order."""
+    from starlette.concurrency import run_in_threadpool
+
+    planning = str(dry_run or "").strip().lower() in {"1", "true", "on"}
+
+    def _run() -> Dict[str, Any]:
+        from ...memagent import MemAgent
+
+        agent = MemAgent.load(agent_id, memory_provider=_state["provider"])
+        return agent.refine(dry_run=planning, trigger="manual")
+
+    try:
+        report = await run_in_threadpool(_run)
+        _last_actions[agent_id] = {
+            "kind": "refine",
+            "message": (
+                f"Refine cycle {'planned' if planning else report['status']}: "
+                f"{report['changed']} change(s), {report['waiting']} plan(s) "
+                "waiting for review"
+            ),
+            "report": report,
+            "at": datetime.now().isoformat(timespec="seconds"),
+        }
+    except Exception as exc:
+        logger.error("Refine cycle failed for %s: %s", agent_id, exc)
+        _last_actions[agent_id] = {
+            "kind": "error",
+            "message": f"The refine cycle could not run: {exc}",
+        }
+    response = _redirect(
+        agent_id, memory_id=memory_id, user_id=user_id, thread_id=thread_id
+    )
+    response.headers["location"] += "#refine-cycles"
+    return response
+
+
+@router.post("/learning-control-plane/refine-schedule")
+async def set_refine_schedule(
+    agent_id: str = Form(...),
+    enabled: str = Form(...),
+    memory_id: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    thread_id: Optional[str] = Form(None),
+):
+    """Switch an agent's upkeep to one scheduled refine cycle, or back to the
+    separate per-turn counters."""
+    from starlette.concurrency import run_in_threadpool
+
+    turn_on = str(enabled).strip().lower() in {"1", "true", "on"}
+
+    def _apply() -> str:
+        from ...memagent import MemAgent
+
+        agent = MemAgent.load(agent_id, memory_provider=_state["provider"])
+        agent.with_refine_cycle(turn_on)
+        note = ""
+        if turn_on:
+            try:
+                agent.schedule_refine_cycle()
+                note = (
+                    f" A cycle is scheduled every {agent.refine_interval_hours:g} "
+                    "hours on the automation worker."
+                )
+            except Exception as exc:
+                note = (
+                    " It is not scheduled (automations are unavailable: "
+                    f"{exc}); run it from here or with agent.refine()."
+                )
+        else:
+            try:
+                store = agent._require_automations().store
+                for job in store.list_jobs(agent_id=agent_id, enabled=None):
+                    if job.action_type == "refine_cycle":
+                        store.pause_job(job.job_id)
+            except Exception as exc:
+                logger.debug("Refine schedule not paused: %s", exc)
+        agent.save()
+        return note
+
+    try:
+        note = await run_in_threadpool(_apply)
+        _last_actions[agent_id] = {
+            "kind": "refine_cycle",
+            "message": (
+                "Upkeep now runs as one refine cycle; the per-turn counters are off."
+                + note
+                if turn_on
+                else "Upkeep is back on its per-turn counters."
+            ),
+            "at": datetime.now().isoformat(timespec="seconds"),
+        }
+    except Exception as exc:
+        logger.error("Refine cycle setting failed for %s: %s", agent_id, exc)
+        _last_actions[agent_id] = {
+            "kind": "error",
+            "message": f"The setting was not saved: {exc}",
+        }
+    response = _redirect(
+        agent_id, memory_id=memory_id, user_id=user_id, thread_id=thread_id
+    )
+    response.headers["location"] += "#refine-cycles"
+    return response

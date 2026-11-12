@@ -1,0 +1,13 @@
+flowchart TD
+    S[A value is superseded<br/>£2,500 becomes £3,000] --> Q[Search this agent's skills and<br/>this memory's notes for the OLD value]
+    Q --> F{Does a text contain it,<br/>as a whole phrase?}
+    F -- no --> N[No flag]
+    F -- yes --> O{Does the text also name the<br/>entity or the attribute?}
+    O -- yes --> HI[Flag · high confidence]
+    O -- no --> NL{Does the old value<br/>read like a name?}
+    NL -- yes --> LO[Flag · low confidence]
+    NL -- no --> N
+    HI --> P{A person decides}
+    LO --> P
+    P -- the text is out of date --> R[Edit the text, then RESOLVE]
+    P -- the text is right as it is --> D[DISMISS]

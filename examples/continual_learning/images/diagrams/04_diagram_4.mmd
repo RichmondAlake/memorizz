@@ -1,0 +1,14 @@
+sequenceDiagram
+    autonumber
+    actor P as Priya
+    participant R as Router
+    participant A as Ada (model)
+    participant T as Beacon tools
+    Note over P,T: After the review
+    P->>R: 613044 is a large loss
+    Note over R: a learned example matches. It is a retrieval key and stays here
+    R->>A: offers refer_llu
+    Note over A: reads docstrings and learned lines, such as "Not for large losses, use refer_llu" on the neighbour
+    A->>T: refer_llu("CW-613044")
+    T-->>A: escalated
+    A-->>P: Sent to the Large Loss Unit (said once, no refused call)

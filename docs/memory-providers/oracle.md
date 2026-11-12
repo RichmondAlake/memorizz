@@ -263,7 +263,26 @@ src/memorizz/memory_provider/oracle/migrations/010_persona_evolution.sql
 src/memorizz/memory_provider/oracle/migrations/011_record_lifecycle_columns.sql
 src/memorizz/memory_provider/oracle/migrations/012_utc_timestamp_defaults.sql
 src/memorizz/memory_provider/oracle/migrations/013_utc_timestamps.sql
+src/memorizz/memory_provider/oracle/migrations/014_learning_spec_columns.sql
+src/memorizz/memory_provider/oracle/migrations/015_standing_rules_and_workflow_thread.sql
 ```
+
+Migration 014 adds `outcome_verified` and `skills_held_out` to workflow memory
+(the verified-outcome gate and the skill holdout) and `guardrails` to personas.
+It only adds columns; entity history dates, source levels and aliases are kept
+inside the existing attributes and metadata JSON.
+
+Migration 015 adds `standing_rules` to personas: the rules a named owner
+approved, between guardrails and goals. It also adds `origin_thread_id` to
+workflow memory, the conversation a run was made in; tool learning reads it
+to find a request the user had to make twice, so runs stored before it give
+calling errors and routing misses but no re-asked requests. Rule proposals waiting for an owner
+are kept in the agent's persona learning state and each approved change in
+the persona's existing history, so neither needs a column. The new fields on
+entity facts (confirmations, last seen, recorded and superseded times,
+corrections) live inside the existing attributes JSON, and stale-reference
+flags, tool revisions and the record of tools offered per turn are learning
+records, so none of them needs a migration.
 
 Migration 005 adds/backfills exact summary thread scope and restores indexed
 knowledge-base namespace metadata on older schemas. Migration 006 preserves

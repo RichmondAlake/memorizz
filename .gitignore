@@ -104,3 +104,6 @@ apps/**/src-tauri/target/
 .claude/scheduled_tasks.lock
 **/.claude/scheduled_tasks.lock
 **/.claude/settings.local.json
+
+# Store written by the continual-learning notebooks
+examples/continual_learning/calderwood_store/

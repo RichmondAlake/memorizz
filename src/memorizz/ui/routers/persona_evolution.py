@@ -15,6 +15,124 @@ from ..trace_access import current_principal
 
 router = APIRouter(tags=["persona-evolution"])
 
+MAX_AGENT_CHANGES = 6
+
+
+def _mapping(value):
+    if isinstance(value, Mapping):
+        return dict(value)
+    to_dict = getattr(value, "to_dict", None)
+    return dict(to_dict()) if callable(to_dict) else {}
+
+
+def agent_persona_rows():
+    """Saved agents that have a persona, with what persona learning added,
+    newest change first, and any change waiting for review.
+
+    This is the agent's own persona (one per agent), not an account profile
+    from a host adapter. Read-only: the review itself is on the control plane.
+    """
+    from ..helpers import _extract_agent_identifier, _list_agents
+    from ..state import _state
+
+    if not _state.get("provider"):
+        return []
+    rows = []
+    for agent in _list_agents() or []:
+        get = (
+            agent.get
+            if isinstance(agent, Mapping)
+            else lambda k: getattr(agent, k, None)
+        )
+        agent_id = _extract_agent_identifier(agent)
+        persona = get("persona")
+        if not agent_id or persona is None:
+            continue
+        history = getattr(persona, "evolution_history", None)
+        persona = _mapping(persona)
+        history = history if history is not None else persona.get("evolution_history")
+        if not persona.get("name"):
+            continue
+        changes = []
+        for entry in reversed([e for e in history or [] if isinstance(e, Mapping)]):
+            trigger = entry.get("change_trigger") or {}
+            fields = entry.get("changes") or {}
+            if not isinstance(trigger, Mapping) or not isinstance(fields, Mapping):
+                continue
+            learned = trigger.get("source_type") == "persona_learning"
+            for name, change in fields.items():
+                change = change if isinstance(change, Mapping) else {}
+                changes.append(
+                    {
+                        "version": entry.get("version"),
+                        "at": str(entry.get("timestamp") or "")[:16].replace("T", " "),
+                        "field": str(name),
+                        "learned": learned,
+                        "addition": str(trigger.get("addition") or "")
+                        if learned
+                        else "",
+                        "old": change.get("old"),
+                        "new": change.get("new"),
+                        "reason": str(trigger.get("reason") or ""),
+                        "by": str(
+                            trigger.get("approved_by")
+                            or trigger.get("source_type")
+                            or ""
+                        ),
+                        "evidence": [
+                            str(item.get("quote") or "")
+                            for item in trigger.get("evidence") or []
+                            if isinstance(item, Mapping) and item.get("quote")
+                        ][:6],
+                    }
+                )
+        state = get("persona_learning_state")
+        state = state if isinstance(state, Mapping) else {}
+        pending = (
+            state.get("pending") if isinstance(state.get("pending"), Mapping) else None
+        )
+        settings = get("persona_learning")
+        settings = settings if isinstance(settings, Mapping) else {}
+        reviews = [r for r in state.get("reviews") or [] if isinstance(r, Mapping)]
+        rows.append(
+            {
+                "agent_id": agent_id,
+                "agent_name": str(get("name") or agent_id[:12]),
+                "persona_name": str(persona.get("name")),
+                "role": str(persona.get("role") or ""),
+                "version": persona.get("version") or 1,
+                "guardrails": len(persona.get("guardrails") or []),
+                "learning": bool(settings.get("enabled")),
+                "auto_apply": bool(settings.get("auto_apply", True)),
+                "pending": {
+                    "field": str(pending.get("field") or ""),
+                    "addition": str(pending.get("addition") or ""),
+                    "evidence": [
+                        str(item.get("quote") or "")
+                        for item in pending.get("evidence") or []
+                        if isinstance(item, Mapping) and item.get("quote")
+                    ][:6],
+                }
+                if pending
+                else None,
+                "last_review": (
+                    str(reviews[-1].get("at") or "")[:16].replace("T", " ")
+                    if reviews
+                    else ""
+                ),
+                "changes": changes[:MAX_AGENT_CHANGES],
+                "change_count": len(changes),
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            row["pending"] is None,
+            -row["change_count"],
+            row["agent_name"],
+        )
+    )
+    return rows
+
 
 def _admin():
     if current_principal.get().restricted:
@@ -48,6 +166,10 @@ async def page(request: Request, user_id: str = ""):
             state = await run_in_threadpool(adapter.view, user_id)
         except Exception:
             error = "The account's learning profile could not be loaded. No changes were made."
+    try:
+        agent_personas = await run_in_threadpool(agent_persona_rows)
+    except Exception:
+        agent_personas = []
     response = templates.TemplateResponse(
         "persona_evolution.html",
         {
@@ -59,6 +181,7 @@ async def page(request: Request, user_id: str = ""):
             "relative_time": relative_time,
             "user_id": user_id,
             "connected": adapter is not None,
+            "agent_personas": agent_personas,
             "error": error,
             "writable": bool(adapter and request.app.state.persona_evolution_actions),
             "trace_read_only": ui_read_only(),

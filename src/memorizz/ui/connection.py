@@ -593,6 +593,7 @@ def connection_header() -> Dict[str, Any]:
         "target": target,
         "title": title,
         "href": None if restricted else "/connect",
+        "restricted": restricted,
         "read_only": ui_is_read_only(),
         "read_only_tooltip": READ_ONLY_TOOLTIP,
         "embedding_warning": (

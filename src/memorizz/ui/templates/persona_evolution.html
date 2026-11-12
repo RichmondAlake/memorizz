@@ -2,7 +2,7 @@
 {% from '_ui.html' import page_header, empty_state, id_chip %}
 {% from '_learning_tabs.html' import learning_tabs %}
 {% block title %}Persona evolution - Memorizz{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/pages/persona-evolution.css?v=3">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/persona-evolution.css?v=4">{% endblock %}
 {% block content %}
 {% set pe_description = "Review how one account's approach adapts from its conversations: what changed, why, and the evidence behind it. Suggestions wait for approval, apply from the next turn and can be undone." %}
 {% set tabs = learning_tabs('persona-evolution') %}
@@ -18,6 +18,49 @@
 {{ page_header('Persona evolution', pe_description, 'Continual learning', nav=tabs) }}
 {% endif %}
 
+{% if agent_personas %}
+<section class="panel pe-agents" aria-labelledby="pe-agents-title">
+    <div class="panel-header"><h2 class="panel-title" id="pe-agents-title">Agent personas</h2><span class="pill">{{ agent_personas|length }} agent{{ '' if agent_personas|length == 1 else 's' }}</span></div>
+    <p class="panel-description">A saved agent's own persona grows from patterns across its conversations (persona learning, also job 6 of a refine cycle). Each change shows what was added, the user's words it rests on and who applied it. Guardrails are never changed this way.</p>
+    {% for row in agent_personas %}
+    <details class="pe-agent"{% if row.pending or (row.changes and loop.index <= 2) %} open{% endif %}>
+        <summary>
+            <span class="pe-agent-name"><strong>{{ row.agent_name }}</strong><small>{{ row.persona_name }}{% if row.role %} · {{ row.role }}{% endif %}</small></span>
+            <span class="pe-agent-pills">
+                {% if row.pending %}<span class="pill pill--warning">1 waiting for review</span>{% endif %}
+                <span class="pill">Version {{ row.version }}</span>
+                <span class="pill{{ ' pill--success' if row.learning else '' }}">{{ ('Learning on · ' ~ ('applies itself' if row.auto_apply else 'review first')) if row.learning else 'Learning off' }}</span>
+                {% if row.guardrails %}<span class="pill" title="Rules learning cannot write">{{ row.guardrails }} guardrail{{ '' if row.guardrails == 1 else 's' }}</span>{% endif %}
+            </span>
+        </summary>
+        <div class="pe-agent-body">
+            {% if row.pending %}
+            <div class="pe-agent-change is-pending">
+                <p class="pe-agent-when"><span class="pill pill--warning">Waiting for review</span> {{ row.pending.field|capitalize }}</p>
+                <p class="pe-agent-add">+ {{ row.pending.addition }}</p>
+                {% if row.pending.evidence %}<ul class="pe-agent-quotes">{% for quote in row.pending.evidence %}<li>“{{ quote }}”</li>{% endfor %}</ul>{% endif %}
+                <a class="btn btn-sm btn-primary" href="/learning-control-plane?agent_id={{ row.agent_id|urlencode }}#persona-learning">Review this change</a>
+            </div>
+            {% endif %}
+            {% for change in row.changes %}
+            <div class="pe-agent-change">
+                <p class="pe-agent-when"><span class="pill{{ ' pill--success' if change.learned else '' }}">Version {{ change.version }}</span> {{ change.field|capitalize }} · <span class="mono">{{ change.at }} UTC</span> · {{ {'memorizz:refine_cycle': 'applied by a refine cycle', 'memorizz:persona-learning': 'applied by persona learning'}.get(change.by, 'by ' ~ change.by) }}</p>
+                {% if change.addition %}<p class="pe-agent-add">+ {{ change.addition }}</p>
+                {% else %}<p class="pe-agent-diff"><span>{{ change.old if change.old is string else change.old|tojson }}</span> → <span>{{ change.new if change.new is string else change.new|tojson }}</span></p>{% endif %}
+                {% if change.reason %}<p class="pe-agent-reason">{{ change.reason }}</p>{% endif %}
+                {% if change.evidence %}<ul class="pe-agent-quotes">{% for quote in change.evidence %}<li>“{{ quote }}”</li>{% endfor %}</ul>{% endif %}
+            </div>
+            {% endfor %}
+            {% if not row.pending and not row.changes %}
+            <p class="pe-agent-none">{% if row.learning %}No change yet{% if row.last_review %} (last reviewed {{ row.last_review }} UTC){% endif %}. A change needs the same kind of request in several conversations.{% else %}Persona learning is off for this agent.{% endif %}</p>
+            {% endif %}
+            <p class="pe-agent-links"><a href="/learning-control-plane?agent_id={{ row.agent_id|urlencode }}#persona-learning">Persona learning on the control plane</a>{% if row.change_count > row.changes|length %} · {{ row.change_count - row.changes|length }} earlier change(s) on the <a href="/memory/personas">persona record</a>{% else %} · <a href="/memory/personas">Persona record</a>{% endif %}</p>
+        </div>
+    </details>
+    {% endfor %}
+</section>
+<h2 class="pe-section-title">Account personas from your application</h2>
+{% endif %}
 <form method="get" action="/persona-evolution" class="filter-bar pe-scope">
     <label for="account-id" class="is-wide">Account ID<input id="account-id" name="user_id" maxlength="128" value="{{ user_id }}" required placeholder="One account at a time, never a shared persona" autocomplete="off"></label>
     <button class="btn" type="submit">Inspect account</button>

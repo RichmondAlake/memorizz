@@ -676,7 +676,14 @@ def file_entity_facts(
             for fact in group
         ]
         upsert = getattr(entities, "upsert_entity_with_report", None)
+        # How far the write is trusted: a fact the agent worked out through
+        # its ``remember`` tool is the lowest, one the host handed in is the
+        # highest, and everything else here came from what the user wrote.
+        origin = str(source or "").casefold()
+        tail = origin.split(":", 1)[1] if ":" in origin else origin
+        level = 1 if tail == "tool" else 3 if tail in {"api", "host", "sdk"} else 2
         arguments = dict(
+            source_level=level,
             entity_id=first.get("entity_id") or None,
             name=first["entity"],
             entity_type=next(
@@ -699,7 +706,13 @@ def file_entity_facts(
         if callable(upsert):
             result = upsert(**arguments)
             entity_id, embedding = result["entity_id"], result.get("embedding") or {}
-            kept = {str(name).casefold() for name in result.get("kept_pinned") or ()}
+            kept = {
+                str(name).casefold()
+                for name in [
+                    *(result.get("kept_pinned") or ()),
+                    *(result.get("kept_stronger") or ()),
+                ]
+            }
         else:
             entity_id, embedding = entities.upsert_entity(**arguments), {}
             kept = set()

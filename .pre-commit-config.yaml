@@ -7,6 +7,9 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-added-large-files
+        # The continual-learning notebooks carry their diagrams and saved
+        # outputs, so a reader sees them without the images folder.
+        args: ['--maxkb=1500']
       - id: check-ast  # Check Python syntax
       - id: check-merge-conflict
 
@@ -44,4 +47,4 @@ repos:
         # First-party tutorials are executed, sanitized release evidence. Keep
         # their bounded outputs so readers can inspect results without rerunning
         # paid providers or Oracle; other notebooks remain output-free by default.
-        exclude: ^examples/(metaharness|zero_to_hero|context_engineering)/
+        exclude: ^examples/(metaharness|zero_to_hero|context_engineering|continual_learning)/

@@ -165,6 +165,8 @@ external origin, not the internal bind address.
 | Propose local agent deletion | `memorizz_delete_agent` | `memorizz:write`; local `stdio` only; durable operator approval required |
 | Execute an exposed agent | `memorizz_execute_agent` | `memorizz:execute` + `memorizz:write` |
 | Compile scoped continual-learning memory | `memorizz_compile_memory` | `memorizz:write` |
+| Run one refine cycle (upkeep jobs in order); `dry_run` plans only | `memorizz_refine` | `memorizz:write`, and `memorizz:execute` unless `dry_run` |
+| List stored refine cycles | `memorizz_list_refine_runs` | `memorizz:read` |
 | Compact a scoped conversation | `memorizz_compact_conversation` | `memorizz:execute` + `memorizz:write` |
 | Inspect installed harnesses | `memorizz_list_harnesses` | `memorizz:read` |
 | Start a bounded harness run | `memorizz_start_harness_run` | `memorizz:execute`; writes also require `memorizz:write` |
@@ -321,6 +323,14 @@ the target is another entity's name or ID; a target that doesn't exist yet is
 created by name. `memorizz_lookup_entities(query=None, name=None,
 memory_id=None, limit=10)` finds entities by case-insensitive name, by query
 (semantic, or keyword without embeddings), or by both.
+A name also matches an alias: the name of a record that was merged into the
+entity. Each attribute comes back with its source `level` (3 host or pinned,
+2 stated by the user, 1 inferred, from a tool or by consolidation) and, when
+its value changed, a `timeline` of earlier values with the dates each held.
+A write through `memorizz_upsert_entity` is level 2. It does not replace a
+level-3 value: the attribute is returned in `not_applied` and the offered
+value is kept in the timeline with `applied: false`. `memorizz_get_agent`
+returns a persona's `guardrails`; no MCP tool can change them.
 
 **Status.** `memorizz_memory_status(memory_id=None)` reports:
 

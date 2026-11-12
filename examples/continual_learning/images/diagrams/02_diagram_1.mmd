@@ -1,0 +1,13 @@
+flowchart LR
+    C["Conversations<br/>(two handlers)"] --> R["Review<br/>background model"]
+    R -->|"a sentence<br/>+ quotes"| K{"Code<br/>checks"}
+    R -->|"a rule<br/>+ corrections"| K2{"Code<br/>checks"}
+    K -- "3 conversations,<br/>2 people" --> P["Sentence waits"]
+    K -- "a rule, a name,<br/>one person" --> X["Refused"]
+    K2 -- "fails" --> X
+    K2 -- "passes" --> PR["Rule waits<br/>for an owner"]
+    P -->|"a person approves"| G["Goals grow"]
+    PR -->|"a Desk Lead approves"| SR["Standing rule"]
+    G --> S["System prompt<br/>of every turn"]
+    SR --> S
+    GR["Guardrails<br/>(host only)"] --> S

@@ -16,6 +16,7 @@ _OP_LABELS = {
     "suppress_duplicate": "hide duplicate",
     "retire_attribute": "retire",
     "add_fact": "add",
+    "reinforce_fact": "confirm",
 }
 
 
@@ -98,10 +99,17 @@ def _describe(op) -> str:
             f"{details.get('entity')}.{details.get('attribute')} = "
             f"{details.get('value')}: {op.reason}"
         )
+    if op.kind == "reinforce_fact":
+        return (
+            f"{details.get('entity')}.{details.get('attribute')} = "
+            f"{details.get('value')} (said again: \"{details.get('evidence')}\")"
+        )
     if op.kind == "add_fact":
         replaced = (
             f" (was {details['replaces']})"
             if details.get("replaces") is not None
+            else f" (kept beside {details['beside']}, which stays)"
+            if details.get("beside") is not None
             else ""
         )
         return (
@@ -319,3 +327,49 @@ def cmd_persona_learning(session, args: str) -> None:
 
 
 __all__ = ["cmd_background_model", "cmd_consolidate", "cmd_persona_learning"]
+
+
+def cmd_refine(session, args: str) -> None:
+    """Run one refine cycle, or with ``dry`` only plan it; ``runs`` lists past
+    cycles; ``on`` and ``off`` switch upkeep to the cycle and back."""
+    from .learning_commands import _refine_lines
+
+    console = _con(session)
+    agent = session.agent
+    word = (args.split() or [""])[0].lower()
+    if word in {"on", "off"}:
+        agent.with_refine_cycle(word == "on")
+        try:
+            agent.save()
+        except Exception as exc:
+            console.print(f"[yellow]Not saved:[/yellow] {escape(str(exc))}")
+        console.print(
+            "Upkeep now runs as one refine cycle; the per-turn counters are off. "
+            "Run it with /refine."
+            if word == "on"
+            else "Upkeep is back on its per-turn counters."
+        )
+        return
+    if word == "runs":
+        runs = agent.refine_runs(limit=10)
+        if not runs:
+            console.print("[dim]No refine cycle has run yet.[/dim]")
+        for run in runs:
+            console.print(
+                f"{escape(run['started_at'][:19])}  {escape(run['status']):<8} "
+                f"{run.get('changed', 0)} change(s), {run.get('waiting', 0)} waiting, "
+                f"{run.get('tokens', 0)} tokens  [dim]{escape(run['run_id'])}[/dim]"
+            )
+        return
+    if word not in {"", "dry", "dry-run"}:
+        console.print("Usage: /refine [dry] · /refine runs · /refine on|off")
+        return
+    console.print(
+        "[dim]Running a refine cycle"
+        f"{' (dry run: nothing is applied)' if word else ''}...[/dim]"
+    )
+    report = agent.refine(
+        dry_run=bool(word), memory_id=session.memory_id, user_id=session.user_id
+    )
+    for line in _refine_lines(report):
+        console.print(escape(line))

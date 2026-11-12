@@ -623,6 +623,9 @@ class SemanticToolRouter:
         invocation_count: int = 0
         active_user_id: Optional[str] = None
         sticky_key: Optional[str] = None
+        #: Tools routing picked for a request this turn (sticky and
+        #: always-visible tools are shown too, but were not picked).
+        routed: set[str] = field(default_factory=set)
 
     def _state(self) -> "SemanticToolRouter._TurnState":
         state = self._turn_state_var.get()
@@ -725,6 +728,11 @@ class SemanticToolRouter:
 
     def begin_turn(self, *, user_id: Optional[str] = None) -> None:
         self._turn_state_var.set(self._TurnState(active_user_id=user_id))
+
+    def routed_this_turn(self) -> List[str]:
+        """The tools routing picked for a request in this turn, sorted.
+        Empty when routing is off or the whole tool list was sent."""
+        return sorted(self._state().routed) if self.enabled else []
 
     def _metadata(self) -> List[Dict[str, Any]]:
         values = self.tool_manager.get_tool_metadata() or []
@@ -867,6 +875,7 @@ class SemanticToolRouter:
         bounded = max(1, min(int(limit or self.top_k), self.top_k))
         candidates = self.preview(query, user_id=user_id, limit=bounded)
         self._selected.update(candidates)
+        self._state().routed.update(candidates)
         # Tools discovered mid-turn stay disclosed for this scope's later turns;
         # recording only at the next turn's start lost them to begin_turn().
         self._remember_sticky(candidates)

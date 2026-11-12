@@ -492,3 +492,36 @@ def test_playground_launcher_page_lists_agents_as_rows(provider):
     assert 'id="pg-table"' in html and 'data-key="agent-launch"' in html
     assert 'href="/agents/agent-launch/playground"' in html
     assert "Launcher agent" in html and "Create agent" in html
+
+
+@pytest.mark.unit
+def test_harness_run_tokens_count_cache_reads_and_writes():
+    """Anthropic reports cached prompt tokens beside input_tokens; the pane
+    counts them as the compare view does."""
+    claude = _run(
+        "r-claude",
+        "succeeded",
+        result={
+            "usage": {
+                "input_tokens": 18,
+                "output_tokens": 937,
+                "cache_read_input_tokens": 77_300,
+                "cache_creation_input_tokens": 19_000,
+            }
+        },
+    )
+    assert shape_harness_run(claude)["tokens"] == 18 + 77_300 + 19_000 + 937
+    # OpenAI's input_tokens already include cached ones.
+    openai = _run(
+        "r-openai",
+        "succeeded",
+        result={
+            "usage": {
+                "input_tokens": 1000,
+                "cached_input_tokens": 800,
+                "output_tokens": 200,
+            }
+        },
+    )
+    assert shape_harness_run(openai)["tokens"] == 1200
+    assert shape_harness_run(_run("r-none", "succeeded"))["tokens"] is None

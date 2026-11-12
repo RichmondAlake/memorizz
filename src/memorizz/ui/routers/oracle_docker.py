@@ -154,8 +154,12 @@ async def docker_oracle_logs_stream(name: Optional[str] = None, tail: int = 200)
             json.dumps({"container": container, "message": "attached"}),
             event="attach",
         )
+        from ..shutdown import requested as stopping
+
         try:
             for line in _do.stream_container_logs(container, tail=tail):
+                if stopping():  # Ctrl+C: the server waits for this stream
+                    break
                 yield _event(json.dumps({"line": _redact(line)}), event="log")
         except Exception as exc:  # pragma: no cover - defensive
             yield _event(

@@ -1,0 +1,10 @@
+flowchart LR
+    C{{"One cycle,<br/>eleven jobs"}}
+    C -- "may write<br/>on its own" --> W["2 · Entities: merge duplicates<br/>3 · Stated facts: add what the user said<br/>6 · Skill staleness: retire a dead skill<br/>10 · Compact: rebuild vectors"]
+    C -- "may only<br/>raise a flag" --> F["1 · Verify notes: a fact with no source<br/>4 · Stale references: text that says an old value<br/>8 · Skill review: a skill that misfires"]
+    C -- "may only<br/>propose" --> P["5 · Tool review: a usage note<br/>7 · Promotion: a skill, in shadow<br/>9 · Persona learning: one sentence<br/>11 · Retention: notes to retire"]
+    W --> A["Applied to memory.<br/>Reversible, and in the report"]
+    F --> R["A person reads it,<br/>fixes what needs fixing,<br/>closes the flag"]
+    P --> Q{"Does a named<br/>person approve?"}
+    Q -- yes --> A
+    Q -- no --> N["Nothing changes"]

@@ -248,13 +248,16 @@ def run_local(
     port: int = 8765,
     startup_connect="env",
     read_only: bool = False,
+    open_browser: Optional[bool] = None,
 ):
     """Run the Memorizz local web UI.
 
     ``startup_connect`` is ``"env"`` (connect to the store the environment
     names), a dict from ``ui_startup_from_flags``, or None (start on the
     connect page). ``read_only`` refuses every change, as
-    MEMORIZZ_UI_READ_ONLY=true does.
+    MEMORIZZ_UI_READ_ONLY=true does. ``open_browser`` opens the UI in the
+    browser once it runs (None: unless MEMORIZZ_UI_OPEN_BROWSER=false, over
+    SSH or in CI).
     """
     if read_only:
         os.environ["MEMORIZZ_UI_READ_ONLY"] = "true"
@@ -269,7 +272,12 @@ def run_local(
             print(f"  {install_command(['ui'])}")
         return False
     try:
-        run_server(host=host, port=port, startup_connect=startup_connect)
+        run_server(
+            host=host,
+            port=port,
+            startup_connect=startup_connect,
+            open_browser=open_browser,
+        )
         return True
     except Exception as e:
         print(f"✗ Failed to start UI server: {e}")

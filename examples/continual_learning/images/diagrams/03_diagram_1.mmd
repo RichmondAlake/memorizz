@@ -1,0 +1,10 @@
+flowchart TD
+    W[A write arrives:<br/>a turn, a tool, your code or a background pass] --> E{Does the record already<br/>have this attribute?}
+    E -- no --> ADD[ADD<br/>a new fact, at the writer's level]
+    E -- yes --> S{Is it the value<br/>already held?}
+    S -- yes --> RE[REINFORCE<br/>confirmations + 1, last seen = now.<br/>Value, level and dates stay]
+    S -- no --> L{Is the writer trusted at least<br/>as much as the current value's?}
+    L -- no --> KB[KEPT BESIDE<br/>the value stands; the offer is<br/>stored as not applied]
+    L -- yes --> V{Does it say the old value<br/>was wrong, not just out of date?}
+    V -- no --> SU[SUPERSEDE<br/>new value is current; the old one<br/>keeps the dates it was true]
+    V -- yes --> CO[CORRECT<br/>new value is current; the old one<br/>is kept, marked never true]

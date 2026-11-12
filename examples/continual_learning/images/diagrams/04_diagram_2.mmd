@@ -1,0 +1,8 @@
+flowchart LR
+    D["Docstring<br/>(written in a hurry)"] -->|"augment=True<br/>one model call"| E["Catalogue entry<br/>description + example requests<br/>+ lines learned from use"]
+    E --> R{"Router<br/>top-k by meaning"}
+    R -->|offered| M["Model picks<br/>and calls"]
+    M --> L[("Tool log<br/>+ the request")]
+    L -->|"review_tools()<br/>background model proposes"| C{"Code checks<br/>evidence · no values · real neighbour · bounded"}
+    C -->|"approved"| E
+    C -.->|"refused, with a reason"| X["Nothing written"]

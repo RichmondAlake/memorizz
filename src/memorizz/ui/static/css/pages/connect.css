@@ -1,0 +1,452 @@
+/* Connect page: the card that chooses the memory provider. Loaded after
+   shell.css; colors come from the theme tokens, so it follows the theme. */
+
+body.connect-page {
+    display: block;
+    min-height: 100dvh;
+    padding: 0;
+    background: var(--bg-primary);
+}
+
+.connect-page .connect-container {
+    display: grid;
+    width: 100%;
+    max-width: none;
+    min-height: 100dvh;
+    margin: 0;
+    padding: 40px 16px;
+    place-items: center;
+}
+
+.connect-page .connect-card {
+    width: min(480px, 100%);
+    max-width: none;
+    padding: 32px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    box-shadow: var(--shadow-md);
+    backdrop-filter: none;
+}
+
+.connect-page .connect-header {
+    margin: 0 0 24px;
+    text-align: left;
+}
+
+.connect-page .connect-header h1 {
+    margin: 0 0 6px;
+    color: var(--text-primary);
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+    text-shadow: none;
+}
+
+.connect-page .connect-header p {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.55;
+}
+
+.connect-page .form-group label {
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0;
+    text-transform: none;
+}
+
+.connect-page .form-group small {
+    display: block;
+    margin-top: 6px;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.connect-page select option {
+    color: var(--text-primary);
+    background-color: var(--bg-card);
+}
+
+.connect-page .provider-fields {
+    margin: 0 0 16px;
+    padding: 16px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+}
+
+.connect-page .provider-fields > .form-group:last-child {
+    margin-bottom: 0;
+}
+
+.connect-remember label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 400;
+    cursor: pointer;
+}
+
+.connect-remember input {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent-primary);
+    cursor: pointer;
+}
+
+.connect-page .connect-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 40px;
+    margin: 4px 0 0;
+    padding: 0 16px;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    border-radius: 9px;
+    cursor: pointer;
+    transition: background-color 120ms ease;
+}
+
+.connect-page .connect-btn:disabled {
+    cursor: progress;
+    opacity: 0.65;
+}
+
+/* The store this UI is connected to now */
+.connect-current {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 6px 16px;
+    margin-bottom: 16px;
+    padding: 12px 14px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    background: color-mix(in srgb, var(--accent-secondary) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent-secondary) 35%, var(--border-color));
+    border-radius: 10px;
+}
+
+.connect-current strong {
+    color: var(--text-primary);
+}
+
+.connect-current-target {
+    font-family: var(--console-mono);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
+.connect-current a {
+    color: var(--accent-primary);
+    font-weight: 500;
+}
+
+.connect-page .error-message,
+.connect-page .warning-message,
+.connect-page .success-message {
+    margin-bottom: 16px;
+    font-size: 13px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+/* Stores and databases found on this computer */
+.local-stores {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 10px;
+}
+
+.local-stores-label {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.local-store {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 4px 12px;
+    padding: 9px 12px;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 9px;
+    cursor: pointer;
+    transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.local-store:hover {
+    border-color: var(--border-glow);
+}
+
+.local-store.is-selected {
+    background: color-mix(in srgb, var(--accent-primary) 9%, var(--bg-card));
+    border-color: var(--accent-primary);
+}
+
+.local-store-path {
+    min-width: 0;
+    font-family: var(--console-mono);
+    font-size: 12.5px;
+    overflow-wrap: anywhere;
+}
+
+.local-store-meta,
+.local-db-hint {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.local-dbs {
+    margin: 0 0 16px;
+}
+
+.local-db-state.is-running {
+    color: var(--accent-secondary);
+}
+
+.local-db-state.is-stopped {
+    color: var(--accent-warning);
+}
+
+.local-db-hint {
+    flex-basis: 100%;
+}
+
+.local-db-hint code {
+    color: var(--text-secondary);
+}
+
+/* Oracle container recovery */
+.docker-recovery {
+    margin: 0 0 16px;
+    padding: 14px 16px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+}
+
+.docker-recovery-title {
+    margin-bottom: 6px;
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.docker-recovery-body {
+    margin-bottom: 10px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.docker-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 7px 0;
+    border-top: 1px solid var(--border-subtle);
+}
+
+.docker-row-ports,
+.docker-row-note,
+.docker-row-state {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.docker-row-state.is-running {
+    color: var(--accent-secondary);
+}
+
+.docker-modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgb(0 0 0 / 0.55);
+}
+
+.docker-modal-dialog {
+    width: min(640px, 100%);
+    max-height: 86vh;
+    padding: 24px;
+    overflow-y: auto;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    box-shadow: 0 24px 70px rgb(0 0 0 / 0.4);
+}
+
+.docker-modal-dialog h3 {
+    margin: 0 0 10px;
+    color: var(--text-primary);
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.docker-modal-dialog > p {
+    margin: 0 0 16px;
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.docker-modal-progress {
+    margin-bottom: 16px;
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
+.docker-modal-working {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.docker-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border-color);
+    border-top-color: var(--accent-primary);
+    border-radius: 50%;
+    animation: docker-spin 0.9s linear infinite;
+}
+
+@keyframes docker-spin {
+    to { transform: rotate(360deg); }
+}
+
+.docker-progress-elapsed {
+    margin-top: 6px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.docker-modal-buttons {
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.docker-phase-list {
+    margin: 0 0 16px;
+    padding: 0;
+    overflow: hidden;
+    list-style: none;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+}
+
+.docker-phase-list li {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    color: var(--text-muted);
+    font-size: 13px;
+    border-top: 1px solid var(--border-subtle);
+}
+
+.docker-phase-list li:first-child {
+    border-top: 0;
+}
+
+.docker-phase-list li .phase-icon {
+    display: inline-block;
+    width: 1.2em;
+    font-weight: 700;
+    text-align: center;
+}
+
+.docker-phase-list li.is-active {
+    color: var(--text-primary);
+    background: var(--nav-active-bg);
+}
+
+.docker-phase-list li.is-active .phase-icon {
+    color: var(--accent-primary);
+    animation: docker-phase-pulse 1.1s ease-in-out infinite;
+}
+
+.docker-phase-list li.is-done {
+    color: var(--accent-secondary);
+}
+
+@keyframes docker-phase-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+}
+
+.docker-log-details {
+    margin-top: 8px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+}
+
+.docker-log-details > summary {
+    padding: 8px 12px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    list-style: none;
+    cursor: pointer;
+    user-select: none;
+}
+
+.docker-log-details > summary::-webkit-details-marker {
+    display: none;
+}
+
+.docker-log-details > summary::before {
+    display: inline-block;
+    margin-right: 6px;
+    content: '▸';
+    transition: transform 0.15s ease;
+}
+
+.docker-log-details[open] > summary::before {
+    transform: rotate(90deg);
+}
+
+.docker-log-count {
+    margin-left: 6px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.docker-log-panel {
+    max-height: 280px;
+    margin: 0;
+    padding: 10px 12px;
+    overflow-y: auto;
+    color: var(--text-secondary);
+    font-family: var(--console-mono);
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--bg-primary);
+    border-top: 1px solid var(--border-color);
+}

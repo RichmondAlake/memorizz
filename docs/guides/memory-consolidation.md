@@ -68,6 +68,7 @@ A pass covers one memory and one user. It first makes a dry-run plan:
 | Duplicate rows | no | A summary with the same text as an older one in its thread, or near-identical to it (cosine ≥ 0.97), is hidden. With `knowledge_base=True`, so is a knowledge-base chunk that repeats another chunk in the same knowledge base and namespace. |
 | Attribute review | yes | Within an entity, of two attributes about the same thing (one fact under two names, or an answer that changed), the older is retired. Two entities that are one person or thing under two names merge when they also share at least two facts. |
 | New facts | yes | Durable facts the user stated in recent conversations, and the agent never stored, are added to entity memory. |
+| Confirmations | yes | A stored value the user stated again in a later conversation is confirmed (`reinforce_fact`): its count goes up and nothing else changes. See [Confirmations](#confirmations). |
 | Note relations | a decision model | With `relations=True`, the agent's own knowledge-base notes are compared with the closest older ones: the same fact said again is hidden, a note that a newer one refines or contradicts is hidden (superseded by it), and another fact about the same subject is linked. See [Decision Models](decision-models.md#consolidation-relations). |
 
 Guards on the model's suggestions:
@@ -91,8 +92,9 @@ Nothing is deleted:
 - Retired attributes move to the entity's `metadata.retired_attributes`.
 - Merged duplicates get `superseded_by`.
 - Added facts carry `source: consolidation:<plan id>`.
+- Confirmations carry the same source in the attribute's `confirmed_by`.
 
-Restoring a plan undoes all four.
+Restoring a plan undoes all five.
 
 ```python
 plan = agent.plan_memory_consolidation(memory_id, user_id="user-42", thread_ids=["t1", "t2"])
@@ -111,6 +113,170 @@ It never reads a conversation it wasn't given, and never one that ran sealed
 (see [sealed threads](multi-tenant.md#sealed-threads)). An agent whose
 retrieval policy keeps entity facts per thread (`entity_scope="thread"`) gets
 only the duplicate-row step.
+
+## Source levels
+
+A write to an entity attribute replaces the current value only when its
+source is trusted at least as much. There are three levels.
+
+| Level | Sources | Example |
+|---|---|---|
+| 3 | Pinned, or written by the host through the SDK | The host writes a limit from the policy system |
+| 2 | Stated by a user in conversation, or through an MCP client | A handler says the limit is now 3,000 |
+| 1 | Inferred by the agent, taken from tool output, or added by consolidation | A tool result mentions 2,500 |
+
+At the same level the newer write wins, as before. A weaker write that
+disagrees does not replace the value: it is kept in the attribute's history
+with `applied: False`, and `upsert_entity_with_report` names the attribute in
+`kept_stronger`. There is no queue and no review step; the entries that were
+not applied are visible on the entity's page.
+
+A direct call to `EntityMemory.upsert_entity` is host code, so it writes at
+level 3 unless you pass `source_level`. The agent's own write paths pass
+theirs: the model's entity tool and turn capture write at 2, the `remember`
+tool and consolidation at 1. A value stored before levels existed is ranked
+from what it says: pinned is 3, a source naming the conversation is 2, and
+anything else is 1, so old values stay as replaceable as they were.
+
+Attribute review follows the same rule: of two attributes about the same
+thing, the one from the stronger source stays, whichever is newer.
+
+!!! note "Changed behaviour"
+    A value your application wrote through the SDK is no longer replaced by
+    what a user says later, or by what the agent infers. To let conversation
+    update a seeded value, seed it with `source_level=2`.
+
+## Dated history
+
+A replaced value moves to the attribute's `history` with `valid_from` (when
+it became the current value) and `valid_to` (when it was replaced). The
+history keeps 20 values per attribute (5 before); set
+`EntityPolicy(attribute_history_limit=...)` to change that. Only the current
+value is rendered into a prompt. `attribute_timeline(attribute)` returns the
+values in order with their dates; for a value stored before dates were kept,
+`valid_from` falls back to `updated_at`, so nothing is migrated.
+
+### Two clocks
+
+Every value is dated twice.
+
+| Clock | Fields | Answers |
+|---|---|---|
+| Valid time | `valid_from`, `valid_to` | When was this true in the world? |
+| Recorded time | `recorded_at`, `superseded_at` | When did the system learn it, and stop believing it? |
+
+By default the two agree: a value is taken to be true from the moment it was
+stored. A host that knows better says so on the write, and the two clocks
+then tell a change from a correction:
+
+```python
+# A change: £2,500 was true until January, £3,000 from then on.
+entities.upsert_entity(name="Total Payout Authority", memory_id=memory_id, attributes=[
+    {"name": "grade_1", "value": "£3,000", "valid_from": "2027-01-01"}])
+
+# A correction: £2,500 was never right. The new value covers the same period.
+entities.upsert_entity(name="Total Payout Authority", memory_id=memory_id, attributes=[
+    {"name": "grade_1", "value": "£2,750", "correction": True}])
+```
+
+- **A change** ends the old value's `valid_to` at the new value's
+  `valid_from` (or at the time of the write when the host gave none).
+- **A correction** keeps the old value in the history with
+  `corrected: True` and no `valid_to`: it was believed from `recorded_at` to
+  `superseded_at`, and was never true. A write whose `valid_from` equals the
+  current value's explicit `valid_from` is treated as a correction too.
+- **A backfill.** A write whose `valid_from` is earlier than the current
+  value's explicit `valid_from` describes the past: it goes into the history
+  for its own period and the current value stays.
+
+`attribute_timeline` rows carry both clocks. To ask a point-in-time question:
+
+```python
+entities.value_as_of("grade_1", "2026-09-30", name="Total Payout Authority",
+                     memory_id=memory_id)             # what was true then
+entities.value_as_of("grade_1", "2026-09-30", known_at="2026-12-01",
+                     name="Total Payout Authority",
+                     memory_id=memory_id)             # what we believed in December about September
+entities.value_as_of("grade_1", known_at="2026-12-01", name="Total Payout Authority",
+                     memory_id=memory_id)             # the value we believed in December
+```
+
+Each returns a timeline row, or None. A corrected value is never returned by
+valid time alone; with `known_at` before the correction, it is. The read also
+covers values a consolidation pass retired (`entity_attribute_timeline(record,
+"grade_1")` is the combined timeline). Records written before the second
+clock read as before: `recorded_at` falls back to `valid_from` and
+`superseded_at` to `valid_to`.
+
+## Confirmations
+
+A value stated again is recorded, not ignored. The attribute keeps
+`confirmations` (how often it was stated again after it was first stored),
+`last_seen` and the newest five in `confirmed_by` (`source`, `thread_id`,
+`level`, `at`). A confirmation never changes the value, its source level or
+its valid-from, and never replaces the stored vector.
+
+| What happened | What is recorded |
+|---|---|
+| A weaker source states the value the record holds (a user repeats what the host wrote) | A confirmation. Before, nothing. |
+| The same source in the same conversation repeats it | Nothing within an hour (`REINFORCE_QUIET_SECONDS`), so an agent that restates a fact every turn causes no write; after that, a confirmation |
+| Another conversation at the same or a higher level states it | As before, the value takes the new provenance and the earlier one joins the history. It now also counts as a confirmation |
+| Consolidation finds the user stating it again in a later conversation | A `reinforce_fact` operation in the plan, applied with the plan and undone with it |
+
+```python
+entities.reinforce_attribute("office", name="Counter Fraud Unit", source="audit:2027-01",
+                             memory_id=memory_id)       # record one yourself
+entities.withdraw_confirmations("audit:2027-01", memory_id=memory_id, user_id=None)
+```
+
+Forgetting a conversation removes the confirmations it gave. When a value is
+replaced, the old value keeps its count in the history and the new one starts
+at none.
+
+## Stale references: when a fact changes
+
+Superseding a value fixes the record. A skill distilled last month, or a
+note the agent wrote, can still state the old value in its text. When an
+entity value is replaced (by a turn, a host write or a consolidation pass),
+the agent's skills and the notes in the same memory that still mention the
+old value are flagged. Nothing is rewritten.
+
+```python
+for flag in agent.stale_references():
+    print(flag["target_type"], flag["target_name"], flag["entity"], flag["attribute"],
+          flag["old_value"], "->", flag["new_value"], flag["confidence"], flag["excerpt"])
+
+agent.resolve_stale_reference(flag["flag_id"], by="dev")     # the text was fixed
+agent.dismiss_stale_reference(flag["flag_id"], by="dev")     # not about this fact
+agent.check_stale_references(memory_id)                      # sweep what is stored now
+```
+
+Matching is narrow on purpose:
+
+- The old value has to appear as a whole phrase, not inside a longer word or
+  number, and values under four characters are never looked for.
+- A name-like value ("Leeds", "Nadia Hussain") is enough on its own and is
+  flagged at `confidence: "low"`. A number, an amount or ordinary words also
+  need the entity (its name or an alias) or the attribute named in the same
+  text; those flags are `"high"`.
+- A value that only grew ("Leeds" to "Leeds office") flags nothing.
+- Skills are the agent's own, except deprecated ones. Notes are
+  knowledge-base and summary rows with the entity's `memory_id`.
+
+A flag is stored once per record and old value; a dismissed or resolved flag
+is not reopened. Flagging happens as the value is replaced when an agent
+that serves that memory is loaded in the process; `check_stale_references`
+covers everything else. Set `agent.propagate_supersessions = False` to turn
+the live flagging off. Each supersession reads the agent's skills and up to
+2,000 rows of each note store.
+
+## Aliases
+
+When two records are merged, the names of the record merged away become the
+survivor's aliases (`entity_aliases(record)`). A later write or lookup by one
+of those names resolves to the survivor, after the identity key and the exact
+name. Undoing the merge removes the aliases it added, and
+`EntityMemory.set_aliases` lets an operator edit the list.
 
 ## Run it in the background
 

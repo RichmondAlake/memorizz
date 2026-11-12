@@ -1,0 +1,18 @@
+sequenceDiagram
+    autonumber
+    participant L as Tool log
+    participant B as Background model
+    participant C as Code checks
+    actor H as A person
+    participant X as Toolbox entry
+    participant A as Ada, next request
+    L->>B: refused calls, requests asked twice, requests that went to the wrong tool
+    B->>C: proposal: a note, an example, a "Not for" line (citing calls)
+    C->>C: enough evidence? any copied values? a real neighbour? bounded?
+    C->>C: builds the example call itself, digits masked
+    C-->>H: revision waits, with its evidence
+    H->>X: approve (name recorded)
+    X->>X: re-embed with the examples, re-measure ranks
+    Note over X,A: After lunch
+    X-->>A: docstring + "Learned from use" (notes, never a user's wording)
+    A->>A: right tool, right arguments, first call

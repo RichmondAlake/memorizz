@@ -90,7 +90,10 @@ install, add the UI too: `uv tool install --force 'memorizz[ui,oracle]'`.
 memorizz ui
 ```
 
-Default URL: `http://127.0.0.1:8765`
+Default URL: `http://127.0.0.1:8765`. It opens in your browser once the server
+is running; `memorizz ui --no-open` (or `MEMORIZZ_UI_OPEN_BROWSER=false`) skips
+that, and it is skipped over SSH, in CI and on a Linux machine without a
+display. Ctrl+C stops the server at once, even with a page still open.
 
 Optional host/port overrides:
 
@@ -125,6 +128,29 @@ CLI's store; `MEMORIZZ_NOTION_DATA_SOURCE_ID` and `NOTION_TOKEN`). Without
 `--no-connect` or `MEMORIZZ_UI_AUTO_CONNECT=false` starts on the connect page
 instead. Connecting at startup uses the same code as the connect form. If it
 fails, the UI still starts and the connect page shows why.
+
+### The Mac app
+
+[MemoRizz.dmg](https://memorizzwebsite.vercel.app/downloads/MemoRizz.dmg)
+(also the *Download for Mac* button on the website) holds `MemoRizz.app`,
+which shows the local UI in its own window, for macOS 13 or later on Apple
+silicon or Intel:
+
+- On launch it shows the UI already running on port 8765, or runs
+  `memorizz ui` and shows it once it answers. Quitting stops the server it
+  started; one it found running is left alone.
+- Without MemoRizz installed, it offers to install it with uv
+  (`uv tool install --python 3.12 'memorizz[ui,mcp]'`, installing uv first
+  when needed).
+- Links to other sites open in your browser, downloads go to `~/Downloads`,
+  and *View → Show Server Log* opens `~/Library/Logs/MemoRizz/ui.log`.
+- `MEMORIZZ_UI_PORT` picks another port and `MEMORIZZ_APP_COMMAND` the
+  `memorizz` to run.
+
+The app is signed but not yet notarized by Apple, so the first launch is
+blocked: open *System Settings → Privacy & Security* and choose *Open Anyway*.
+To build it yourself, run `packaging/macos/build.sh` (see
+`packaging/macos/README.md`).
 
 ## 3. Connect To A Memory Provider
 
@@ -200,11 +226,92 @@ the database.
 
 ## 4. Navigation Map
 
-Once connected, the sidebar is your main navigation.
+Once connected, the sidebar is your main navigation. Its pages are grouped
+under Build, Memory, Connect, Operate and Admin, and it folds to icons with
+the arrow beside the logo.
+
+- **Search.** The field at the top of every page (⌘K on a Mac, Ctrl+K
+  elsewhere) finds any page, any agent in the connected store and a few
+  actions such as *Create agent*. Type to filter, use the arrow keys to move
+  and Enter to open. Before you type, it lists the pages you opened last.
+- **Where you are.** The top bar names the sidebar group and area of the
+  page you are on, such as *Operate / Observability*. Select the area to go
+  back to its first page.
+- **Keyboard shortcuts.** Press `?`, or the keyboard button in the top bar,
+  for the full list, including the shortcuts of the page you are on. Press
+  `g` then a letter to open a page:
+
+  | Keys | Page | Keys | Page |
+  |---|---|---|---|
+  | `g` `o` | Overview | `g` `l` | Continual learning |
+  | `g` `a` | Agents | `g` `c` | MCP connections |
+  | `g` `h` | Agent harnesses | `g` `k` | Skills |
+  | `g` `p` | Playground | `g` `t` | Observability |
+  | `g` `u` | Automations | `g` `e` | Evalground |
+  | `g` `m` | Memory types | `g` `s` | Settings |
+
+  Shortcuts do nothing while you type in a field or while a dialog is open.
+- **Waiting for you.** The bell in the top bar counts what needs a person:
+  tool calls and harness runs held for approval, consolidation plans and
+  persona changes to review, automations whose last run failed and failure
+  alerts that are firing. Each item links to the page where you act on it.
+- **Switch store.** Select the store name, in the top bar or at the foot of
+  the sidebar, to list the FileSystem stores on this computer and connect to
+  another one. *Connect to another store or database* opens the connect
+  page.
+- **First steps.** On a new store the Overview lists five steps, from
+  creating an agent to scheduling it, and ticks each one as the store fills.
+  *Hide* removes the list in this browser.
+- **Your name.** Select the person button in the top bar and enter your
+  name or email. It is kept in this browser, fills the approver field of
+  approval, review and undo forms, and signs your changes in the activity
+  log. *Compact tables* in the same menu shows more rows on every table.
+- **Activity.** *Admin → Activity* lists the changes made through the UI:
+  who, what, which record and when. Filter it, save a view or export it as
+  CSV. It records the route and the IDs in it, never message text, form
+  values or secrets, and chat messages are not listed. The file is
+  `~/.memorizz/audit/ui_activity.jsonl`; set `MEMORIZZ_UI_ACTIVITY_LOG` to
+  write it elsewhere.
+- **Budget meter.** Once a monthly budget is set on *Usage & cost*, the foot
+  of the sidebar shows this month's spend against it on every page.
+- **Run drawer.** Select a row under *Recent runs* (Overview or
+  Observability) to read the run in a drawer; *Open the full trace* goes to
+  its timeline.
+- **Row menus and export.** The *⋮* at the end of an agent or memory row
+  lists its actions. *Export CSV* on a table page downloads the rows shown,
+  with the filters applied.
+- **Customize the Overview.** *Customize* hides or reorders the Overview's
+  sections, and *Compared with* chooses what its change figures compare
+  against. Both choices stay in this browser or in the page's address.
+- **Preview pane.** In the playground, a reply containing an HTML page, SVG,
+  Markdown, JSON, CSV or a long code block has an *Open preview* button. The
+  pane opens beside the conversation with *Preview*, *Code*, *Copy* and
+  *Download*. HTML and SVG render in a sandboxed frame that cannot reach
+  MemoRizz; scripts in the page run only after you tick *Run this page's
+  scripts*.
+- **Playground home.** The Playground opens on a message box. Pick the agent
+  in the box, type and press Enter: the conversation opens in that agent's
+  playground with your message sent. *Open without a message* goes straight
+  to the agent, and the agents you used last are listed under *Jump back
+  in*.
+- **Filters and views.** On a table page, each filter in use shows as a chip
+  you can remove. *Views* saves the current filters, sort order and time
+  range under a name and applies it again later. Views are kept in this
+  browser.
+- **Several rows at once.** Tick rows to act on them together: add agents to
+  favorites, copy their IDs or delete them; copy or download memory records
+  as JSON; compare two runs of one agent from the Overview's recent runs.
+  Deleting agents removes the agent records only. Their memories,
+  conversations and traces are kept.
+- **Theme.** The UI follows your system's light or dark setting until you
+  choose one with the sun and moon button at the foot of the sidebar
+  (Ctrl/⌘+Shift+L). The connect and sign-in pages follow the same choice.
+- **Disconnect.** The button beside the theme switch asks before it
+  disconnects. Nothing is deleted.
 
 | Section | Route | Purpose |
 |---|---|---|
-| Dashboard | `/dashboard` | High-level provider connection details and memory counts. |
+| Overview | `/dashboard` | Runs, success rate, run time, tokens and spend across every agent, each with its change from the period before, plus what needs attention and the memory counts. |
 | Agents | `/agents` | Browse agents, sort, quick-chat, and jump into edit/playground. |
 | Create Agent | `/agents/new` | Start from a template or a blank form; set identity, model, persona, memory, learning, tools and runtime, with a live summary and the Python SDK code. `?template=<key>` opens it filled in. |
 | Playground | `/playground` and `/agents/{id}/playground` | Interactive chat, thread switching, token/context stats, and per-agent runtime config. [Timers](../guides/automations.md#timers) show as a live card above the chat box. |

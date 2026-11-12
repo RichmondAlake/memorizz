@@ -1,0 +1,28 @@
+flowchart LR
+    subgraph SEED["Seeded in Part 3"]
+        S1["A fact whose<br/>conversation was deleted"]
+        S2["One team,<br/>two records"]
+        S3["A how-to note<br/>that names Drop"]
+        S4["Two skills: one stale,<br/>one misfiring"]
+        S5["Twenty old<br/>desk notes"]
+    end
+    subgraph DAYS["Left by the day"]
+        D1["3 Amber Pack<br/>referrals"]
+        D2["3 uploads,<br/>2 refused"]
+        D3["4 customer<br/>updates"]
+        D4["3 remarks<br/>in passing"]
+    end
+    J1["Check, then tidy the facts<br/>jobs 1 to 4"]
+    J2["Tools and skills<br/>jobs 5 to 8"]
+    J3["Identity<br/>job 9"]
+    J4["Housekeeping<br/>jobs 10 and 11"]
+    S1 -- "1 Verify" --> J1
+    S2 -- "2 Entities" --> J1
+    D4 -- "3 Stated facts" --> J1
+    S3 -- "4 Stale references" --> J1
+    D2 -- "5 Tool review" --> J2
+    S4 -- "6 Staleness, 8 Review" --> J2
+    D1 -- "7 Promotion" --> J2
+    D3 -- "9 Persona learning" --> J3
+    D4 -- "10 Compact" --> J4
+    S5 -- "11 Retention" --> J4

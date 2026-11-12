@@ -24,7 +24,7 @@
 
 {#- ``zoom`` is the page's URL up to its query, e.g. "/dashboard?load=1&":
     a bar opens that page for its own time span, or a lone run's trace. -#}
-{% macro runs_chart(overview, window, window_label, title='Runs over time', prefix='ov', zoom='') -%}
+{% macro runs_chart(overview, window, window_label, title='Runs over time', prefix='ov', zoom='', change=None, compare_label='') -%}
 {% set t = overview.totals %}
 {% set series = overview.series %}
 <section class="panel ov-activity" aria-labelledby="{{ prefix }}-activity-title">
@@ -71,6 +71,12 @@
             <span>{{ 'Now' if generated_at is not defined or (generated_at - overview.window_end).total_seconds() < 60 else overview.window_end.strftime(time_format) }}</span>
         </div>
     </div>
+    {#- What the chart covers, and how it moved: the line under every chart. -#}
+    <p class="ov-chart-foot">
+        <span>{{ '{:,}'.format(t.runs) }} run{{ '' if t.runs == 1 else 's' }} in the {{ window_label }}, {{ t.failed }} failed</span>
+        {% if change %}<span class="{{ change.tone }}">{% if change.arrow %}<span aria-hidden="true">{{ change.arrow }}</span><span class="visually-hidden">{{ 'Up' if change.arrow == '▲' else 'Down' }}</span> {% endif %}{{ change.text }} against {{ compare_label }}</span>{% endif %}
+        <span>Each bar is {{ fmt_period(overview.bucket_seconds) }}</span>
+    </p>
     {% else %}
     {{ empty_state('No runs in this window', 'Send a message in the playground or run an automation to see activity here.', '/playground', 'Open the playground') }}
     {% endif %}
@@ -104,11 +110,11 @@
 <section class="panel" aria-labelledby="{{ prefix }}-recent-title">
     <div class="panel-header">
         <h2 class="panel-title" id="{{ prefix }}-recent-title">{{ title }}</h2>
-        <a class="panel-meta" href="/traces">View all in Observability</a>
+        {% if prefix == 'obs' %}<span class="panel-meta">Last 7 days · select a run for its details</span>{% else %}<a class="panel-meta" href="/traces">View all in Observability</a>{% endif %}
     </div>
     {% if runs %}
     <div class="table-scroll">
-        <table class="data-table ov-runs">
+        <table class="data-table ov-runs" id="{{ prefix }}-runs-table">
             <thead>
                 <tr>
                     <th scope="col">Started</th>
@@ -125,7 +131,12 @@
             </thead>
             <tbody>
                 {% for run in runs %}
-                <tr>
+                <tr{% if run.root_trace_id and run.agent_id %} data-key="{{ run.root_trace_id }}" data-agent-id="{{ run.agent_id }}"{% endif %}
+                    data-run-agent="{{ agent_names.get(run.agent_id, run.agent_id[:12]) if run.agent_id else 'Unknown agent' }}"
+                    data-run-started="{{ run.started_at.strftime('%Y-%m-%d %H:%M:%S') }} UTC"
+                    data-run-trace="{{ run.trace_url }}"
+                    {% if run.error_code %}data-run-error="{{ run.error_code }}"{% endif %}
+                    {% if run.thread_id %}data-run-thread="{{ run.thread_id }}"{% endif %}>
                     <td title="{{ run.started_at.strftime('%Y-%m-%d %H:%M:%S') }} UTC">{{ relative_time(run.started_at, generated_at) }}</td>
                     <td>{% if run.agent_id %}<a href="/agents/{{ run.agent_id }}/playground">{{ agent_names.get(run.agent_id, run.agent_id[:12]) }}</a>{% else %}—{% endif %}</td>
                     <td>
@@ -150,6 +161,61 @@
             </tbody>
         </table>
     </div>
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // A click on a run opens it in a drawer, so the list stays in view;
+        // the full trace is one more click.
+        const runsTable = document.getElementById('{{ prefix }}-runs-table');
+        if (runsTable && window.MemorizzDrawer) {
+            runsTable.tBodies[0].addEventListener('click', function(event) {
+                const heads = Array.from(runsTable.tHead.rows[0].cells).map(function(cell) { return cell.textContent.trim(); });
+                if (event.target.closest('a, button, input, label')) return;
+                const row = event.target.closest('tr[data-run-trace]');
+                if (!row) return;
+                const facts = [];
+                Array.from(row.cells).forEach(function(cell, index) {
+                    const label = heads[index];
+                    if (cell.classList.contains('bulk-col') || !label || label === 'Trace' || label === 'Agent') return;
+                    facts.push([label, cell.textContent.replace(/\s+/g, ' ').trim() || '—']);
+                });
+                if (row.dataset.runError) facts.push(['Error code', row.dataset.runError]);
+                if (row.dataset.runThread) facts.push(['Thread', row.dataset.runThread]);
+                if (row.dataset.key) facts.push(['Trace ID', row.dataset.key]);
+                MemorizzDrawer.open({
+                    title: row.dataset.runAgent,
+                    subtitle: 'Run started ' + row.dataset.runStarted,
+                    status: row.querySelector('.pill') ? row.querySelector('.pill').cloneNode(true) : null,
+                    facts: facts,
+                    actions: [
+                        { label: 'Open the full trace', href: row.dataset.runTrace, primary: true },
+                        row.dataset.agentId ? { label: 'Open the agent', href: '/agents/' + encodeURIComponent(row.dataset.agentId) + '/playground' } : null,
+                        row.dataset.agentId ? { label: 'All runs of this agent', href: '/traces?agent_id=' + encodeURIComponent(row.dataset.agentId) } : null,
+                    ],
+                    returnTo: row,
+                });
+            });
+            runsTable.classList.add('has-drawer');
+        }
+        if (!window.MemorizzMonitor) return;
+        // Tick two runs of one agent to compare them side by side.
+        MemorizzMonitor.bulk('{{ prefix }}-runs-table', {
+            noun: 'run',
+            actions: [{
+                label: 'Compare',
+                enabled: function(keys, rows) {
+                    if (keys.length !== 2) return 'Select two runs to compare';
+                    return rows[0].dataset.agentId === rows[1].dataset.agentId || 'Select two runs of the same agent';
+                },
+                run: function(keys, rows) {
+                    // The older run is the baseline: rows are newest first.
+                    window.location.href = '/traces/compare?' + new URLSearchParams({
+                        agent_id: rows[0].dataset.agentId, baseline_root: keys[1], candidate_root: keys[0],
+                    });
+                },
+            }],
+        });
+    });
+    </script>
     {% else %}
     {{ empty_state('No recorded runs yet', 'Runs appear here as soon as an agent answers a message.') }}
     {% endif %}

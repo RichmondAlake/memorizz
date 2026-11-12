@@ -1,0 +1,18 @@
+sequenceDiagram
+    autonumber
+    participant O as Operator (Priya)
+    participant A as Agent
+    participant B as Background model
+    participant E as Entity memory
+    O->>A: plan_memory_consolidation(threads)
+    A->>E: read the entities and the named conversations
+    A->>B: which records are one thing? what did the user state that isn't stored? what did they say again?
+    B-->>A: suggestions, each with the user's words
+    A->>A: code checks — the quote is in a user message · it is newer than the stored value · merges need evidence · the source rule
+    A-->>O: a plan (nothing has changed)
+    O->>A: apply_memory_consolidation(plan, approved_by="priya.shah")
+    A->>E: merge + alias · add facts · count confirmations · retire replaced values
+    A->>E: flag skills and notes that still state a replaced value
+    Note over E: nothing deleted — every change is tagged with the plan id
+    O->>A: restore_memory_consolidation(plan_id) — if it was wrong
+    A->>E: walk the tags backwards

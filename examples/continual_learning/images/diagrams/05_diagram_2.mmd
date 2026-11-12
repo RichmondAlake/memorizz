@@ -1,0 +1,39 @@
+sequenceDiagram
+    autonumber
+    actor P as Priya
+    actor R as Desk Lead or Senior Handler
+    participant A as Ada (chat model)
+    participant S as Memory store
+    participant W as Scheduler
+    participant C as Refine cycle
+    participant B as Background model
+
+    rect rgb(10, 32, 52)
+    Note over P,S: The day — retain. Nothing is learned on the turn.
+    P->>A: a request (an Amber Pack, an upload, a customer update, a remark)
+    A->>S: read what is known
+    A-->>P: reply
+    A->>S: write the episode: messages, tool calls, the run
+    end
+
+    rect rgb(34, 16, 52)
+    Note over S,B: The night — refine. No user is waiting.
+    W->>C: cycle is due (skipped if nobody has spoken since the last one)
+    loop eleven jobs, in a fixed order
+        C->>S: read transcripts and existing memory
+        C->>B: propose changes for this job
+        B-->>C: proposals
+        C->>C: code checks them (quotes, source levels, gates)
+        C->>S: apply what its rule allows, flag or queue the rest
+    end
+    C->>S: store one report: changed, flagged, waiting, tokens
+    end
+
+    rect rgb(10, 40, 24)
+    Note over P,S: The morning — review, recall and reuse.
+    R->>C: approve what is waiting, read what was flagged
+    C->>S: apply what they approve, under their name
+    P->>A: the next request
+    A->>S: read the tidied memory
+    A-->>P: a better-informed reply
+    end

@@ -25,6 +25,7 @@ from .skill import (
     Skill,
     SkillInjectionRole,
     SkillStatus,
+    holdout_summary,
     normalize_skill_injection_role,
 )
 from .skillbox import Skillbox
@@ -47,6 +48,10 @@ class PromotionConfig:
     min_success_rate: float = 0.80
     min_distinct_queries: int = 2
     max_days_since_last_seen: int = 30
+    # Successes a host or an outcome evaluator confirmed. Off at 0, because
+    # an agent whose host reports no outcomes would stop promoting; set it
+    # to 2 once the host reports them.
+    min_verified_outcomes: int = 0
     # Ranking (never rescues a gate failure)
     recency_halflife_days: float = 14.0
     max_promotions_per_cycle: int = 3
@@ -69,6 +74,19 @@ class PromotionConfig:
     retrieval_min_similarity: float = 0.70
     max_skills_in_context: int = 2
     skill_injection_role: SkillInjectionRole = SkillInjectionRole.USER
+    # Holdout: the share of matching threads that run without an active
+    # skill, so each skill has a with-and-without figure. 0 turns it off.
+    holdout_rate: float = 0.1
+    # Runs needed on each side before a lower figure raises a review flag.
+    holdout_min_runs: int = 20
+    # How far below the "without" figure the skill's side must be, in
+    # standard errors of the difference, before the flag is raised. 0 flags
+    # any lower figure; a higher value flags fewer skills that make no
+    # difference and misses more that do harm.
+    holdout_flag_z: float = 1.0
+    # Validation rejects a new skill whose applicability embedding is this
+    # close (cosine) to a live skill of the same user.
+    duplicate_description_similarity: float = 0.85
     # Deprecated compatibility key. Raw exemplars are never co-injected.
     include_exemplar: bool = False
     # Monitoring / demotion
@@ -99,6 +117,18 @@ class PromotionConfig:
             raise ValueError("shadow_evaluation_recent_window must be at least 1")
         if self.shadow_readiness_min_observations < 1:
             raise ValueError("shadow_readiness_min_observations must be at least 1")
+        if int(self.min_verified_outcomes) < 0:
+            raise ValueError("min_verified_outcomes must be 0 or more")
+        if int(self.holdout_min_runs) < 1:
+            raise ValueError("holdout_min_runs must be at least 1")
+        if float(self.holdout_flag_z) < 0:
+            raise ValueError("holdout_flag_z must be 0 or more")
+        for name, value in (
+            ("holdout_rate", self.holdout_rate),
+            ("duplicate_description_similarity", self.duplicate_description_similarity),
+        ):
+            if not 0.0 <= float(value) <= 1.0:
+                raise ValueError(f"{name} must be between 0 and 1")
         for name, value in (
             (
                 "shadow_readiness_min_trajectory_match_rate",
@@ -204,8 +234,44 @@ class PromotionEngine:
                 )
                 report.rejected.append((candidate.canonical_hash, [f"error: {exc}"]))
 
-        report.review_flags.extend(self._deviation_review_flags())
+        report.review_flags.extend(self.skill_review_flags())
         return report
+
+    def skill_review_flags(self) -> List[str]:
+        """Skills a person should look at: ones that retrieve on requests
+        they don't fit, and ones whose holdout says they do not help."""
+        return self._deviation_review_flags() + self._holdout_review_flags()
+
+    def _holdout_review_flags(self) -> List[str]:
+        flags = []
+        for skill in self.skillbox.list_skills(statuses=(SkillStatus.ACTIVE,)):
+            summary = holdout_summary(
+                skill.stats, self.config.holdout_min_runs, self.config.holdout_flag_z
+            )
+            if not summary["flag"]:
+                continue
+            label = (
+                "verified success" if summary["verified"] else "success (unverified)"
+            )
+            flags.append(
+                f"skill {skill.name} ({skill.skill_id}): {label} "
+                f"{summary['with']['rate']:.0%} with the skill over "
+                f"{summary['with']['runs']} runs, {summary['without']['rate']:.0%} "
+                f"without it over {summary['without']['runs']} — the skill may "
+                "not be helping"
+            )
+        return flags
+
+    def _live_skills_for(self, user_id: Optional[str]) -> List[Skill]:
+        """Live skills this user's requests can reach: their own and
+        agent-wide ones."""
+        return [
+            skill
+            for skill in self.skillbox.list_skills(
+                statuses=(SkillStatus.ACTIVE, SkillStatus.SHADOW, SkillStatus.CANDIDATE)
+            )
+            if user_scope_matches(skill.user_id, user_id, MemoryType.SKILLBOX)
+        ]
 
     def _promote_one(
         self,
@@ -253,6 +319,9 @@ class PromotionEngine:
             skill_md,
             success_docs,
             failure_docs=failure_docs,
+            live_skills=self._live_skills_for(skill_user_id),
+            applicability_queries=self._skill_queries(candidate),
+            duplicate_similarity=self.config.duplicate_description_similarity,
         )
         if not verdict.ok or parsed is None:
             report.rejected.append((candidate.canonical_hash, verdict.reasons))
@@ -386,6 +455,9 @@ class PromotionEngine:
 
         executions = len(runs)
         successes = sum(1 for run in runs if run.outcome == "success")
+        verified = sum(
+            1 for run in runs if run.outcome == "success" and run.outcome_verified
+        )
         if executions < self.config.min_executions:
             return False, f"executions {executions} < {self.config.min_executions}"
         success_rate = successes / executions
@@ -401,6 +473,13 @@ class PromotionEngine:
                 False,
                 f"distinct_queries {stat.distinct_query_count} < "
                 f"{self.config.min_distinct_queries}",
+            )
+        if verified < self.config.min_verified_outcomes:
+            # The agent's own opinion that a run worked is not enough once
+            # the host reports outcomes: someone has to have confirmed it.
+            return (
+                False,
+                f"verified_outcomes {verified} < {self.config.min_verified_outcomes}",
             )
         if stat.last_seen is None:
             return False, "no timestamps on runs"

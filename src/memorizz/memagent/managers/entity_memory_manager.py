@@ -35,6 +35,11 @@ class EntityMemoryManager:
             except Exception as exc:
                 logger.warning(f"Failed to initialize entity memory: {exc}")
 
+    def set_history_limit(self, limit: int) -> None:
+        """How many replaced values each attribute keeps (EntityPolicy)."""
+        if self._entity_memory is not None:
+            self._entity_memory.attribute_history_limit = max(0, int(limit))
+
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
@@ -210,8 +215,13 @@ class EntityMemoryManager:
         user_id: Optional[str] = None,
         identity_key: Optional[str] = None,
         report: bool = False,
+        source_level: int = 2,
     ) -> Any:
         """Persist entity updates triggered via the built-in tool.
+
+        ``source_level`` is 2 by default: the model calls this tool when the
+        user states or corrects a fact in conversation, so the write ranks
+        as stated by the user, above an inference and below the host.
 
         ``identity_key`` is host authority (for example
         ``"authenticated_user"``), added by the application around the tool
@@ -256,6 +266,7 @@ class EntityMemoryManager:
             identity_key=identity_key,
             memory_id=memory_id,
             user_id=user_id,
+            source_level=source_level,
         )
         return result if report else result["entity_id"]
 

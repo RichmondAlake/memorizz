@@ -451,3 +451,117 @@
         flex: 1 1 auto;
     }
 }
+
+/* Agent personas: what persona learning added to each saved agent. */
+.pe-agents {
+    margin-bottom: 22px;
+}
+
+.pe-section-title {
+    margin: 0 0 10px;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.pe-agent {
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.pe-agent + .pe-agent {
+    margin-top: 8px;
+}
+
+.pe-agent > summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    cursor: pointer;
+}
+
+.pe-agent-name strong {
+    display: block;
+    font-size: 13.5px;
+}
+
+.pe-agent-name small {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.pe-agent-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.pe-agent-body {
+    padding: 2px 14px 12px;
+    border-top: 1px solid var(--border-color);
+}
+
+.pe-agent-change {
+    padding: 12px 0;
+}
+
+.pe-agent-change + .pe-agent-change {
+    border-top: 1px solid var(--border-color);
+}
+
+.pe-agent-change.is-pending {
+    margin: 12px 0 0;
+    padding: 12px;
+    border: 1px solid color-mix(in srgb, var(--accent-warning, #b7791f) 45%, var(--border-color));
+    border-radius: 8px;
+}
+
+.pe-agent-when,
+.pe-agent-reason,
+.pe-agent-none,
+.pe-agent-links {
+    margin: 0 0 6px;
+    color: var(--text-muted);
+    font-size: 12.5px;
+}
+
+.pe-agent-add {
+    margin: 0 0 6px;
+    font-size: 14px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.pe-agent-diff {
+    margin: 0 0 6px;
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+
+.pe-agent-diff span:first-child {
+    color: var(--text-muted);
+    text-decoration: line-through;
+}
+
+.pe-agent-quotes {
+    margin: 0 0 8px;
+    padding: 0 0 0 12px;
+    list-style: none;
+    border-left: 2px solid var(--border-color);
+    color: var(--text-secondary, var(--text-muted));
+    font-size: 12.5px;
+}
+
+.pe-agent-quotes li + li {
+    margin-top: 3px;
+}
+
+.pe-agent-none {
+    padding-top: 12px;
+}
+
+.pe-agent-links {
+    margin: 4px 0 0;
+}

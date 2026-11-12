@@ -1,0 +1,23 @@
+sequenceDiagram
+    autonumber
+    actor Desk as Priya and Ellie
+    participant Ada as Ada (chat model)
+    participant Store as Memory store
+    participant BG as Background model
+    participant Code as MemoRizz checks
+    actor Lead as Dev (Desk Lead)
+
+    loop through the week
+        Desk->>Ada: "Customer update for CW-431640..."
+        Ada->>Store: save the turn (episodic log)
+        Ada-->>Desk: a draft
+    end
+    Note over Ada,BG: later, off the turn
+    Store->>BG: the handlers' own messages, by conversation
+    BG-->>Code: one sentence + quotes, and one rule + corrections
+    Code->>Store: is each quote in that conversation, word for word?
+    Code->>Code: enough conversations? two people? safe wording?
+    Code->>Store: proposals wait on the saved agent
+    Lead->>Store: approve the sentence, with a name
+    Lead->>Store: approve the rule, as its owner
+    Store-->>Ada: a new persona version, in every prompt from now on

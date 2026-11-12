@@ -18,7 +18,8 @@
             {% endfor %}
         </select>
     </form>
-    <a href="{{ create_url }}" class="btn btn-primary">Create automation</a>
+    {#- With no jobs the empty state below carries this button. -#}
+    {% if m.jobs %}<a href="{{ create_url }}" class="btn btn-primary">Create automation</a>{% endif %}
 {% endcall %}
 
 {% if error %}

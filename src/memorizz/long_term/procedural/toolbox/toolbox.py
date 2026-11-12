@@ -22,6 +22,32 @@ def get_openai_default() -> LLMProvider:
     return OpenAI()
 
 
+#: Example requests written for a tool when it is registered with ``augment``.
+AUGMENTED_QUERIES = 6
+MAX_AUGMENTED_DESCRIPTION = 900
+
+_AUGMENT_PROMPT = """You write the catalogue entry that lets an AI agent find \
+the right tool for a request. The entry is searched by meaning, so it has to \
+say what the tool is for in the words people use when they ask.
+
+Tool: {name}{signature}
+Author's docstring:
+{docstring}
+
+Reply with JSON only:
+{{"description": "...", "queries": ["...", "..."]}}
+
+Rules:
+- description: 40 to 70 words. Say what the tool does and the situations it \
+is for, and include the other words people use for the same thing. Only say \
+what it is for: never list what it is not for. Do not invent behaviour, \
+arguments or return fields that the docstring and signature do not show.
+- queries: {count} requests this tool should handle, as a busy colleague \
+would type them: short, informal, each worded differently, some without the \
+obvious keyword. No ids, names, amounts or other specific values.
+"""
+
+
 class Toolbox:
     """A toolbox for managing and retrieving tools using a memory provider."""
 
@@ -117,33 +143,25 @@ class Toolbox:
         """
 
         def decorator(f: Callable) -> str:
-            docstring = f.__doc__ or ""
-            signature = str(inspect.signature(f))
             object_id_str = str(uuid.uuid4())
 
             if augment:
-                augmented_docstring = self._augment_docstring(docstring)
-                queries = self._generate_queries(augmented_docstring)
-                tool_data = self._normalize_tool_metadata(
-                    f,
-                    self._get_tool_metadata(f),
-                    description=augmented_docstring,
-                )
                 from ....memory_provider.base import provider_manages_embeddings
+                from .indexing import search_text
 
-                embedding = (
+                description, queries = self._augment(f)
+                tool_data = self._metadata_from_callable(f)
+                tool_data["description"] = description or tool_data["description"]
+                tool_dict = {"_id": object_id_str, "queries": queries, **tool_data}
+                if queries:
+                    # Written here, not learned from real requests: tool
+                    # learning lets a learned example take a synthetic one's place.
+                    tool_dict["queries_source"] = "augmentation"
+                tool_dict["embedding"] = (
                     None
                     if provider_manages_embeddings(self.memory_provider)
-                    else get_embedding(
-                        f"{f.__name__} {augmented_docstring} {signature} {queries}"
-                    )
+                    else get_embedding(search_text(tool_dict))
                 )
-                tool_dict = {
-                    "_id": object_id_str,
-                    "embedding": embedding,
-                    "queries": queries,
-                    **tool_data,
-                }
             else:
                 # Deterministic registration is metadata-only by default. The
                 # provider may generate an embedding lazily at persistence or
@@ -421,13 +439,50 @@ class Toolbox:
         """Get the metadata for a tool using the configured LLM provider."""
         return self._require_llm_provider().get_tool_metadata(func)
 
-    def _augment_docstring(self, docstring: str) -> str:
-        """Augment the docstring using the configured LLM provider."""
-        return self._require_llm_provider().augment_docstring(docstring)
+    def _augment(self, func: Callable) -> tuple:
+        """A catalogue description and example requests for ``func``.
 
-    def _generate_queries(self, docstring: str) -> List[str]:
-        """Generate queries for the tool using the configured LLM provider."""
-        return self._require_llm_provider().generate_queries(docstring)
+        One model call. The reply has to be JSON with a description and a
+        list of requests; anything else falls back to the author's docstring
+        with no examples, so a bad reply never becomes the tool's entry. The
+        argument schema always comes from the code, never from the model.
+        """
+        import json
+        import logging
+
+        from ....learning.consolidation import text_generator
+
+        docstring = inspect.getdoc(func) or ""
+        generate = text_generator(self._require_llm_provider())
+        if generate is None:
+            return docstring, []
+        prompt = _AUGMENT_PROMPT.format(
+            name=func.__name__,
+            signature=str(inspect.signature(func)),
+            docstring=docstring or "(none)",
+            count=AUGMENTED_QUERIES,
+        )
+        try:
+            reply = str(generate(prompt) or "")
+            start, end = reply.find("{"), reply.rfind("}")
+            parsed = json.loads(reply[start : end + 1]) if 0 <= start < end else None
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Tool %s could not be augmented: %s", func.__name__, exc
+            )
+            return docstring, []
+        if not isinstance(parsed, dict):
+            return docstring, []
+        description = " ".join(str(parsed.get("description") or "").split())
+        if not description or len(description) > MAX_AUGMENTED_DESCRIPTION:
+            description = docstring
+        raw = parsed.get("queries")
+        queries = []
+        for item in raw if isinstance(raw, list) else []:
+            text = " ".join(str(item or "").split())
+            if 4 <= len(text) <= 160 and text not in queries:
+                queries.append(text)
+        return description, queries[:AUGMENTED_QUERIES]
 
     def _require_llm_provider(self) -> LLMProvider:
         if self.llm_provider is None:

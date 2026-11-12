@@ -482,6 +482,64 @@ document.addEventListener('DOMContentLoaded', function() {
             t: function(row) { window.location.href = '/traces?agent_id=' + encodeURIComponent(row.dataset.key); },
         },
     });
+
+    function post(url, body) {
+        return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body) })
+            .then(function(response) {
+                return response.json().catch(function() { return {}; }).then(function(data) {
+                    if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'The request was refused (' + response.status + ').');
+                    return data;
+                });
+            });
+    }
+    function names(rows) {
+        const shown = rows.slice(0, 5).map(function(row) { return row.querySelector('.fleet-name a').textContent.trim(); });
+        return shown.join(', ') + (rows.length > 5 ? ' and ' + (rows.length - 5) + ' more' : '');
+    }
+    function favorite(value) {
+        return function(keys) {
+            post('/api/agents/bulk-favorite', { agent_ids: keys, is_favorite: value })
+                .then(function() { window.location.reload(); })
+                .catch(function(error) { MemorizzDialogs.notify(error.message); });
+        };
+    }
+    function removeAgents(keys, rows) {
+        const plural = keys.length === 1 ? 'agent' : 'agents';
+        return MemorizzDialogs.confirm('Delete ' + keys.length + ' ' + plural + '?', {
+            detail: names(rows) + '. The agent records are removed and cannot be restored here. Their memories, conversations and traces are kept.',
+            confirmLabel: 'Delete ' + keys.length + ' ' + plural,
+            danger: true,
+        }).then(function(sure) {
+            if (!sure) return;
+            return post('/api/agents/bulk-delete', { agent_ids: keys }).then(function(result) {
+                if (result.failed && result.failed.length) {
+                    MemorizzDialogs.notify(result.deleted.length + ' deleted. ' + result.failed.length + ' could not be deleted: ' + result.failed[0].reason);
+                }
+                window.location.reload();
+            }).catch(function(error) { MemorizzDialogs.notify(error.message); });
+        });
+    }
+    MemorizzMonitor.rowMenu('fleet-table', function(row) {
+        const id = encodeURIComponent(row.dataset.key);
+        return [
+            { label: 'Open playground', href: '/agents/' + id + '/playground' },
+            { label: 'View traces', href: '/traces?agent_id=' + id },
+            { label: 'Edit', href: '/agents/' + id + '/edit', mutates: true },
+            { label: 'Copy ID', run: function() { if (navigator.clipboard) navigator.clipboard.writeText(row.dataset.key); } },
+            { label: 'Delete…', danger: true, mutates: true, run: function() { removeAgents([row.dataset.key], [row]); } },
+        ];
+    });
+    MemorizzMonitor.bulk('fleet-table', {
+        noun: 'agent',
+        actions: [
+            { label: 'Add to favorites', mutates: true, run: favorite(true) },
+            { label: 'Remove from favorites', mutates: true, run: favorite(false) },
+            { label: 'Copy IDs', run: function(keys, rows, bar) {
+                if (navigator.clipboard) navigator.clipboard.writeText(keys.join('\n')).then(function() { bar.clear(); });
+            } },
+            { label: 'Delete', danger: true, mutates: true, run: function(keys, rows) { removeAgents(keys, rows); } },
+        ],
+    });
 });
 </script>
 {% endblock %}

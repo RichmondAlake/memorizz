@@ -43,7 +43,9 @@ OUTPUT: one SKILL.md document, and nothing else. Constraints:
    exactly INSUFFICIENT and stop.
 4. Procedure steps reference tools by name with argument SHAPES (which
    fields, sourced from where). Never copy literal argument or result
-   values from the runs.
+   values from the runs. The one exception is a value listed under
+   CONSTANT ARGUMENTS after the runs: it was the same in every successful
+   run, so it is part of the procedure. Write it verbatim in its step.
 5. Include a "When NOT to apply" line under the "## When to apply"
    section, derived from the failure runs when present.
 6. A "## Failure modes observed" section may list only failures actually
@@ -213,6 +215,38 @@ def _longest_argument_values(docs: List[Dict[str, Any]], count: int = 5) -> List
     return values[:count]
 
 
+def _constant_short_arguments(docs: List[Dict[str, Any]]) -> List[tuple]:
+    """``(tool, argument, value)`` for arguments that had one short value in
+    every successful run: a status code, a mode, a flag. A value that never
+    varies is part of the procedure, and a skill that leaves it out cannot
+    reproduce the runs. Only values too short for the leak check qualify,
+    so a name, an id or an address is never kept this way."""
+    runs = [doc for doc in docs if isinstance(doc.get("steps"), dict)]
+    if len(runs) < 2:
+        return []
+    seen: Dict[tuple, List[set]] = {}
+    for index, doc in enumerate(runs):
+        for step_key, step in doc["steps"].items():
+            if not isinstance(step, dict) or not isinstance(
+                step.get("arguments"), dict
+            ):
+                continue
+            tool = str(step_key).split(":", 1)[-1].strip()
+            for name, value in step["arguments"].items():
+                if isinstance(value, (dict, list, tuple, set)) or value is None:
+                    continue
+                per_run = seen.setdefault((tool, str(name)), [set() for _ in runs])
+                per_run[index].add(str(value).strip())
+    constants = []
+    for (tool, name), per_run in seen.items():
+        values = set().union(*per_run)
+        if all(per_run) and len(values) == 1:
+            (value,) = values
+            if 0 < len(value) < _MIN_LEAK_CHECK_LENGTH:
+                constants.append((tool, name, value))
+    return constants
+
+
 class SkillDistiller:
     """Distill sampled runs into a SKILL.md and validate the result.
 
@@ -247,6 +281,12 @@ class SkillDistiller:
         for index, doc in enumerate(failure_docs, start=1):
             sections.append(f"FAILED RUN {index}\n{_format_run(doc)}")
         prompt = "\n\n".join(sections)
+        constants = _constant_short_arguments(success_docs)
+        if constants:
+            prompt += "\n\nCONSTANT ARGUMENTS (the same in every successful run):\n"
+            prompt += "\n".join(
+                f"- {tool}: {name} = {value}" for tool, name, value in constants
+            )
         if previous_demotion_reason:
             prompt += (
                 "\n\nNOTE: a previous version of this skill was demoted for: "
@@ -262,14 +302,65 @@ class SkillDistiller:
 
     # ------------------------------------------------------- validation gate
 
+    @staticmethod
+    def duplicate_of(
+        parsed: "ParsedSkillMd",
+        live_skills: Optional[List[Any]],
+        applicability_queries: Optional[List[str]] = None,
+        threshold: float = 0.85,
+    ) -> "Optional[tuple[Any, float]]":
+        """The live skill ``parsed`` duplicates, with the similarity, or None.
+
+        Compares applicability embeddings (name, description, preconditions,
+        sample queries), the same text retrieval matches on. A skill loaded
+        without its embedding is skipped rather than re-embedded."""
+        candidates = [
+            skill for skill in (live_skills or []) if getattr(skill, "embedding", None)
+        ]
+        if not candidates or threshold <= 0:
+            return None
+        from ....embeddings import get_embedding
+        from ....memory_provider.vectors import cosine
+
+        text = " ".join(
+            [
+                parsed.name,
+                parsed.description,
+                " ".join(parsed.preconditions),
+                " ".join(applicability_queries or []),
+            ]
+        )
+        try:
+            embedding = get_embedding(text)
+        except Exception as exc:
+            logger.warning("Duplicate-skill check skipped: %s", exc)
+            return None
+        best = None
+        for skill in candidates:
+            similarity = cosine(embedding, skill.embedding, on_mismatch="zero")
+            if similarity >= threshold and (best is None or similarity > best[1]):
+                best = (skill, float(similarity))
+        return best
+
     def validate(
         self,
         skill_md: str,
         sample_docs: List[Dict[str, Any]],
         use_llm_judge: bool = True,
         failure_docs: Optional[List[Dict[str, Any]]] = None,
+        live_skills: Optional[List[Any]] = None,
+        applicability_queries: Optional[List[str]] = None,
+        duplicate_similarity: float = 0.85,
     ) -> "tuple[ValidationVerdict, Optional[ParsedSkillMd]]":
-        """Machine checks — ALL must pass before a skill gains authority."""
+        """Machine checks — ALL must pass before a skill gains authority.
+
+        ``live_skills`` are the skills the same user's requests can already
+        reach. A new skill whose applicability text is within
+        ``duplicate_similarity`` (cosine) of one of them is rejected, naming
+        the existing skill: two skills competing for the same request make
+        selection worse. ``applicability_queries`` are the sample queries the
+        new skill would be stored with, so both sides are embedded the same
+        way."""
         reasons: List[str] = []
         failed_samples = list(failure_docs or [])
         all_samples = list(sample_docs) + failed_samples
@@ -340,6 +431,30 @@ class SkillDistiller:
         if reasons:
             return ValidationVerdict(False, reasons), parsed
 
+        # 5c. Near-duplicate of a live skill. Checked after the cheap
+        #     checks (it embeds the candidate) and before the judge call.
+        duplicate = self.duplicate_of(
+            parsed, live_skills, applicability_queries, duplicate_similarity
+        )
+        if duplicate is not None:
+            existing, similarity = duplicate
+            origin = (
+                "a skill the user stated"
+                if getattr(existing, "stated_by_user", False)
+                else "a live skill"
+            )
+            return (
+                ValidationVerdict(
+                    False,
+                    [
+                        f"near-duplicate of {origin}: {existing.name} "
+                        f"({existing.skill_id}), similarity {similarity:.2f} >= "
+                        f"{duplicate_similarity:.2f}; keep one of them"
+                    ],
+                ),
+                parsed,
+            )
+
         # 6. LLM-as-judge — one cheap call. Reject on anything but a clear
         #    YES; distillation is stochastic, the trajectory stays eligible
         #    next cycle.
@@ -355,13 +470,21 @@ class SkillDistiller:
                     judge_prompt += "\n\nOBSERVED FAILED RUNS:\n" + "\n\n".join(
                         _format_run(doc) for doc in failed_samples[:3]
                     )
+                # Ask about failed runs only when there are some: asked to
+                # judge failures it was not shown, a small model answers NO.
+                question = (
+                    "Would this instruction document, applied to a query it "
+                    "matches, plausibly reproduce the observed successful runs"
+                )
+                if failed_samples:
+                    question += (
+                        " while avoiding or correctly handling the observed "
+                        "failed runs"
+                    )
                 judge_answer = self.llm_provider.generate_text(
                     judge_prompt,
                     instructions=(
-                        "Would this instruction document, applied to a query it "
-                        "matches, plausibly reproduce the observed successful "
-                        "runs while avoiding or correctly handling the observed "
-                        "failed runs? Answer with YES or NO on the first line, "
+                        question + "? Answer with YES or NO on the first line, "
                         "then one sentence of reasoning."
                     ),
                 )

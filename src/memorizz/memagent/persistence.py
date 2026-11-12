@@ -180,6 +180,8 @@ def save_agent(agent):
                 if agent.memory_consolidation.enabled
                 # Relations also apply to passes run by hand.
                 or getattr(agent.memory_consolidation, "relations", None) is not None
+                # So does the choice to run upkeep as one refine cycle.
+                or getattr(agent.memory_consolidation, "refine_cycle", False)
                 else None
             ),
             persona_learning=(

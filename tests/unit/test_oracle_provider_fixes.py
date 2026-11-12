@@ -1118,7 +1118,9 @@ def test_list_rows_carry_forgetting_fields_and_flatten_retention_meta():
 @pytest.mark.unit
 def test_forgetting_fields_project_null_until_migrated():
     fields, _order_by = _LIST_SPECS[MemoryType.WORKFLOW_MEMORY]
+    # Five forgetting fields, then the run's conversation (migration 015).
     row = _row_for(fields, {"id": uuid.uuid4().bytes, "workflow_id": "w"}) + (None,) * 5
+    row += ("thread-7",)
     cursor = _Cursor(rows=[row])
     provider, _connection = _provider(cursor)
     provider._memory_type_has_column = lambda _type, column: column != "retention_meta"
@@ -1126,9 +1128,10 @@ def test_forgetting_fields_project_null_until_migrated():
     listed = provider.list_all(MemoryType.WORKFLOW_MEMORY)[0]
 
     assert (
-        "NULL, NULL, NULL, NULL, NULL FROM MEMORIZZ.workflow_memory"
+        "NULL, NULL, NULL, NULL, NULL, origin_thread_id FROM MEMORIZZ.workflow_memory"
         in cursor.calls[0][0]
     )
+    assert listed["origin_thread_id"] == "thread-7"
     assert listed["importance"] is None
     assert listed["access_count"] == 0
     assert listed["retention_state"] == "active"

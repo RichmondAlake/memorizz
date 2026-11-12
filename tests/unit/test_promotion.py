@@ -349,6 +349,49 @@ def _sample_docs():
     ]
 
 
+def _payment_run(claim, handler):
+    return {
+        "user_query": f"pay {claim}",
+        "outcome": "success",
+        "steps": {
+            "Step 1: check_authority": {
+                "arguments": {"claim_ref": claim, "handler": handler},
+                "result": "within",
+            },
+            "Step 2: set_status": {
+                "arguments": {"claim_ref": claim, "code": "Q12"},
+                "result": "ok",
+            },
+        },
+    }
+
+
+class TestConstantArguments:
+    def test_a_short_value_every_run_used_is_named_to_the_distiller(self):
+        llm = _RecordingJudge("INSUFFICIENT")
+        runs = [
+            _payment_run("CW-431402", "Tom Okafor"),
+            _payment_run("CW-431417", "Tom Okafor"),
+        ]
+        _distiller(llm=llm).distill(runs, [])
+        constants = llm.prompt.split("CONSTANT ARGUMENTS")[1]
+        assert "set_status: code = Q12" in constants
+        # A value that varies is not constant, and one long enough for the
+        # leak check (a name, an id) is never kept, even when it repeats.
+        assert "claim_ref" not in constants
+        assert "Tom Okafor" not in constants
+        assert "CONSTANT ARGUMENTS" in llm.instructions
+
+    def test_one_run_or_a_value_that_varies_names_nothing(self):
+        llm = _RecordingJudge("INSUFFICIENT")
+        _distiller(llm=llm).distill([_payment_run("CW-431402", "Gwen")], [])
+        assert "CONSTANT ARGUMENTS" not in llm.prompt
+        varied = _payment_run("CW-431417", "Ruth")
+        varied["steps"]["Step 2: set_status"]["arguments"]["code"] = "Q9"
+        _distiller(llm=llm).distill([_payment_run("CW-431402", "Gwen"), varied], [])
+        assert "CONSTANT ARGUMENTS" not in llm.prompt
+
+
 class TestValidationGate:
     def test_valid_document_passes(self):
         verdict, parsed = _distiller().validate(VALID_SKILL_MD, _sample_docs())
@@ -434,6 +477,14 @@ class TestValidationGate:
         assert "OBSERVED FAILED RUNS" in judge.prompt
         assert "refund pending order" in judge.prompt
         assert "avoiding or correctly handling" in judge.instructions
+
+    def test_llm_judge_is_not_asked_about_failed_runs_it_was_not_shown(self):
+        judge = _RecordingJudge()
+        verdict, _ = _distiller(llm=judge).validate(VALID_SKILL_MD, _sample_docs())
+        assert verdict.ok, verdict.reasons
+        assert "OBSERVED FAILED RUNS" not in judge.prompt
+        assert "failed runs" not in judge.instructions
+        assert "reproduce the observed successful runs?" in judge.instructions
 
     def test_literal_leak_from_failed_run_is_rejected(self):
         failed = {

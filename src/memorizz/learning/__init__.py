@@ -1,5 +1,6 @@
 """MemoRizz agent-memory and continual-learning control plane."""
 
+from .compaction import Compactor
 from .compiler import MemoryCompiler
 from .consolidation import (
     ConsolidationConfig,
@@ -30,8 +31,13 @@ from .persona_learning import (
     PersonaLearningConfig,
     PersonaProposal,
     PersonaReview,
+    RuleProposal,
 )
+from .propagation import SupersessionPropagator
+from .refine import RefineCycle
 from .store import LearningControlPlaneStore, LearningRecordConflictError
+from .tool_learning import ToolLearner, ToolLearningConfig, ToolReview, ToolRevision
+from .verification import NoteVerifier
 
 __all__ = [
     "ArtifactKind",
@@ -40,6 +46,7 @@ __all__ = [
     "PersonaLearningConfig",
     "PersonaProposal",
     "PersonaReview",
+    "RuleProposal",
     "ConsolidationConfig",
     "ConsolidationOp",
     "ConsolidationPlan",
@@ -58,6 +65,14 @@ __all__ = [
     "LearningEventType",
     "LearningRecordConflictError",
     "MemoryCompiler",
+    "Compactor",
+    "NoteVerifier",
+    "RefineCycle",
+    "SupersessionPropagator",
+    "ToolLearner",
+    "ToolLearningConfig",
+    "ToolReview",
+    "ToolRevision",
     "MemoryConsolidator",
     "OutcomeEvidence",
     "OutcomeStatus",

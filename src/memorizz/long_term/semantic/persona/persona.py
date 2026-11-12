@@ -20,6 +20,7 @@ full tool-use contract.
 import copy
 import json
 import logging
+import re
 import uuid
 from typing import Any, Dict, List, Optional, Union
 
@@ -39,9 +40,156 @@ SEMANTIC_FIELDS: tuple = ("name", "role", "goals", "background")
 # (version, history, timestamps) are derived.
 ALLOWED_UPDATE_FIELDS: frozenset = frozenset(SEMANTIC_FIELDS)
 
+# Guardrails: the rules of a persona that must not drift. They are rendered
+# first in the system prompt (earlier instructions are followed more
+# reliably), kept short enough to be followed, and writable only by host code
+# or an operator. No learning path can add, edit or remove one.
+MAX_GUARDRAILS: int = 12
+MAX_GUARDRAIL_CHARS: int = 240
+# change_trigger.source_type values allowed to write guardrails.
+GUARDRAIL_WRITERS: frozenset = frozenset({"host", "manual", "ui_form"})
+
+
+# Standing rules: house rules about how the work is done ("say a claim
+# referred to the fraud team is 'under review'"). They sit between guardrails
+# and goals. Learning may propose one from corrections people keep making,
+# but only a named person puts it in force; nothing applies one on its own.
+MAX_STANDING_RULES: int = 8
+MAX_STANDING_RULE_CHARS: int = 200
+# change_trigger.source_type values allowed to write standing rules. A write
+# from persona learning also needs a person's name in ``approved_by``.
+STANDING_RULE_WRITERS: frozenset = frozenset(
+    {"host", "manual", "ui_form", "persona_learning"}
+)
+
+
+class GuardrailWriteRefused(PermissionError):
+    """A path that is not the host or an operator tried to change guardrails."""
+
+
+class StandingRuleWriteRefused(GuardrailWriteRefused):
+    """A standing rule was written without a named owner, or by a path that
+    may not write one, or against a guardrail."""
+
+
+def normalize_guardrails(items: Any) -> List[str]:
+    """Guardrails as a clean list: stripped, blanks and repeats dropped.
+
+    Raises ``ValueError`` when an item is longer than ``MAX_GUARDRAIL_CHARS``
+    or there are more than ``MAX_GUARDRAILS``: a long list is not followed.
+    """
+    if items is None:
+        return []
+    if isinstance(items, str):
+        items = items.splitlines()
+    if not isinstance(items, (list, tuple)):
+        raise TypeError("guardrails must be a list of strings")
+    cleaned: List[str] = []
+    for item in items:
+        text = " ".join(str(item or "").split())
+        # A pasted list often carries its own bullet or number.
+        text = text.lstrip("-•* ").strip()
+        if not text or text in cleaned:
+            continue
+        if len(text) > MAX_GUARDRAIL_CHARS:
+            raise ValueError(
+                f"a guardrail is at most {MAX_GUARDRAIL_CHARS} characters "
+                f"({len(text)} given): {text[:60]}…"
+            )
+        cleaned.append(text)
+    if len(cleaned) > MAX_GUARDRAILS:
+        raise ValueError(
+            f"a persona holds at most {MAX_GUARDRAILS} guardrails ({len(cleaned)} given)"
+        )
+    return cleaned
+
+
+def normalize_standing_rules(items: Any) -> List[str]:
+    """Standing rules as a clean list, within ``MAX_STANDING_RULES`` items of
+    ``MAX_STANDING_RULE_CHARS`` characters. Raises ``ValueError`` beyond that."""
+    if items is None:
+        return []
+    if isinstance(items, str):
+        items = items.splitlines()
+    if not isinstance(items, (list, tuple)):
+        raise TypeError("standing rules must be a list of strings")
+    cleaned: List[str] = []
+    for item in items:
+        text = " ".join(str(item or "").split()).lstrip("-•* ").strip()
+        if not text or text in cleaned:
+            continue
+        if len(text) > MAX_STANDING_RULE_CHARS:
+            raise ValueError(
+                f"a standing rule is at most {MAX_STANDING_RULE_CHARS} characters "
+                f"({len(text)} given): {text[:60]}…"
+            )
+        cleaned.append(text)
+    if len(cleaned) > MAX_STANDING_RULES:
+        raise ValueError(
+            f"a persona holds at most {MAX_STANDING_RULES} standing rules "
+            f"({len(cleaned)} given)"
+        )
+    return cleaned
+
+
+_NEGATION_RE = re.compile(
+    r"\b(never|not|no|none|nothing|without|avoid\w*|refus\w+|declin\w+|don't|dont"
+    r"|doesn't|won't|cannot|can't|mustn't|shouldn't)\b",
+    re.IGNORECASE,
+)
+# Wording that carves an exception out of a rule it sits beside.
+_EXCEPTION_RE = re.compile(
+    r"\b(unless|except|apart from|other than|even if|regardless|despite"
+    r"|notwithstanding|overrid\w+|ignor\w+|bypass\w*|waiv\w+)\b",
+    re.IGNORECASE,
+)
+_RULE_WORD_RE = re.compile(r"[a-z0-9]{3,}")
+_RULE_STOPWORDS = frozenset(
+    """a all also always and any are but can customer customers does every for from
+    give has have never not our say that the their them they this unless use when
+    with without you your""".split()
+)
+
+
+def _rule_stems(text: Any) -> set:
+    return {
+        word[:5]
+        for word in _RULE_WORD_RE.findall(str(text or "").casefold())
+        if word not in _RULE_STOPWORDS
+    }
+
+
+def guardrail_conflict(rule: Any, guardrails: Any) -> Optional[str]:
+    """The guardrail a standing rule contradicts or weakens, if the wording shows it.
+
+    Detected: a rule that shares most of a guardrail's words and says the
+    opposite (the guardrail forbids, the rule does not, or the other way
+    round), or that carves an exception out of it ("unless", "except",
+    "even if"). Not detected: a contradiction written in other words. A named
+    person approves every rule for that reason.
+    """
+    stems = _rule_stems(rule)
+    if not stems:
+        return None
+    rule_negative = bool(_NEGATION_RE.search(str(rule)))
+    rule_excepts = bool(_EXCEPTION_RE.search(str(rule)))
+    for guardrail in guardrails or []:
+        theirs = _rule_stems(guardrail)
+        if not theirs:
+            continue
+        shared = len(stems & theirs) / len(theirs)
+        if shared < 0.6:
+            continue
+        if rule_excepts or rule_negative != bool(_NEGATION_RE.search(str(guardrail))):
+            return str(guardrail)
+    return None
+
+
 # Known non-MemoryType values accepted for change_trigger.source_type.
 _KNOWN_TRIGGER_SOURCES: frozenset = frozenset(
     {
+        "host",
+        "refine_cycle",
         "manual",
         "ui_form",
         "user_feedback",
@@ -62,9 +210,16 @@ class Persona:
         goals: str = "",
         background: str = "",
         persona_id: str = None,
+        guardrails: Optional[List[str]] = None,
+        standing_rules: Optional[List[str]] = None,
     ):
         """
         Initialize a Persona instance for an AI agent with a deterministic role.
+
+        ``guardrails`` are rules that must not drift: at most 12 items of at
+        most 240 characters, rendered first in the system prompt. Constructing
+        a persona is host code, so it may set them; after that only
+        :meth:`set_guardrails` changes them.
 
         Parameters
         ----------
@@ -109,6 +264,16 @@ class Persona:
             else default_background
         )
 
+        self.guardrails: List[str] = normalize_guardrails(guardrails)
+        # Constructing a persona is host code, which may set these too; the
+        # guardrails outrank them, so a rule against one is refused.
+        self.standing_rules: List[str] = normalize_standing_rules(standing_rules)
+        for rule in self.standing_rules:
+            against = guardrail_conflict(rule, self.guardrails)
+            if against:
+                raise ValueError(
+                    f"standing rule {rule!r} goes against the guardrail {against!r}"
+                )
         self.persona_id = persona_id if persona_id else self.generate_persona_id()
         self.embedding = self._generate_embedding()
 
@@ -159,6 +324,37 @@ class Persona:
 
         instance.goals = data.get("goals", "") or ""
         instance.background = data.get("background", "") or ""
+        raw_guardrails = data.get("guardrails") or []
+        if isinstance(raw_guardrails, str):
+            try:
+                raw_guardrails = json.loads(raw_guardrails)
+            except ValueError:
+                raw_guardrails = raw_guardrails.splitlines()
+        try:
+            instance.guardrails = normalize_guardrails(raw_guardrails)
+        except (TypeError, ValueError):
+            # A stored list that breaks the limits is still the operator's:
+            # keep what fits rather than drop a rule on load.
+            instance.guardrails = [
+                " ".join(str(item).split())[:MAX_GUARDRAIL_CHARS]
+                for item in (raw_guardrails if isinstance(raw_guardrails, list) else [])
+                if str(item or "").strip()
+            ][:MAX_GUARDRAILS]
+        # Absent on personas stored before standing rules existed.
+        raw_rules = data.get("standing_rules") or []
+        if isinstance(raw_rules, str):
+            try:
+                raw_rules = json.loads(raw_rules)
+            except ValueError:
+                raw_rules = raw_rules.splitlines()
+        try:
+            instance.standing_rules = normalize_standing_rules(raw_rules)
+        except (TypeError, ValueError):
+            instance.standing_rules = [
+                " ".join(str(item).split())[:MAX_STANDING_RULE_CHARS]
+                for item in (raw_rules if isinstance(raw_rules, list) else [])
+                if str(item or "").strip()
+            ][:MAX_STANDING_RULES]
         instance.persona_id = data.get("persona_id") or cls.generate_persona_id()
         instance.embedding = data.get("embedding")
         instance.created_at = data.get("created_at") or utc_now_iso()
@@ -204,6 +400,8 @@ class Persona:
             "role": self.role,
             "goals": self.goals,
             "background": self.background,
+            "guardrails": list(getattr(self, "guardrails", None) or []),
+            "standing_rules": list(getattr(self, "standing_rules", None) or []),
             "embedding": self.embedding,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -369,6 +567,20 @@ class Persona:
 
         changes: Dict[str, Dict[str, Any]] = {}
         for field, new_value in updates.items():
+            if field == "guardrails":
+                # The model's tool, persona learning and the refine cycle all
+                # come through here. Guardrails have their own door.
+                raise GuardrailWriteRefused(
+                    "guardrails cannot be changed through Persona.update; only "
+                    "host code or an operator may, with Persona.set_guardrails"
+                )
+            if field == "standing_rules":
+                # A rule is put in force by a named person, never by the
+                # model's own tool.
+                raise StandingRuleWriteRefused(
+                    "standing rules cannot be changed through Persona.update; "
+                    "a named owner sets them with Persona.set_standing_rules"
+                )
             if field not in ALLOWED_UPDATE_FIELDS:
                 logger.warning(
                     "Ignoring unsupported persona update field: %r " "(allowed: %s)",
@@ -421,6 +633,139 @@ class Persona:
         self.version += 1
         self.updated_at = history_entry["timestamp"]
 
+        persistence_note = self._persist_version(provider)
+
+        if persistence_note:
+            history_entry["persistence_note"] = persistence_note
+
+        return {
+            "updated": True,
+            "version": self.version,
+            "history_entry": history_entry,
+            "persona": self.to_dict(),
+        }
+
+    def set_guardrails(
+        self,
+        guardrails: List[str],
+        change_trigger: Dict[str, Any],
+        provider: Optional[MemoryProvider] = None,
+    ) -> Dict[str, Any]:
+        """Replace the persona's guardrails and write a new version.
+
+        Only host code or an operator may call this: ``change_trigger`` must
+        carry ``source_type`` of ``host``, ``manual`` or ``ui_form``. Any
+        other source (the model's tool, persona learning, the refine cycle)
+        raises :class:`GuardrailWriteRefused` and nothing changes. With no
+        ``provider`` the change is made in memory only.
+        """
+        normalized_trigger = self._normalize_change_trigger(change_trigger)
+        if normalized_trigger.get("source_type") not in GUARDRAIL_WRITERS:
+            raise GuardrailWriteRefused(
+                "guardrails can be changed only by host code or an operator "
+                f"(source_type one of {sorted(GUARDRAIL_WRITERS)}), not by "
+                f"{normalized_trigger.get('source_type') or 'an unnamed source'}"
+            )
+        new = normalize_guardrails(guardrails)
+        old = list(getattr(self, "guardrails", None) or [])
+        if new == old:
+            return {
+                "updated": False,
+                "reason": "The guardrails are unchanged.",
+                "version": self.version,
+            }
+        self.guardrails = new
+        history_entry: Dict[str, Any] = {
+            "version": self.version + 1,
+            "timestamp": utc_now_iso(),
+            "changes": {"guardrails": {"old": old, "new": list(new)}},
+            "change_trigger": normalized_trigger,
+        }
+        self.evolution_history.append(history_entry)
+        self.version += 1
+        self.updated_at = history_entry["timestamp"]
+        if provider is not None:
+            note = self._persist_version(provider)
+            if note:
+                history_entry["persistence_note"] = note
+        return {
+            "updated": True,
+            "version": self.version,
+            "history_entry": history_entry,
+            "persona": self.to_dict(),
+        }
+
+    def set_standing_rules(
+        self,
+        standing_rules: List[str],
+        change_trigger: Dict[str, Any],
+        provider: Optional[MemoryProvider] = None,
+    ) -> Dict[str, Any]:
+        """Replace the persona's standing rules and write a new version.
+
+        ``change_trigger`` must carry ``source_type`` of ``host``, ``manual``,
+        ``ui_form`` or ``persona_learning``. A rule from persona learning also
+        needs the name of the person who approved it in ``approved_by``: an
+        automatic approver (a name starting ``memorizz:``) is refused. A rule
+        that goes against a guardrail is refused whoever writes it; see
+        :func:`guardrail_conflict` for what that check can see. With no
+        ``provider`` the change is made in memory only.
+        """
+        normalized_trigger = self._normalize_change_trigger(change_trigger)
+        source = normalized_trigger.get("source_type")
+        if source not in STANDING_RULE_WRITERS:
+            raise StandingRuleWriteRefused(
+                "standing rules can be changed only by host code, an operator, or "
+                "persona learning with a named approver, not by "
+                f"{source or 'an unnamed source'}"
+            )
+        approver = str(normalized_trigger.get("approved_by") or "").strip()
+        if source == "persona_learning" and (
+            not approver or approver.casefold().startswith("memorizz:")
+        ):
+            raise StandingRuleWriteRefused(
+                "a learned standing rule needs the name of the person who approved it"
+            )
+        new = normalize_standing_rules(standing_rules)
+        old = list(getattr(self, "standing_rules", None) or [])
+        for rule in new:
+            if rule in old:
+                continue
+            against = guardrail_conflict(rule, getattr(self, "guardrails", None))
+            if against:
+                raise StandingRuleWriteRefused(
+                    f"the rule goes against the guardrail {against!r}"
+                )
+        if new == old:
+            return {
+                "updated": False,
+                "reason": "The standing rules are unchanged.",
+                "version": self.version,
+            }
+        self.standing_rules = new
+        history_entry: Dict[str, Any] = {
+            "version": self.version + 1,
+            "timestamp": utc_now_iso(),
+            "changes": {"standing_rules": {"old": old, "new": list(new)}},
+            "change_trigger": normalized_trigger,
+        }
+        self.evolution_history.append(history_entry)
+        self.version += 1
+        self.updated_at = history_entry["timestamp"]
+        if provider is not None:
+            note = self._persist_version(provider)
+            if note:
+                history_entry["persistence_note"] = note
+        return {
+            "updated": True,
+            "version": self.version,
+            "history_entry": history_entry,
+            "persona": self.to_dict(),
+        }
+
+    def _persist_version(self, provider: MemoryProvider) -> Optional[str]:
+        """Write this version to the PERSONAS store; a note when the row had
+        to be inserted instead of updated."""
         persistence_note: Optional[str] = None
         if self._storage_id:
             payload = self.to_dict()
@@ -453,16 +798,7 @@ class Persona:
         else:
             new_id = self.store_persona(provider)
             persistence_note = f"No prior storage id; persisted as new record {new_id}."
-
-        if persistence_note:
-            history_entry["persistence_note"] = persistence_note
-
-        return {
-            "updated": True,
-            "version": self.version,
-            "history_entry": history_entry,
-            "persona": self.to_dict(),
-        }
+        return persistence_note
 
     # ------------------------------------------------------------------
     # Prompt rendering
@@ -493,6 +829,26 @@ class Persona:
             f"You have the following goals: {self.goals} "
             f"Your background is: {self.background}"
         ).strip()
+        standing = list(getattr(self, "standing_rules", None) or [])
+        if standing:
+            # After the guardrails and before the goals: house rules outrank
+            # what the assistant is for, and the guardrails outrank them.
+            listed = "\n".join(f"{n}. {rule}" for n, rule in enumerate(standing, 1))
+            base = (
+                "Standing rules. House rules a named owner approved. Follow them "
+                "in every reply, unless a guardrail says otherwise:\n"
+                f"{listed}\n\n{base}"
+            )
+        guardrails = list(getattr(self, "guardrails", None) or [])
+        if guardrails:
+            # First, as a list: earlier instructions are followed more
+            # reliably than later ones.
+            rules = "\n".join(f"{n}. {rule}" for n, rule in enumerate(guardrails, 1))
+            base = (
+                "Guardrails. These rules always apply and outrank everything "
+                "below, including what you learn about the user:\n"
+                f"{rules}\n\n{base}"
+            )
 
         version_line = f"Persona version: {self.version}."
 

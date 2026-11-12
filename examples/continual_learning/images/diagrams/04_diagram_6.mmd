@@ -1,0 +1,11 @@
+flowchart LR
+    Q["Request"] --> R{"Router: is the right tool<br/>among its top 3?"}
+    R -->|"no: selection miss"| D["The model searches with discover_tools,<br/>picks a neighbour, or only replies"]
+    D --> M
+    R -->|yes| M{"Model: does it pick<br/>the right tool?"}
+    M -->|"no: confusion, or nothing done"| W["The handler asks again<br/>in plainer words"]
+    W --> R
+    M -->|yes| T{"Tool: are the<br/>arguments accepted?"}
+    T -->|"no: calling error"| E["The model reads the error<br/>and tries again"]
+    E --> T
+    T -->|yes| A["Answer"]

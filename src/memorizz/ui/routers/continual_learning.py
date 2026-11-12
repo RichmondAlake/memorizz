@@ -378,6 +378,66 @@ async def demote_skill(skill_id: str):
     return _skills_redirect()
 
 
+@router.post("/continual-learning/skills/{skill_id}/holdout-exempt")
+async def set_skill_holdout_exempt(skill_id: str, request: Request):
+    """Mark a skill as never withheld by the holdout, or allow it again."""
+    if not _state["provider"]:
+        return RedirectResponse(url="/connect", status_code=302)
+    form = await request.form()
+    exempt = str(form.get("exempt") or "").strip().lower() in {"1", "true", "on"}
+    try:
+        skill = _find_skill(skill_id)
+        if skill is None:
+            return _skills_redirect(error=f"Skill {skill_id} was not found")
+        manager = _build_manager(skill.get("agent_id"))
+        if not manager.set_holdout_exempt(skill_id, exempt):
+            return _skills_redirect(error=f"Skill {skill_id} could not be updated")
+    except Exception as exc:
+        logger.error("Holdout exemption failed for %s: %s", skill_id, exc)
+        return _skills_redirect(error=f"The holdout setting was not saved: {exc}")
+    return _skills_redirect()
+
+
+@router.post("/continual-learning/agents/{agent_id}/holdout")
+async def set_agent_holdout(agent_id: str, request: Request):
+    """Save one agent's holdout settings from the skills page."""
+    if not _state["provider"]:
+        return RedirectResponse(url="/connect", status_code=302)
+    from starlette.concurrency import run_in_threadpool
+
+    form = await request.form()
+
+    def _number(name: str, cast: Any) -> Any:
+        raw = str(form.get(name) or "").strip()
+        return cast(raw) if raw else None
+
+    try:
+        percent = _number("rate_percent", float)
+        min_runs = _number("min_runs", int)
+        flag_z = _number("flag_z", float)
+    except ValueError:
+        return _skills_redirect(error="The holdout settings must be numbers.")
+
+    def _apply() -> None:
+        from ...memagent import MemAgent
+
+        agent = MemAgent.load(agent_id, memory_provider=_state["provider"])
+        agent.set_holdout(
+            None if percent is None else percent / 100.0,
+            min_runs=min_runs,
+            flag_z=flag_z,
+        )
+
+    try:
+        await run_in_threadpool(_apply)
+    except ValueError as exc:
+        return _skills_redirect(error=f"The holdout settings were not saved: {exc}")
+    except Exception as exc:
+        logger.error("Holdout settings failed for %s: %s", agent_id, exc)
+        return _skills_redirect(error=f"The holdout settings were not saved: {exc}")
+    return _skills_redirect()
+
+
 def _skills_redirect(error: Optional[str] = None) -> RedirectResponse:
     url = "/memory/skills"
     if error:

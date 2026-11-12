@@ -600,8 +600,16 @@ class MemAgent:
         multi_tenant: bool = False,
         raise_errors: bool = False,
         decision_model: Any = None,
+        refine_cycle: Optional[bool] = None,
+        refine_interval_hours: Optional[float] = None,
     ):
-        """Initialize the MemAgent with configuration."""
+        """Initialize the MemAgent with configuration.
+
+        ``refine_cycle=True`` runs memory upkeep (consolidation, skill promotion,
+        persona learning, retention) as one ordered cycle (:meth:`refine`) in
+        place of the separate per-turn counters, every
+        ``refine_interval_hours`` (24) when an automation worker schedules it.
+        """
         # Eager creation: no first-use race between concurrent runs.
         _ContextLocal.initialize(self)
         # One agent serving many users (a server's shared agent): every call
@@ -935,6 +943,15 @@ class MemAgent:
         from ..learning.consolidation import ConsolidationConfig
 
         self.memory_consolidation = ConsolidationConfig.from_value(memory_consolidation)
+        if refine_cycle is not None or refine_interval_hours is not None:
+            # Kept with the consolidation settings, which every provider
+            # already stores, so the option needs no schema change.
+            current = self.memory_consolidation.to_dict()
+            if refine_cycle is not None:
+                current["refine_cycle"] = bool(refine_cycle)
+            if refine_interval_hours is not None:
+                current["refine_interval_hours"] = refine_interval_hours
+            self.memory_consolidation = ConsolidationConfig.from_value(current)
         from ..learning.persona_learning import PersonaLearningConfig
 
         self.persona_learning = PersonaLearningConfig.from_value(persona_learning)
@@ -1008,6 +1025,10 @@ class MemAgent:
         # the top of every _build_context so attribution never leaks across
         # runs. Read by the workflow capture paths (skills_activated).
         self._activated_skill_ids: List[str] = []
+        # Active skills that matched this turn and were withheld by the
+        # holdout (skills_held_out on the run), and the last run stored.
+        self._held_out_skill_ids: List[str] = []
+        self._last_workflow_ref: Dict[str, Any] = {}
 
         # Initialize manager components
         self._initialize_managers(
@@ -1023,6 +1044,8 @@ class MemAgent:
         )
         if self.toolbox is not None:
             self.tool_manager.initialize_from_toolbox(self.toolbox)
+            self._show_learned_tool_notes()
+        self._watch_supersessions()
         self.semantic_tool_router = SemanticToolRouter(
             self.tool_manager,
             toolbox=self.toolbox or self._toolbox_search(),
@@ -3087,6 +3110,7 @@ class MemAgent:
             self.tool_manager.initialize_from_toolbox(tools)
             if getattr(self, "semantic_tool_router", None) is not None:
                 self.semantic_tool_router.toolbox = tools
+            self._show_learned_tool_notes()
             return
         if hasattr(tools, "__iter__") and not isinstance(tools, str):
             # List of tools
@@ -6057,6 +6081,7 @@ class MemAgent:
             else self.get_trace_context()
         )
         source = source or ("grader" if grader else "application")
+        self._verify_workflow_outcome(status, verified, source, resolved_trace_context)
         if self.learning_control_plane is not None:
             from ..learning import OutcomeEvidence
 
@@ -6087,6 +6112,85 @@ class MemAgent:
             grader=grader,
             reason_code=reason_code,
         )
+
+    # Outcome sources the agent writes about itself. Neither is a host
+    # confirming a result, so neither marks a stored run verified here (the
+    # evaluator already marked its own runs before they were stored).
+    _SELF_REPORTED_OUTCOME_SOURCES = frozenset(
+        {"tool_execution", "workflow_outcome_evaluator"}
+    )
+
+    def _verify_workflow_outcome(
+        self,
+        status: str,
+        verified: bool,
+        source: str,
+        trace_context: Optional[Dict[str, Any]],
+    ) -> bool:
+        """Mark the stored workflow run of a turn as verified by the host.
+
+        Called when a host reports a verified success or failure. The run is
+        the one named by ``trace_context['workflow_id']``, else the last run
+        this agent stored for that turn. The run's outcome becomes the host's,
+        because a model cannot certify itself. Returns whether a run was
+        updated; never raises.
+        """
+        if (
+            not verified
+            or status not in {"success", "failure"}
+            or source in self._SELF_REPORTED_OUTCOME_SOURCES
+            or self.memory_provider is None
+        ):
+            return False
+        try:
+            context = trace_context or {}
+            last = getattr(self, "_last_workflow_ref", None) or {}
+            workflow_id = str(context.get("workflow_id") or "")
+            record_id = None
+            if workflow_id and workflow_id == last.get("workflow_id"):
+                record_id = last.get("record_id")
+            elif not workflow_id:
+                turn = str(context.get("turn_id") or "")
+                if last.get("record_id") and (
+                    not turn or turn == str(last.get("turn_id"))
+                ):
+                    record_id, workflow_id = last["record_id"], last["workflow_id"]
+            doc = None
+            if record_id:
+                doc = self.memory_provider.retrieve_by_id(
+                    record_id, memory_store_type=MemoryType.WORKFLOW_MEMORY
+                )
+            if doc is None and workflow_id:
+                for row in (
+                    self.memory_provider.list_all(
+                        memory_store_type=MemoryType.WORKFLOW_MEMORY
+                    )
+                    or []
+                ):
+                    if (
+                        isinstance(row, dict)
+                        and str(row.get("workflow_id")) == workflow_id
+                    ):
+                        doc, record_id = row, str(row.get("_id") or workflow_id)
+                        break
+            if not isinstance(doc, dict) or not record_id:
+                return False
+            if doc.get("agent_id") not in (None, self.agent_id):
+                return False
+            already = bool(doc.get("outcome_verified"))
+            updated = self.memory_provider.update_by_id(
+                str(record_id),
+                {"outcome_verified": True, "outcome": status},
+                memory_store_type=MemoryType.WORKFLOW_MEMORY,
+            )
+            if updated and not already and self.continual_learning_manager:
+                self.continual_learning_manager.record_verified_outcome(
+                    doc, status == "success"
+                )
+            return bool(updated)
+        except Exception as exc:
+            logger.debug("Workflow outcome verification failed: %s", exc)
+            return False
 
     def _model_trace_metadata(self) -> Dict[str, Any]:
         """Extract a bounded provider/model/usage snapshot without credentials."""
@@ -6689,6 +6793,7 @@ class MemAgent:
         self._note_turn_for_consolidation(memory_id, user_id, thread_id)
         self._note_turn_for_persona_learning(memory_id, user_id)
         self._note_turn_for_routing(query, memory_id, user_id, thread_id)
+        self._note_tools_offered()
 
     def run(
         self,
@@ -8528,12 +8633,21 @@ class MemAgent:
         if record_id and self._active_retrieval_policy().is_sealed:
             # Recalled inside this thread only (RetrievalPolicy.workflow_scope).
             self._mark_sealed(MemoryType.WORKFLOW_MEMORY, [record_id])
+        # Where a host's later record_task_outcome(verified=True) for this
+        # turn finds the run it is confirming.
+        self._last_workflow_ref = {
+            "record_id": str(record_id) if record_id else None,
+            "workflow_id": str(getattr(workflow, "workflow_id", "") or ""),
+            "turn_id": self._current_turn_id,
+        }
         if self.continual_learning_manager:
             try:
                 self.continual_learning_manager.record_run_outcome(
                     workflow, record_id=record_id
                 )
-                self.continual_learning_manager.maybe_run_scheduled_cycle()
+                if not self.memory_consolidation.refine_cycle:
+                    # With refine_cycle on, promotion runs inside the cycle.
+                    self.continual_learning_manager.maybe_run_scheduled_cycle()
             except Exception as exc:
                 logger.error("Continual-learning post-run hook failed: %s", exc)
         if self.learning_control_plane is not None:
@@ -8639,6 +8753,9 @@ class MemAgent:
             )
             return
         workflow.outcome = evaluated
+        # The application's rubric judged this run, so its outcome counts
+        # toward the verified-outcome gate and the holdout's verified figure.
+        workflow.outcome_verified = True
 
     def _resume_workflow_capture(
         self, checkpoint: Dict[str, Any], query: str, user_id: Optional[str]
@@ -8683,6 +8800,7 @@ class MemAgent:
             user_query=query,
             user_id=user_id,
             skills_activated=list(self._activated_skill_ids or []),
+            skills_held_out=list(getattr(self, "_held_out_skill_ids", None) or []),
             # Embedded when stored, with its steps: most turns call no tool
             # and are never stored, and this runs before the model call.
             generate_embedding=False,
@@ -10164,6 +10282,7 @@ class MemAgent:
         # attribution first so a retrieval failure — or no match — never
         # inherits the previous run's skill IDs.
         self._activated_skill_ids = []
+        self._held_out_skill_ids = []
         if self.skill_retrieval and self.skillbox and needs("procedural"):
             try:
                 if self.continual_learning_manager:
@@ -10183,6 +10302,15 @@ class MemAgent:
                             self.skill_retrieval_config.get("min_similarity", 0.70)
                         ),
                         user_id=user_id,
+                    )
+                if scored_skills and self.continual_learning_manager:
+                    # Holdout: a share of matching threads runs without the
+                    # skill, so the skill has a with-and-without figure.
+                    (
+                        scored_skills,
+                        self._held_out_skill_ids,
+                    ) = self.continual_learning_manager.split_holdout(
+                        scored_skills, self._current_thread_id
                     )
                 if scored_skills:
                     context["activated_skills"] = scored_skills
@@ -11124,7 +11252,15 @@ class MemAgent:
         from ..long_term.procedural.workflow.workflow import workflow_recall_text
         from ..retrieval import SEALED_STATE
 
-        if not isinstance(row, dict) or row.get("promoted_skill_id"):
+        if not isinstance(row, dict):
+            return None
+        # A learned skill speaks for the runs it covers, except on a turn
+        # where the holdout withheld that skill: those runs are recalled as
+        # they were before promotion.
+        covering = row.get("promoted_skill_id")
+        if covering and str(covering) not in {
+            str(item) for item in (getattr(self, "_held_out_skill_ids", None) or [])
+        }:
             return None
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         origin = str(
@@ -11376,6 +11512,9 @@ class MemAgent:
                     }
                     for item in normalized_relations
                 ]
+            self.entity_memory_manager.set_history_limit(
+                self.entity_policy.attribute_history_limit
+            )
             stored = self.entity_memory_manager.upsert_entity_from_tool(
                 entity_id=entity_id,
                 name=name,
@@ -11820,7 +11959,8 @@ class MemAgent:
             updates : dict
                 Only include the fields you are changing. Valid keys: ``name``, ``role``,
                 ``goals``, ``background``. Omitted fields are preserved. Values that match
-                the current state are no-ops.
+                the current state are no-ops. ``guardrails`` cannot be changed here:
+                only the host or an operator can, and an attempt is refused.
             reason : str
                 Required. A clear explanation of *why* this change is warranted. Saved to the
                 evolution history so future-you (and human auditors) understand how the
@@ -12676,6 +12816,447 @@ class MemAgent:
         )
         return self
 
+    # ------------------------------------------------------------------
+    # Refine cycle: upkeep as one ordered cycle (learning/refine.py)
+    # ------------------------------------------------------------------
+
+    @property
+    def refine_cycle(self) -> bool:
+        """Whether upkeep runs as one ordered cycle instead of on the
+        separate turn counters."""
+        return bool(self.memory_consolidation.refine_cycle)
+
+    @property
+    def refine_interval_hours(self) -> float:
+        return float(self.memory_consolidation.refine_interval_hours)
+
+    def with_refine_cycle(
+        self,
+        enabled: bool = True,
+        interval_hours: Optional[float] = None,
+        *,
+        verify: Optional[bool] = None,
+        verify_model_checks: Optional[int] = None,
+        tool_review: Optional[str] = None,
+        compact: Optional[bool] = None,
+        drop_suppressed_vectors: Optional[bool] = None,
+    ):
+        """Run upkeep as one ordered refine cycle. The per-turn counters for
+        consolidation, promotion and persona learning stop while it is on, so
+        nothing runs twice. Returns the agent, for chaining.
+
+        The cycle's own jobs have a switch each: ``verify`` (on) with
+        ``verify_model_checks`` (3 a cycle), ``tool_review`` ("propose",
+        "auto" or "off") and ``compact`` (on) with
+        ``drop_suppressed_vectors`` (off)."""
+        from ..learning.consolidation import ConsolidationConfig
+
+        settings = {
+            **self.memory_consolidation.to_dict(),
+            "refine_cycle": bool(enabled),
+        }
+        for key, value in (
+            ("refine_verify", verify),
+            ("refine_verify_model_checks", verify_model_checks),
+            ("refine_tool_review", tool_review),
+            ("refine_compact", compact),
+            ("refine_drop_suppressed_vectors", drop_suppressed_vectors),
+        ):
+            if value is not None:
+                settings[key] = value
+        if interval_hours is not None:
+            settings["refine_interval_hours"] = interval_hours
+        self.memory_consolidation = ConsolidationConfig.from_value(settings)
+        return self
+
+    def refine(
+        self,
+        *,
+        dry_run: bool = False,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        trigger: str = "manual",
+        skip_if_idle: bool = False,
+    ) -> Dict[str, Any]:
+        """Run one refine cycle now and return its report.
+
+        The upkeep jobs run in a fixed order: verify notes, entities, stated
+        facts, stale references, tool review, skill staleness, promotion,
+        skill review, persona learning, compact and re-embed, and retention.
+        Each keeps its own apply rule; ``dry_run`` plans every job
+        and applies nothing. The report (a ``RefineRun``) is stored and lists,
+        per job, its status, changes by kind, tokens used and the plans left
+        waiting for review. ``memory_id`` and ``user_id`` narrow the cycle to
+        one memory; otherwise it covers the memories this agent has served.
+        """
+        from ..learning.refine import RefineCycle
+
+        return RefineCycle(self).run(
+            trigger=trigger,
+            dry_run=dry_run,
+            memory_id=memory_id,
+            user_id=user_id,
+            skip_if_idle=skip_if_idle,
+        )
+
+    def schedule_refine_cycle(
+        self, interval_hours: Optional[float] = None, *, memory_id: Optional[str] = None
+    ) -> Any:
+        """Schedule a refine cycle on the automation worker and turn refine_cycle
+        on, so the per-turn counters stop. One job per agent: a second call
+        returns the job that exists. The worker gives the cycle its lock,
+        retries and time limit, and a cycle with no new conversation since
+        the last one is skipped."""
+        mgr = self._require_automations()
+        store = mgr.store
+        for job in store.list_jobs(agent_id=self.agent_id, enabled=None):
+            if job.action_type == "refine_cycle":
+                return job
+
+        from datetime import timedelta as _timedelta
+
+        from ..automation.models import AutomationJob as _AutomationJob
+        from ..automation.schedule import local_timezone_name, utcnow
+
+        hours = float(interval_hours or self.refine_interval_hours)
+        self.with_refine_cycle(True, interval_hours=hours)
+        seconds = max(900, int(hours * 3600))
+        now_utc = utcnow()
+        job = _AutomationJob(
+            job_id=str(uuid.uuid4()),
+            agent_id=self.agent_id,
+            name="Refine cycle",
+            enabled=True,
+            schedule_type="interval",
+            interval_seconds=seconds,
+            timezone=(getattr(self, "default_timezone", None) or "").strip()
+            or local_timezone_name()
+            or "UTC",
+            start_at=now_utc,
+            next_run_at=now_utc + _timedelta(seconds=seconds),
+            max_run_seconds=1800,
+            action_type="refine_cycle",
+            action_config={"memory_id": memory_id} if memory_id else {},
+            delivery_type="in_chat",
+        )
+        created = store.create_job(job)
+        try:
+            self.save()
+        except Exception as exc:
+            logger.warning(
+                "Refine cycle is scheduled, but the agent save failed: %s", exc
+            )
+        return created
+
+    # ------------------------------------------------------- tool learning
+
+    def _tool_learner(self, config: Any = None) -> Any:
+        from ..learning.tool_learning import ToolLearner
+
+        return ToolLearner(self, config)
+
+    def _show_learned_tool_notes(self) -> None:
+        """Put usage notes tool learning applied earlier back on the tools
+        the model is shown. One read, and only for an agent with a Toolbox."""
+        if (
+            self.memory_provider is None
+            or not getattr(self, "agent_id", None)
+            or getattr(self, "toolbox", None) is None
+        ):
+            return
+        try:
+            notes = self._tool_learner().learned_notes()
+        except Exception as exc:
+            logger.debug("Learned tool notes could not be read: %s", exc)
+            return
+        for tool, lines in notes.items():
+            self.tool_manager.set_learned_notes(tool, lines)
+
+    def review_tools(
+        self,
+        tools: Optional[Iterable[str]] = None,
+        *,
+        dry_run: bool = False,
+        auto_apply: bool = False,
+        approved_by: Optional[str] = None,
+        config: Any = None,
+    ) -> Any:
+        """Review how this agent's tools were called and propose a revision
+        of each catalogue entry that needs one.
+
+        A revision adds a usage note for a calling error that repeats, and
+        example requests for wordings routing missed. It waits for
+        :meth:`apply_tool_revision` unless ``auto_apply`` is given. Runs on
+        the background model. See ``memorizz.learning.tool_learning``.
+        """
+        return self._tool_learner(config).review(
+            tools, dry_run=dry_run, auto_apply=auto_apply, approved_by=approved_by
+        )
+
+    def apply_tool_revision(self, revision_id: str, *, approved_by: str) -> Any:
+        """Write a proposed tool revision and re-embed the tool."""
+        return self._tool_learner().apply(revision_id, approved_by=approved_by)
+
+    def dismiss_tool_revision(self, revision_id: str, *, approved_by: str) -> Any:
+        """Turn a proposed tool revision down."""
+        return self._tool_learner().dismiss(revision_id, approved_by=approved_by)
+
+    def undo_tool_revision(self, tool: str, *, approved_by: str) -> Any:
+        """Take back the newest applied revision of ``tool``."""
+        return self._tool_learner().undo(tool, approved_by=approved_by)
+
+    # ---- what this agent has written -----------------------------------
+    def workflow_runs(
+        self,
+        *,
+        thread_id: Optional[str] = None,
+        outcome: Optional[str] = None,
+        since: Any = None,
+        limit: Optional[int] = None,
+        newest_first: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """This agent's workflow records: one per run that called a tool,
+        oldest first.
+
+        A store is shared by every agent that uses it; this read keeps this
+        agent's records only. ``thread_id`` keeps the runs of one
+        conversation, ``outcome`` the runs that ended that way ("success",
+        "failure"), ``since`` (a datetime, ISO string or epoch seconds) the
+        runs written at or after it, and ``limit`` the most recent ones.
+        """
+        from .utils.agent_records import agent_records
+
+        def keep(row: Dict[str, Any]) -> bool:
+            if thread_id is not None and row.get("origin_thread_id") != thread_id:
+                return False
+            return outcome is None or row.get("outcome") == outcome
+
+        return agent_records(
+            self.memory_provider,
+            MemoryType.WORKFLOW_MEMORY,
+            self.agent_id,
+            since=since,
+            limit=limit,
+            newest_first=newest_first,
+            keep=keep,
+        )
+
+    def tool_calls(
+        self,
+        *,
+        tool: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        failed: Optional[bool] = None,
+        since: Any = None,
+        limit: Optional[int] = None,
+        newest_first: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """This agent's tool log, oldest first: one record per stored tool
+        call, with its arguments, result and error.
+
+        The log holds every call only when the agent was built with
+        ``ToolResultPolicy(persist_all_results=True)``; otherwise it holds
+        the calls whose results were large enough to store. ``tool`` keeps
+        one tool's calls, ``thread_id`` one conversation's, and ``failed``
+        the calls that failed (True) or succeeded (False).
+        """
+        from .utils.agent_records import agent_records
+
+        def keep(row: Dict[str, Any]) -> bool:
+            if tool is not None and row.get("tool_name") != tool:
+                return False
+            if thread_id is not None and row.get("thread_id") != thread_id:
+                return False
+            if failed is None:
+                return True
+            return (not bool(row.get("success", True))) is bool(failed)
+
+        return agent_records(
+            self.memory_provider,
+            MemoryType.TOOL_LOG,
+            self.agent_id,
+            since=since,
+            limit=limit,
+            newest_first=newest_first,
+            keep=keep,
+        )
+
+    def learned_skills(
+        self, *, status: Optional[str] = None, newest_first: bool = False
+    ) -> List[Dict[str, Any]]:
+        """The skills this agent has learned from its runs, oldest first.
+
+        ``status`` keeps the skills in one state: "shadow", "active",
+        "demoted" or "deprecated". Skills loaded from files are not learned
+        skills; they are on ``agent.skills``.
+        """
+        from .utils.agent_records import agent_records
+
+        return agent_records(
+            self.memory_provider,
+            MemoryType.SKILLBOX,
+            self.agent_id,
+            newest_first=newest_first,
+            keep=(lambda row: row.get("status") == status) if status else None,
+        )
+
+    def tool_revisions(
+        self, tool: Optional[str] = None, status: Optional[str] = None
+    ) -> List[Any]:
+        """Stored tool revisions of this agent, newest first."""
+        return self._tool_learner().list_revisions(tool=tool, status=status)
+
+    def tool_usage_flags(self, config: Any = None) -> List[Dict[str, Any]]:
+        """Tools routing offers and nothing calls (``retrieved_never_called``)
+        or never offers (``never_retrieved``), from the per-turn record of
+        what routing offered. For a person to look at; nothing is changed."""
+        return self._tool_learner(config).usage_flags()
+
+    def configure_tool_learning(self, **settings: Any) -> Any:
+        """Keep tool learning settings for this agent, such as
+        ``show_learned_examples=True`` to let the model read the example
+        requests learned from use. See ``ToolLearningConfig``."""
+        return self._tool_learner().configure(**settings)
+
+    def _note_tools_offered(self) -> None:
+        """Count the tools routing picked this turn, for the usage flags.
+        Written only when routing chose among the tools."""
+        router = getattr(self, "semantic_tool_router", None)
+        if router is None or self.memory_provider is None or not self.agent_id:
+            return
+        try:
+            names = router.routed_this_turn()
+            if names:
+                from ..learning.tool_learning import note_tools_offered
+
+                note_tools_offered(self.memory_provider, self.agent_id, names)
+        except Exception as exc:
+            logger.debug("Offered tools were not recorded: %s", exc)
+
+    # ------------------------------------------- stale references (propagation)
+
+    def _watch_supersessions(self) -> None:
+        """Flag skills and notes that still state a value entity memory
+        replaces, as it happens. See ``memorizz.learning.propagation``."""
+        try:
+            from ..learning.propagation import watch_supersessions
+
+            watch_supersessions(self)
+        except Exception as exc:
+            logger.debug("Supersession watch was not started: %s", exc)
+
+    def _propagator(self) -> Any:
+        from ..learning.propagation import SupersessionPropagator
+
+        return SupersessionPropagator(self)
+
+    def stale_references(
+        self,
+        status: Optional[str] = "open",
+        *,
+        memory_id: Optional[str] = None,
+        target_type: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Skills and notes flagged because they still state a value entity
+        memory has superseded, newest first. Each names the record, the
+        entity and attribute, the old and new value and an excerpt.
+        ``status`` is "open", "resolved", "dismissed" or None for all."""
+        return self._propagator().list(
+            status, memory_id=memory_id, target_type=target_type
+        )
+
+    def check_stale_references(
+        self, memory_id: Optional[str] = None, user_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Look through what is stored now for skills and notes that still
+        state a value an entity in ``memory_id`` has replaced. Returns the
+        flags this call opened. Nothing is rewritten."""
+        return self._propagator().sweep(
+            memory_id=memory_id or getattr(self, "memory_id", None), user_id=user_id
+        )
+
+    def resolve_stale_reference(
+        self, flag_id: str, *, by: str, note: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Close a stale-reference flag: the skill or note was updated."""
+        return self._propagator().resolve(flag_id, by=by, note=note)
+
+    def dismiss_stale_reference(
+        self, flag_id: str, *, by: str, note: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Close a stale-reference flag: the text was not about this fact."""
+        return self._propagator().dismiss(flag_id, by=by, note=note)
+
+    # ------------------------------------------------ unverified notes (verify)
+
+    def _note_verifier(self) -> Any:
+        from ..learning.verification import NoteVerifier
+
+        return NoteVerifier(self)
+
+    def verify_notes(
+        self,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        *,
+        dry_run: bool = False,
+        model_checks: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Check the stated facts, captured facts and summaries of a memory
+        against the conversations they cite, and flag what is not supported.
+        Nothing is deleted. ``dry_run`` stores no flag. See
+        ``memorizz.learning.verification``."""
+        memory = memory_id or getattr(self, "memory_id", None)
+        if not memory:
+            raise ValueError("memory_id is required to verify notes")
+        budget = (
+            self.memory_consolidation.refine_verify_model_checks
+            if model_checks is None
+            else model_checks
+        )
+        return self._note_verifier().check(
+            memory, user_id, store=not dry_run, model_checks=budget
+        )
+
+    def unverified_notes(
+        self, status: Optional[str] = "open", *, memory_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Notes flagged because the conversation they cite no longer
+        supports them, newest first. ``status`` is "open", "resolved",
+        "dismissed" or None for all."""
+        return self._note_verifier().list(status, memory_id=memory_id)
+
+    def resolve_unverified_note(
+        self, flag_id: str, *, by: str, note: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Close an unverified-note flag: the note was corrected or removed."""
+        return self._note_verifier().resolve(flag_id, by=by, note=note)
+
+    def dismiss_unverified_note(
+        self, flag_id: str, *, by: str, note: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Close an unverified-note flag: the note is right as it stands."""
+        return self._note_verifier().dismiss(flag_id, by=by, note=note)
+
+    def refine_runs(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Stored refine cycles of this agent, newest first."""
+        from ..learning.refine import RefineCycle
+
+        return RefineCycle(self).list_runs(limit=limit)
+
+    def _stored_consolidation_plan(self, plan_id: str) -> Any:
+        """A consolidation plan a refine cycle left for review, read from the
+        cycle's stored report (so it outlives the process that made it)."""
+        from ..learning.consolidation import ConsolidationPlan
+        from ..learning.refine import RefineCycle
+
+        for item in RefineCycle(self).pending_plans():
+            if item.get("kind") == "consolidation" and str(item.get("plan_id")) == str(
+                plan_id
+            ):
+                return ConsolidationPlan.from_dict(item["plan"]), item["run_id"]
+        return None, None
+
     def _consolidator(self) -> Any:
         from ..learning.consolidation import MemoryConsolidator
 
@@ -12748,16 +13329,39 @@ class MemAgent:
         """
         from ..learning.consolidation import ConsolidationPlan
 
+        stored_run = None
         if isinstance(plan, str):
-            if plan not in self._consolidation_plans:
-                raise KeyError(f"Consolidation plan not found: {plan}")
-            plan = self._consolidation_plans[plan]
+            if plan in self._consolidation_plans:
+                plan = self._consolidation_plans[plan]
+            else:
+                # Not made in this process: a refine cycle may have stored it.
+                found, stored_run = self._stored_consolidation_plan(plan)
+                if found is None:
+                    raise KeyError(f"Consolidation plan not found: {plan}")
+                plan = found
         elif isinstance(plan, dict):
             plan = ConsolidationPlan.from_dict(plan)
         result = self._consolidator().apply(
             plan, approved_by=approved_by, reason=reason
         )
         self._drop_consolidation_plan(plan.plan_id)
+        try:
+            from ..learning.refine import RefineCycle
+
+            cycle = RefineCycle(self)
+            if stored_run is None:
+                stored_run = next(
+                    (
+                        item["run_id"]
+                        for item in cycle.pending_plans()
+                        if str(item.get("plan_id")) == str(plan.plan_id)
+                    ),
+                    None,
+                )
+            if stored_run:
+                cycle.resolve_pending(stored_run, plan.plan_id)
+        except Exception as exc:
+            logger.debug("Refine run pending list not updated: %s", exc)
         return result
 
     def restore_memory_consolidation(
@@ -12785,7 +13389,11 @@ class MemAgent:
     ) -> None:
         """Count the turn and schedule a pass when one is due."""
         config = self.memory_consolidation
-        if not config.enabled or self.memory_provider is None or not memory_id:
+        if (
+            not (config.enabled or config.refine_cycle)
+            or self.memory_provider is None
+            or not memory_id
+        ):
             return
         policy = self._active_retrieval_policy()
         if policy.is_sealed:
@@ -12806,7 +13414,9 @@ class MemAgent:
                 config.every_hours > 0
                 and now - state["started"] >= config.every_hours * 3600
             )
-            if not due:
+            # With refine_cycle on the turn is only counted: the cycle reads the
+            # threads gathered here and runs the pass in its own order.
+            if not due or config.refine_cycle or not config.enabled:
                 return
             threads, since = sorted(state["threads"]), state["since"]
             state.update(turns=0, since=now, started=now, threads=set())
@@ -12860,8 +13470,12 @@ class MemAgent:
 
         Settings are those of :class:`PersonaLearningConfig`: ``every_n_turns``
         (20), ``every_hours`` (24), ``auto_apply`` (True), ``min_conversations``
-        (3), ``max_threads`` and ``max_messages_per_thread``. Reviews run on the
-        background model. Returns the agent, for chaining.
+        (3), ``max_threads`` and ``max_messages_per_thread``; ``across_users``
+        (False) with ``min_users`` (2) to learn from several people; and
+        ``standing_rules`` (False) with ``min_corrections`` (2) and
+        ``rule_owners`` to have corrections proposed as rules a named owner
+        approves. Reviews run on the background model. Returns the agent, for
+        chaining.
         """
         from ..learning.persona_learning import PersonaLearningConfig
 
@@ -12906,6 +13520,7 @@ class MemAgent:
         *,
         user_id: Optional[str] = None,
         force: bool = False,
+        dry_run: bool = False,
     ) -> Any:
         """Review recent conversations for a lasting pattern, now.
 
@@ -12913,11 +13528,14 @@ class MemAgent:
         proposal waits for :meth:`apply_persona_proposal` or
         :meth:`dismiss_persona_proposal`, on the stored agent, so it survives a
         restart. ``force`` reviews even with nothing new since the last one.
+        ``dry_run`` returns the review and stores nothing.
         """
         memory = MemAgent._host_memory_id(self, memory_id)
         if not memory:
             raise ValueError("memory_id is required for a persona review")
-        return self._persona_learner().review(memory, user_id, force=force)
+        return self._persona_learner().review(
+            memory, user_id, force=force, record_result=not dry_run
+        )
 
     def apply_persona_proposal(self, approved_by: str, proposal: Any = None) -> Any:
         """Apply the waiting persona change. Undo it with :meth:`undo_persona_change`."""
@@ -12941,6 +13559,57 @@ class MemAgent:
         """Reviews so far, a change waiting for review, and past changes."""
         return self._persona_learner().status()
 
+    # -- standing rules: learning proposes, a named owner decides -------------
+
+    def persona_rule_proposals(self) -> List[Dict[str, Any]]:
+        """Standing rules a review proposed that wait for their owner."""
+        return self._persona_learner().rule_proposals()
+
+    def apply_persona_rule(
+        self,
+        approved_by: str,
+        proposal_id: Optional[str] = None,
+        *,
+        text: Optional[str] = None,
+    ) -> Any:
+        """Put a waiting standing rule in force, as its named owner.
+
+        ``text`` is the owner's own wording. A rule is never applied without
+        this call, whatever ``auto_apply`` says. Undo it with
+        :meth:`undo_persona_rule`.
+        """
+        persona, result = self._persona_learner().apply_rule(
+            approved_by, proposal_id, text=text
+        )
+        self._use_stored_persona(persona)
+        return result
+
+    def dismiss_persona_rule(
+        self, approved_by: str, proposal_id: Optional[str] = None
+    ) -> None:
+        """Turn a waiting standing rule down; it won't be proposed again."""
+        self._persona_learner().dismiss_rule(approved_by, proposal_id)
+
+    def add_persona_standing_rule(
+        self, rule: str, approved_by: str, reason: Optional[str] = None
+    ) -> Any:
+        """Add a standing rule by hand, as its named owner."""
+        persona, result = self._persona_learner().add_rule(rule, approved_by, reason)
+        self._use_stored_persona(persona)
+        return result
+
+    def remove_persona_standing_rule(self, rule: str, approved_by: str) -> Any:
+        """Take one standing rule out of force, as its named owner."""
+        persona, result = self._persona_learner().remove_rule(rule, approved_by)
+        self._use_stored_persona(persona)
+        return result
+
+    def undo_persona_rule(self, approved_by: str, version: Optional[int] = None) -> Any:
+        """Undo the latest standing-rule change, or the one making ``version``."""
+        persona, result = self._persona_learner().undo_rule(approved_by, version)
+        self._use_stored_persona(persona)
+        return result
+
     def _note_turn_for_persona_learning(
         self, memory_id: Optional[str], user_id: Optional[str]
     ) -> None:
@@ -12949,7 +13618,10 @@ class MemAgent:
         manager = self.persona_manager
         if (
             not config.enabled
-            or self.multi_tenant
+            # The refine cycle runs the review in its own order.
+            or self.memory_consolidation.refine_cycle
+            # A shared agent learns only when told to read across its users.
+            or (self.multi_tenant and not config.across_users)
             or self.memory_provider is None
             or not memory_id
             or manager is None
@@ -13452,7 +14124,10 @@ class MemAgent:
             label=f"Remembered ({target})",
         ):
             if target == ENTITY_MEMORY:
-                entities = EntityMemory(self.memory_provider)
+                entities = EntityMemory(
+                    self.memory_provider,
+                    attribute_history_limit=self.entity_policy.attribute_history_limit,
+                )
                 generate = text_generator(self.background_model)
                 facts = []
                 if generate is not None:
@@ -14271,7 +14946,10 @@ class MemAgent:
         if not body or not entity_memory_id or generate is None:
             receipt["reason"] = "Nothing to capture."
             return receipt
-        entities = EntityMemory(self.memory_provider)
+        entities = EntityMemory(
+            self.memory_provider,
+            attribute_history_limit=self.entity_policy.attribute_history_limit,
+        )
         records = entities.list_entities(memory_id=entity_memory_id, user_id=user_id)
         policy = self.entity_policy
         self_record = policy.self_record(records)
@@ -15618,6 +16296,84 @@ class MemAgent:
     def add_tool(self, tool, persist: bool = False):
         """Add a tool (delegated to tool manager)."""
         return self.tool_manager.add_tool(tool, persist)
+
+    def set_holdout(
+        self,
+        rate: Optional[float] = None,
+        *,
+        min_runs: Optional[int] = None,
+        flag_z: Optional[float] = None,
+        save: bool = True,
+    ) -> Dict[str, Any]:
+        """Change this agent's skill holdout and return the settings in force.
+
+        ``rate`` is the share of matching threads that run without an active
+        skill (0 to 1, default 0.1; 0 turns the holdout off). ``min_runs`` is
+        the runs needed on each side before a skill can be flagged, and
+        ``flag_z`` how far below the "without" figure it must be, in standard
+        errors. An argument left as None keeps its current value.
+        """
+        from ..long_term.procedural.skillbox import PromotionConfig
+
+        config = dict(self.continual_learning_config or {})
+        if rate is not None:
+            config["holdout_rate"] = float(rate)
+        if min_runs is not None:
+            config["holdout_min_runs"] = int(min_runs)
+        if flag_z is not None:
+            config["holdout_flag_z"] = float(flag_z)
+        validated = PromotionConfig.from_dict(config)  # raises on a bad value
+        self.continual_learning_config = config
+        manager = getattr(self, "continual_learning_manager", None)
+        for holder in (
+            manager,
+            getattr(manager, "engine", None),
+            getattr(manager, "monitor", None),
+        ):
+            live = getattr(holder, "config", None)
+            if isinstance(live, PromotionConfig):
+                live.holdout_rate = validated.holdout_rate
+                live.holdout_min_runs = validated.holdout_min_runs
+                live.holdout_flag_z = validated.holdout_flag_z
+        if save and getattr(self, "memory_provider", None) is not None:
+            self.save()
+        return {
+            "holdout_rate": float(validated.holdout_rate),
+            "holdout_min_runs": int(validated.holdout_min_runs),
+            "holdout_flag_z": float(validated.holdout_flag_z),
+        }
+
+    def set_persona_guardrails(
+        self,
+        guardrails: List[str],
+        reason: str = "Guardrails set by the host",
+        *,
+        source_type: str = "host",
+        save: bool = True,
+    ) -> Dict[str, Any]:
+        """Replace the persona's guardrails: rules that learning cannot write.
+
+        Guardrails are rendered first in the system prompt, before the role
+        and goals. At most 12, each at most 240 characters. Only host code
+        (this method) or an operator in the UI can change them; the model's
+        ``update_persona`` tool, persona learning and the refine cycle are
+        refused. The change writes a new persona version, like any other
+        persona edit. ``source_type`` is ``host`` (default), ``manual`` or
+        ``ui_form``.
+        """
+        if self.persona_manager is None or self.persona_manager.current_persona is None:
+            raise ValueError("This agent has no persona to put guardrails on.")
+        result = self.persona_manager.set_guardrails(
+            guardrails,
+            {"reason": reason, "source_type": source_type, "agent_id": self.agent_id},
+        )
+        if result.get("updated") and save and self.memory_provider is not None:
+            try:
+                self.save()
+            except Exception as exc:
+                logger.warning("Guardrails stored, but the agent save failed: %s", exc)
+                result["agent_snapshot_warning"] = str(exc)
+        return result
 
     def set_persona(self, persona, save: bool = True):
         """Set persona (delegated to persona manager) and ensure persona tools are registered."""

@@ -8,20 +8,35 @@
 {% set window_labels = {'24h': 'Last 24 hours', '7d': 'Last 7 days', '30d': 'Last 30 days', '90d': 'Last 90 days'} %}
 {% set window_label = window_labels.get(window) or fmt_range(span) %}
 {% set keep = {'load': 1} if loaded else {} %}
+{% if compare_to != 'previous' %}{% set _ = keep.update({'compare': compare_to}) %}{% endif %}
 {% call page_header('Overview', 'Runs, failures, run time, tokens and spend across every agent on this platform.', 'Home') %}
     {{ range_picker('/dashboard', window, windows, span, keep) }}
     <a class="btn" href="/traces">Observability</a>
     <a class="btn btn-primary" href="/agents/new" data-mutates>Create agent</a>
 {% endcall %}
 
-<p class="ov-status" role="status">
+<div class="ov-status" role="status">
     <span class="connection-live-dot" aria-hidden="true"></span>
     <span>{{ provider_type|title }} provider connected</span>
     <span>{{ window_label }}</span>
     <span>Updated {{ generated_at.strftime('%H:%M') }} UTC</span>
     {% if coverage.truncated and coverage.oldest and coverage.oldest > span.start %}<span class="ov-status-warn" title="The overview reads the newest {{ coverage.records }} trace records only.">Runs before {{ coverage.oldest.strftime('%b %d %H:%M') }} UTC aren't loaded</span>{% elif coverage.truncated %}<span title="The overview reads the newest trace records only.">Newest {{ coverage.records }} trace records</span>{% endif %}
-    <a href="/dashboard?{{ range_query(span) }}{% if loaded %}&amp;load=1{% endif %}">Refresh</a>
-</p>
+    {% if overview and compare_choices|length > 1 %}
+    <form method="get" action="/dashboard" class="ov-compare">
+        {% for key, value in range_params(span).items() %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
+        {% if loaded %}<input type="hidden" name="load" value="1">{% endif %}
+        <label for="ov-compare">Compared with</label>
+        <select id="ov-compare" name="compare" onchange="this.form.submit()">
+            {% for choice in compare_choices %}<option value="{{ choice.key }}"{% if choice.key == compare_to %} selected{% endif %}>{{ choice.label }}</option>{% endfor %}
+        </select>
+    </form>
+    {% elif overview and compared %}<span>Compared with {{ compare_label }}</span>{% endif %}
+    <a href="/dashboard?{{ range_query(span) }}{% if loaded %}&amp;load=1{% endif %}{% if compare_to != 'previous' %}&amp;compare={{ compare_to }}{% endif %}">Refresh</a>
+    <span class="ov-customize">
+        <button type="button" class="btn btn-sm" id="ov-customize-btn" aria-haspopup="true" aria-expanded="false">Customize</button>
+        <span class="ov-customize-menu" id="ov-customize-menu" hidden></span>
+    </span>
+</div>
 
 {% if schema_note %}<p class="warning-message" role="status" id="schema-note">{{ schema_note }}</p>{% endif %}
 {% if embedding_check and embedding_check.status == 'mismatch' %}
@@ -34,6 +49,68 @@
 <p class="form-note" role="status">Notion counts cover this local repair journal, not a verified workspace total. Run <code>memorizz notion sync</code> to discover external changes; memory reads still check Notion.</p>
 {% endif %}
 
+{#- First steps, until every one is done or the list is dismissed. The page
+    script ticks the trace step and hides the list; nothing is stored. -#}
+{% if getting_started and not ui_conn.read_only and getting_started|selectattr('done')|list|length < getting_started|length - 1 and not (overview and overview.totals.runs >= 20) %}
+{% set done_count = getting_started|selectattr('done')|list|length %}
+<section class="panel ov-start" id="ov-start" data-widget="start" data-widget-label="Get started" aria-labelledby="ov-start-title" data-total="{{ getting_started|length }}" hidden>
+    <div class="panel-header">
+        <div>
+            <h2 class="panel-title" id="ov-start-title">Get started</h2>
+            <p class="panel-description">Five steps from an empty store to an agent that runs on its own.</p>
+        </div>
+        <div class="ov-start-progress">
+            <span id="ov-start-count">{{ done_count }} of {{ getting_started|length }} done</span>
+            <span class="ov-start-meter" aria-hidden="true"><span id="ov-start-bar" style="width: {{ (100 * done_count / getting_started|length)|round|int }}%"></span></span>
+            <button type="button" class="btn btn-sm" id="ov-start-dismiss">Hide</button>
+        </div>
+    </div>
+    <ol class="ov-start-steps">
+        {% for step in getting_started %}
+        <li class="ov-start-step{{ ' is-done' if step.done else '' }}" data-step="{{ step.key }}"{% if step.visit %} data-visit{% endif %}>
+            <span class="ov-start-mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></span>
+            <span class="ov-start-text">
+                <strong>{{ step.title }}</strong><span class="visually-hidden ov-start-state">{{ ' (done)' if step.done else '' }}</span>
+                <span>{{ step.detail }}</span>
+            </span>
+            <a class="btn btn-sm ov-start-action" href="{{ step.href }}">{{ step.action }}</a>
+        </li>
+        {% endfor %}
+    </ol>
+</section>
+<script>
+(function() {
+    const panel = document.getElementById('ov-start');
+    let dismissed = false, seenTrace = false;
+    try {
+        dismissed = localStorage.getItem('memorizz_ui_start_hidden') === '1';
+        seenTrace = localStorage.getItem('memorizz_ui_seen_trace') === '1';
+    } catch (_) {}
+    if (dismissed) return;
+    const steps = Array.from(panel.querySelectorAll('.ov-start-step'));
+    steps.forEach(function(step) {
+        if (step.hasAttribute('data-visit') && seenTrace) {
+            step.classList.add('is-done');
+            step.querySelector('.ov-start-state').textContent = ' (done)';
+        }
+    });
+    const done = steps.filter(function(step) { return step.classList.contains('is-done'); }).length;
+    if (done === steps.length) return;
+    // The first step still to do carries the page's main button.
+    const next = steps.find(function(step) { return !step.classList.contains('is-done'); });
+    next.classList.add('is-next');
+    next.querySelector('.ov-start-action').classList.add('btn-primary');
+    document.getElementById('ov-start-count').textContent = done + ' of ' + steps.length + ' done';
+    document.getElementById('ov-start-bar').style.width = Math.round(100 * done / steps.length) + '%';
+    panel.hidden = false;
+    document.getElementById('ov-start-dismiss').addEventListener('click', function() {
+        panel.hidden = true;
+        try { localStorage.setItem('memorizz_ui_start_hidden', '1'); } catch (_) {}
+    });
+})();
+</script>
+{% endif %}
+
 {% if deferred %}
 {% call empty_state('Run health is loaded on request', 'This provider reads traces through a remote API, so the overview does not scan it on every visit.') %}
     <a class="btn" href="/dashboard?{{ range_query(span) }}&amp;load=1">Load run health</a>
@@ -43,12 +120,26 @@
 {% elif overview %}
 {% set t = overview.totals %}
 {% set series = overview.series %}
+{#- A figure's change from the same length of time before the window. -#}
+{% macro delta(key) -%}
+{%- set d = deltas.get(key) -%}
+{%- if d %}<span class="kpi-delta {{ d.tone }}" title="Change from {{ compare_label }}">{% if d.arrow %}<span aria-hidden="true">{{ d.arrow }}</span><span class="visually-hidden">{{ 'Up' if d.arrow == '▲' else 'Down' }}</span> {% endif %}{{ d.text }}</span>{% endif -%}
+{%- endmacro %}
+{#- A thin bar under a name: that row's part of the window's total. -#}
+{#- Calls per chart period as a small line; nothing when there is no series. -#}
+{% macro trend_line(values, label) -%}
+{%- if values and values|sum -%}<svg class="ov-trend" viewBox="0 0 120 28" preserveAspectRatio="none" role="img" aria-label="{{ label }}"><polyline points="{{ sparkline(values) }}"/></svg>{%- endif -%}
+{%- endmacro %}
+{% macro share_bar(percent, of) -%}
+{%- set shown = [percent, 100]|min -%}
+<span class="ov-share" title="{{ '%.0f'|format(shown) }}% of {{ of }} in this window"><span style="width: {{ '%.1f'|format(shown) }}%"></span><span class="visually-hidden">{{ '%.0f'|format(shown) }}% of {{ of }}</span></span>
+{%- endmacro %}
 <section aria-label="Run health">
-    <div class="kpi-strip ov-kpis">
+    <div class="kpi-strip ov-kpis" data-widget="kpis" data-widget-label="Key figures">
         <a class="kpi" href="/traces">
             <span class="kpi-label">Runs</span>
             <strong class="kpi-value">{{ '{:,}'.format(t.runs) }}</strong>
-            <span class="kpi-note">{{ t.succeeded }} succeeded · {{ t.failed }} failed{% if t.in_progress %} · {{ t.in_progress }} running{% endif %}</span>
+            <span class="kpi-note">{{ delta('runs') }}{{ t.succeeded }} succeeded · {{ t.failed }} failed{% if t.in_progress %} · {{ t.in_progress }} running{% endif %}</span>
             <svg class="kpi-spark" viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true"><polyline points="{{ sparkline(series|map(attribute='runs')|list) }}"/></svg>
         </a>
         <a class="kpi" href="/traces/health">
@@ -58,53 +149,57 @@
             <span class="kpi-note">No finished runs</span>
             {% else %}
             <strong class="kpi-value {{ 'is-good' if t.success_rate >= 99 else ('is-warn' if t.success_rate >= 90 else 'is-bad') }}">{{ '%.1f'|format(t.success_rate) }}%</strong>
-            <span class="kpi-note">{{ t.runs_with_tool_failures }} run{{ '' if t.runs_with_tool_failures == 1 else 's' }} with tool failures</span>
+            <span class="kpi-note">{{ delta('success_rate') }}{{ t.runs_with_tool_failures }} run{{ '' if t.runs_with_tool_failures == 1 else 's' }} with tool failures</span>
             {% endif %}
         </a>
         <a class="kpi" href="/traces/health">
             <span class="kpi-label">Run time p95</span>
             <strong class="kpi-value">{{ fmt_duration(t.p95_ms) }}</strong>
-            <span class="kpi-note">Median {{ fmt_duration(t.p50_ms) }}</span>
+            <span class="kpi-note">{{ delta('p95_ms') }}Median {{ fmt_duration(t.p50_ms) }}</span>
         </a>
         <a class="kpi" href="/traces/usage">
             <span class="kpi-label">Model calls</span>
             <strong class="kpi-value">{{ '{:,}'.format(t.model_calls) }}</strong>
-            <span class="kpi-note">{% if t.runs %}{{ '%.1f'|format(t.model_calls / t.runs) }} per run{% else %}No runs{% endif %}{% if t.model_errors %} · {{ t.model_errors }} errors{% endif %}</span>
+            <span class="kpi-note">{{ delta('model_calls') }}{% if t.runs %}{{ '%.1f'|format(t.model_calls / t.runs) }} per run{% else %}No runs{% endif %}{% if t.model_errors %} · {{ t.model_errors }} errors{% endif %}</span>
         </a>
         <a class="kpi" href="/traces/usage#provider-prompt-cache">
             <span class="kpi-label">Tokens</span>
             <strong class="kpi-value">{{ fmt_compact(t.input_tokens + t.output_tokens) }}</strong>
-            <span class="kpi-note">{% if t.cache_read_percent is not none %}{{ '%.0f'|format(t.cache_read_percent) }}% of input read from prompt cache{% else %}No token usage recorded{% endif %}</span>
+            <span class="kpi-note">{{ delta('tokens') }}{% if t.cache_read_percent is not none %}{{ '%.0f'|format(t.cache_read_percent) }}% of input read from prompt cache{% else %}No token usage recorded{% endif %}</span>
             <svg class="kpi-spark" viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true"><polyline points="{{ sparkline(series|map(attribute='tokens')|list) }}"/></svg>
         </a>
         <a class="kpi" href="/traces/usage">
             <span class="kpi-label">Spend</span>
             <strong class="kpi-value">{{ fmt_usd(t.cost_usd) }}</strong>
-            <span class="kpi-note">{% if t.cost_per_run is not none %}{{ fmt_usd(t.cost_per_run) }} per run{% else %}No priced calls{% endif %}{% if t.unpriced_calls %} · {{ t.unpriced_calls }} unpriced{% endif %}</span>
+            <span class="kpi-note">{{ delta('cost_usd') }}{% if t.cost_per_run is not none %}{{ fmt_usd(t.cost_per_run) }} per run{% else %}No priced calls{% endif %}{% if t.unpriced_calls %} · {{ t.unpriced_calls }} unpriced{% endif %}</span>
             <svg class="kpi-spark" viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true"><polyline points="{{ sparkline(series|map(attribute='cost_usd')|map('float')|list) }}"/></svg>
         </a>
     </div>
 
-    <div class="ov-grid ov-grid--activity">
-        {{ runs_chart(overview, window, window_label|lower, zoom='/dashboard?' ~ ('load=1&' if loaded else '')) }}
+    <div class="ov-grid ov-grid--activity" data-widget="activity" data-widget-label="Runs over time and needs attention">
+        {{ runs_chart(overview, window, window_label|lower, zoom='/dashboard?' ~ ('load=1&' if loaded else ''), change=deltas.get('runs'), compare_label=compare_label) }}
         {{ attention_panel(overview.attention) }}
     </div>
 
-    {{ recent_runs(overview.recent, agent_names) }}
+    <div data-widget="runs" data-widget-label="Recent runs">{{ recent_runs(overview.recent, agent_names) }}</div>
 
-    <div class="ov-grid ov-grid--three">
+    <div class="ov-grid ov-grid--three" data-widget="breakdown" data-widget-label="Agents, tools and models">
         <section class="panel" aria-labelledby="ov-agents-title">
             <div class="panel-header">
                 <h2 class="panel-title" id="ov-agents-title">Agents</h2>
-                <a class="panel-meta" href="/agents">All agents</a>
+                <a class="panel-meta" href="/agents">{{ 'Share of spend' if t.cost_usd|float > 0 else 'Share of runs' }} · all agents</a>
             </div>
             {% if overview.agents %}
             <table class="data-table ov-compact">
                 <thead><tr><th scope="col">Agent</th><th scope="col" class="num">Runs</th><th scope="col" class="num">Failed</th><th scope="col" class="num">p95</th><th scope="col" class="num">Spend</th></tr></thead>
                 <tbody>
+                    {#- Each row's share of spend, or of runs when nothing was priced. -#}
+                    {% set agent_by_spend = t.cost_usd|float > 0 %}
+                    {% set agent_total = (t.cost_usd|float) if agent_by_spend else t.runs %}
                     {% for row in overview.agents[:6] %}
+                    {% set share = (100 * ((row.cost_usd|float) if agent_by_spend else row.runs) / agent_total) if agent_total else 0 %}
                     <tr>
-                        <td class="ov-name"><a href="/traces?agent_id={{ row.agent_id|urlencode }}" title="{{ agent_names.get(row.agent_id, row.agent_id) }}">{{ agent_names.get(row.agent_id, row.agent_id[:12] or 'Unknown') }}</a></td>
+                        <td class="ov-name"><a href="/traces?agent_id={{ row.agent_id|urlencode }}" title="{{ agent_names.get(row.agent_id, row.agent_id) }}">{{ agent_names.get(row.agent_id, row.agent_id[:12] or 'Unknown') }}</a>{{ share_bar(share, 'spend' if agent_by_spend else 'runs') }}</td>
                         <td class="num">{{ row.runs }}</td>
                         <td class="num">{% if row.failed %}<span class="ov-failed">{{ row.failed }}</span>{% else %}0{% endif %}</td>
                         <td class="num">{{ fmt_duration(row.p95_ms) }}</td>
@@ -129,7 +224,7 @@
                 <tbody>
                     {% for row in overview.tools[:6] %}
                     <tr>
-                        <td class="ov-name mono" title="{{ row.name }}{% if row.top_reason %} · {{ row.top_reason }}{% endif %}">{{ row.name }}</td>
+                        <td class="ov-name mono" title="{{ row.name }}{% if row.top_reason %} · {{ row.top_reason }}{% endif %}">{{ row.name }}<span class="ov-name-line">{{ share_bar((100 * row.calls / t.tool_calls) if t.tool_calls else 0, 'tool calls') }}{{ trend_line(trends.tools.get(row.name), 'Calls to ' ~ row.name ~ ' over this window') }}</span></td>
                         <td class="num">{{ row.calls }}</td>
                         <td class="num">{% if row.failures %}<span class="ov-failed">{{ '%.0f'|format(row.failure_rate) }}%</span>{% else %}0%{% endif %}</td>
                     </tr>
@@ -151,9 +246,12 @@
             <table class="data-table ov-compact">
                 <thead><tr><th scope="col">Model</th><th scope="col" class="num">Calls</th><th scope="col" class="num">From cache</th><th scope="col" class="num">Spend</th></tr></thead>
                 <tbody>
+                    {% set model_by_spend = t.cost_usd|float > 0 %}
+                    {% set model_total = (t.cost_usd|float) if model_by_spend else t.model_calls %}
                     {% for row in models[:6] %}
+                    {% set share = (100 * ((row.cost_usd|float) if model_by_spend else row.calls) / model_total) if model_total else 0 %}
                     <tr>
-                        <td class="ov-name" title="{{ row.label }} · p95 latency {{ fmt_duration(row.p95_latency_ms) }}">{{ row.label.split(' / ')[-1] }}</td>
+                        <td class="ov-name" title="{{ row.label }} · p95 latency {{ fmt_duration(row.p95_latency_ms) }}">{{ row.label.split(' / ')[-1] }}<span class="ov-name-line">{{ share_bar(share, 'spend' if model_by_spend else 'model calls') }}{{ trend_line(trends.models.get(row.label.split(' / ')[-1]), 'Calls to this model over this window') }}</span></td>
                         <td class="num">{{ row.calls }}</td>
                         <td class="num">{% if row.input_tokens %}{{ '%.0f'|format(100 * row.cached_tokens / row.input_tokens) }}%{% else %}—{% endif %}</td>
                         <td class="num">{{ fmt_usd(row.cost_usd) }}</td>
@@ -170,7 +268,7 @@
 {% endif %}
 
 {% if coding_agents %}
-<section class="panel" aria-labelledby="ov-coding-title">
+<section class="panel" aria-labelledby="ov-coding-title" data-widget="coding" data-widget-label="Coding-agent sessions">
     <div class="panel-header">
         <h2 class="panel-title" id="ov-coding-title">Coding-agent sessions</h2>
         <a class="panel-meta" href="/harnesses">Agent harnesses</a>
@@ -196,7 +294,21 @@
 </section>
 {% endif %}
 
-<div class="ov-grid ov-grid--two">
+{% if recent_activity %}
+<section class="panel" aria-labelledby="ov-activity-log-title" data-widget="log" data-widget-label="Recent activity">
+    <div class="panel-header">
+        <h2 class="panel-title" id="ov-activity-log-title">Recent activity</h2>
+        <a class="panel-meta" href="/activity">All activity</a>
+    </div>
+    <ul class="ov-log">
+        {% for row in recent_activity %}
+        <li><span class="ov-log-who">{{ row.actor }}</span><span class="ov-log-what">{{ row.action }}{% if row.target %} <span class="mono">{{ row.target[:24] }}</span>{% endif %}</span><span class="ov-log-when mono" title="{{ row.timestamp }}">{{ row.timestamp[5:16]|replace('T', ' ') }}</span></li>
+        {% endfor %}
+    </ul>
+</section>
+{% endif %}
+
+<div class="ov-grid ov-grid--two" data-widget="platform" data-widget-label="Automations and platform">
     <section class="panel" aria-labelledby="ov-automations-title">
         <div class="panel-header">
             <h2 class="panel-title" id="ov-automations-title">Automations</h2>
@@ -256,4 +368,112 @@
         </ul>
     </section>
 </div>
+
+{#- Customize: which sections show and in what order, kept in this browser. -#}
+<script>
+(function() {
+    const KEY = 'memorizz_ui_overview_layout';
+    const button = document.getElementById('ov-customize-btn');
+    const menu = document.getElementById('ov-customize-menu');
+    const widgets = Array.from(document.querySelectorAll('[data-widget]'));
+    if (!button || !menu || !widgets.length) { if (button) button.parentElement.hidden = true; return; }
+    const byKey = {};
+    widgets.forEach(function(el) { byKey[el.dataset.widget] = el; });
+    const original = widgets.map(function(el) { return el.dataset.widget; });
+    // A marker before each section: hidden ones keep their place for the menu.
+    const anchors = {};
+    original.forEach(function(key) {
+        const mark = document.createComment('widget ' + key);
+        byKey[key].before(mark);
+        anchors[key] = mark;
+    });
+    function load() {
+        try {
+            const saved = JSON.parse(localStorage.getItem(KEY) || 'null');
+            if (saved && Array.isArray(saved.order) && Array.isArray(saved.hidden)) return saved;
+        } catch (_) {}
+        return { order: [], hidden: [] };
+    }
+    function save(layout) { try { localStorage.setItem(KEY, JSON.stringify(layout)); } catch (_) {} }
+    function ordered(layout) {
+        const known = layout.order.filter(function(key) { return byKey[key]; });
+        return known.concat(original.filter(function(key) { return !known.includes(key); }));
+    }
+    function apply(layout) {
+        const order = ordered(layout);
+        // Sections sit in two parents (inside and after the run-health
+        // block), so each takes the slot of the section it replaces.
+        const slots = original.map(function(key) { return anchors[key]; });
+        order.forEach(function(key, index) {
+            slots[index].after(byKey[key]);
+            byKey[key].classList.toggle('ov-widget-off', layout.hidden.includes(key));
+        });
+    }
+    function draw() {
+        const layout = load();
+        const order = ordered(layout);
+        menu.textContent = '';
+        const title = document.createElement('p');
+        title.className = 'ov-customize-title';
+        title.textContent = 'Show and order the sections of this page';
+        menu.appendChild(title);
+        order.forEach(function(key, index) {
+            const row = document.createElement('div');
+            row.className = 'ov-customize-row';
+            const label = document.createElement('label');
+            const box = document.createElement('input');
+            box.type = 'checkbox';
+            box.checked = !layout.hidden.includes(key);
+            box.addEventListener('change', function() {
+                const next = load();
+                next.order = ordered(next);
+                next.hidden = next.hidden.filter(function(item) { return item !== key; });
+                if (!box.checked) next.hidden.push(key);
+                save(next); apply(next);
+            });
+            label.append(box, document.createTextNode(byKey[key].dataset.widgetLabel));
+            row.appendChild(label);
+            [['↑', -1, 'Move up'], ['↓', 1, 'Move down']].forEach(function(move) {
+                const arrow = document.createElement('button');
+                arrow.type = 'button';
+                arrow.textContent = move[0];
+                arrow.setAttribute('aria-label', move[2] + ': ' + byKey[key].dataset.widgetLabel);
+                arrow.disabled = index + move[1] < 0 || index + move[1] >= order.length;
+                arrow.addEventListener('click', function() {
+                    const next = load();
+                    const list = ordered(next);
+                    list.splice(index + move[1], 0, list.splice(index, 1)[0]);
+                    next.order = list;
+                    save(next); apply(next); draw();
+                    const again = menu.querySelectorAll('.ov-customize-row')[index + move[1]];
+                    if (again) again.querySelectorAll('button')[move[1] < 0 ? 0 : 1].focus();
+                });
+                row.appendChild(arrow);
+            });
+            menu.appendChild(row);
+        });
+        const reset = document.createElement('button');
+        reset.type = 'button';
+        reset.className = 'ov-customize-reset';
+        reset.textContent = 'Reset to the default layout';
+        reset.addEventListener('click', function() {
+            const next = { order: [], hidden: [] };
+            save(next); apply(next); draw();
+        });
+        menu.appendChild(reset);
+    }
+    function close() { menu.hidden = true; button.setAttribute('aria-expanded', 'false'); }
+    button.addEventListener('click', function() {
+        const open = menu.hidden;
+        if (open) draw();
+        menu.hidden = !open;
+        button.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+    document.addEventListener('click', function(event) { if (!button.parentElement.contains(event.target)) close(); });
+    button.parentElement.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape' && !menu.hidden) { event.stopPropagation(); close(); button.focus(); }
+    });
+    apply(load());
+})();
+</script>
 {% endblock %}

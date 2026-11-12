@@ -15,7 +15,24 @@
 </details>
 {% endif %}
 
+{% if recent_runs %}
+{% from '_run_health.html' import recent_runs as runs_panel with context %}
+<div class="obs-recent" id="obs-recent-runs">{{ runs_panel(recent_runs, run_agent_names, title='Recent runs', prefix='obs') }}</div>
+{% endif %}
+
+{#- How the trace data was read: useful when something looks missing, not
+    the first thing to read. Open when there are no runs to show instead. -#}
+<details class="detail-section obs-source" id="obs-data-source"{% if not recent_runs %} open{% endif %}>
+    <summary>Data source and coverage</summary>
 {{ tape(trace_tape, 'Loaded trace window summary') }}
+<details class="trace-access-banner obs-capabilities" id="trace-capability-banner">
+    <summary>Host integration capabilities · {% if not trace_capabilities['account.resolve'].configured or not trace_capabilities['artifact.lookup'].configured or not trace_capabilities['replay.create'].configured %}setup required{% else %}configured{% endif %}</summary>
+    {% for permission, capability in trace_capabilities.items() %}
+    <p>{{ capability.setup }}: {{ 'Available' if capability.available else 'Not configured' if not capability.configured else 'Not permitted for this role' }}.{% if not capability.configured %} Supply a tenant-aware <code>{{ capability.setup }}</code> callback to <code>create_app</code>. No host lookup will run until configured.{% endif %}</p>
+    {% endfor %}
+    <p>Host source/artifact/parser/delivery recording is separate from these lookup hooks. Missing historical links cannot be reconstructed as facts.</p>
+</details>
+</details>
 
 <details class="detail-section obs-incident" id="incident-finder-panel" {% if not selected_agent %}open{% endif %}>
     <summary>Incident finder</summary>
@@ -37,13 +54,7 @@
     <div id="incident-results"></div><button id="incident-next" class="btn btn-sm" type="button" hidden>Load next page</button>
 </details>
 
-<details class="trace-access-banner obs-capabilities" id="trace-capability-banner">
-    <summary>Host integration capabilities · {% if not trace_capabilities['account.resolve'].configured or not trace_capabilities['artifact.lookup'].configured or not trace_capabilities['replay.create'].configured %}setup required{% else %}configured{% endif %}</summary>
-    {% for permission, capability in trace_capabilities.items() %}
-    <p>{{ capability.setup }}: {{ 'Available' if capability.available else 'Not configured' if not capability.configured else 'Not permitted for this role' }}.{% if not capability.configured %} Supply a tenant-aware <code>{{ capability.setup }}</code> callback to <code>create_app</code>. No host lookup will run until configured.{% endif %}</p>
-    {% endfor %}
-    <p>Host source/artifact/parser/delivery recording is separate from these lookup hooks. Missing historical links cannot be reconstructed as facts.</p>
-</details>
+
 
 {% if error %}
 <div class="error-message">

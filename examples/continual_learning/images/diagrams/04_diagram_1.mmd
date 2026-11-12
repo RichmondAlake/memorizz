@@ -1,0 +1,21 @@
+sequenceDiagram
+    autonumber
+    actor P as Priya
+    participant A as Ada (model)
+    participant T as Beacon tools
+    P->>A: Pull up 608520
+    A->>T: beacon_lookup_claim("608520")
+    T--xA: refused: must be CW- and six digits
+    A->>T: beacon_lookup_claim("CW-608520")
+    T-->>A: the claim
+    A-->>P: answer (one wasted call)
+    P->>A: Attach the 40MB video
+    A->>T: beacon_upload_attachment(..., 40)
+    T--xA: BCN-217: over 25MB
+    A-->>P: "Too big. Split it, or use Compass"
+    P->>A: 610087 is a large loss
+    A-->>P: "Noted. What would you like me to do?"
+    Note over P,A: Not what she meant
+    P->>A: A large loss goes to the LLU. Escalate it
+    A->>T: refer_llu("CW-610087")
+    A-->>P: done (asked twice)

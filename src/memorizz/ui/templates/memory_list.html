@@ -137,6 +137,107 @@
                 {% if row.agent_id %}<div><dt>Agent</dt><dd><a href="/agents/{{ row.agent_id }}/playground">{{ row.agent_id[:12] }}</a></dd></div>{% endif %}
             </dl>
             {% endif %}
+            {% if row.persona %}
+            {#- Guardrails: the rules this persona keeps whatever it learns.
+                Editable only here, by a person. -#}
+            <div class="mem-guard">
+                <div class="mem-body-head">
+                    <h3 class="fleet-detail-title">Guardrails <span class="mem-count">{{ row.persona.guardrails|length }} of 12</span></h3>
+                    <span class="pill" title="Persona learning, the model's update_persona tool and the refine cycle cannot add, edit or remove a guardrail.">Not writable by learning</span>
+                </div>
+                {% if row.persona.guardrails %}
+                <ol class="mem-guard-list">
+                    {% for rule in row.persona.guardrails %}<li>{{ rule }}</li>{% endfor %}
+                </ol>
+                {% else %}
+                <p class="form-note">No guardrails yet. Add the rules this persona must keep whatever it learns about its users, such as "Never disclose another customer's order".</p>
+                {% endif %}
+                {% if not ui_conn.read_only %}
+                <details class="mem-guard-edit">
+                    <summary class="btn btn-sm">{{ 'Edit guardrails' if row.persona.guardrails else 'Add guardrails' }}</summary>
+                    <form method="post" action="/memory/personas/{{ row.persona.persona_id }}/guardrails">
+                        <label for="guardrails-{{ loop.index0 }}">One rule per line, at most 240 characters each</label>
+                        <textarea id="guardrails-{{ loop.index0 }}" name="guardrails" rows="{{ [row.persona.guardrails|length + 2, 4]|max }}" maxlength="3200" placeholder="Never disclose another customer's order&#10;Always quote the refund policy before promising a refund">{{ row.persona.guardrails|join('\n') }}</textarea>
+                        <p class="form-note">They go first in the system prompt, before the role and goals. Saving writes a new persona version.</p>
+                        <button type="submit" class="btn btn-primary btn-sm">Save guardrails</button>
+                    </form>
+                </details>
+                {% endif %}
+            </div>
+            {% endif %}
+
+            {% if row.entity %}
+            {% set e = row.entity %}
+            <div class="mem-entity">
+                <h3 class="fleet-detail-title">Facts <span class="mem-count">{{ e.facts|length }}</span></h3>
+                <ul class="mem-facts">
+                    {% for fact in e.facts %}
+                    <li class="mem-fact">
+                        <div class="mem-fact-now">
+                            <span class="mem-fact-name mono">{{ fact.name }}</span>
+                            <span class="mem-fact-value">{{ fact.value }}</span>
+                            <span class="mem-level mem-level--{{ fact.level }}" title="Source level {{ fact.level }} of 3. A write replaces this value only from the same level or a higher one.{% if fact.source %} Source: {{ fact.source }}.{% endif %}">{{ 'Pinned' if fact.pinned else fact.level_label }}</span>
+                        </div>
+                        <p class="mem-fact-since">Current since {{ fact.since or 'it was stored' }}{% if fact.not_applied %} · <span class="mem-unapplied">{{ fact.not_applied }} weaker write{{ '' if fact.not_applied == 1 else 's' }} not applied</span>{% endif %}</p>
+                        {% if fact.history %}
+                        <details class="mem-fact-history">
+                            <summary>{{ fact.history|length }} earlier value{{ '' if fact.history|length == 1 else 's' }}</summary>
+                            <ol>
+                                {% for item in fact.history %}
+                                <li class="{{ '' if item.applied else 'is-unapplied' }}">
+                                    <span class="mem-fact-value">{{ item.value }}</span>
+                                    {% if item.applied %}
+                                    <span class="mem-fact-dates mono">{{ item.from or '?' }} → {{ item.to or '?' }}</span>
+                                    {% else %}
+                                    <span class="pill pill--warning" title="This write disagreed with the current value and came from a weaker source ({{ item.level_label|lower }}), so the current value was kept.">Not applied</span>
+                                    <span class="mem-fact-dates mono">offered {{ item.offered or '?' }}</span>
+                                    {% endif %}
+                                    {% if item.source %}<span class="mem-fact-source">{{ item.source }}</span>{% endif %}
+                                </li>
+                                {% endfor %}
+                            </ol>
+                        </details>
+                        {% endif %}
+                    </li>
+                    {% endfor %}
+                </ul>
+
+                <div class="mem-body-head">
+                    <h3 class="fleet-detail-title">Also known as <span class="mem-count">{{ e.aliases|length }}</span></h3>
+                </div>
+                {% if e.aliases %}<p class="mem-aliases">{% for alias in e.aliases %}<span class="pill">{{ alias }}</span>{% endfor %}</p>
+                {% else %}<p class="form-note">No other names. When a duplicate record is merged into this one, its name is added here so a later mention still finds this record.</p>{% endif %}
+                {% if not ui_conn.read_only and not e.superseded_by %}
+                <details class="mem-guard-edit">
+                    <summary class="btn btn-sm">Edit names</summary>
+                    <form method="post" action="/memory/entity/{{ e.entity_id }}/aliases">
+                        <input type="hidden" name="memory_id" value="{{ e.memory_id }}">
+                        <input type="hidden" name="user_id" value="{{ e.user_id or '' }}">
+                        <label for="aliases-{{ loop.index0 }}">Other names, separated by commas</label>
+                        <input id="aliases-{{ loop.index0 }}" name="aliases" value="{{ e.aliases|join(', ') }}" autocomplete="off" placeholder="CFU, Fraud team">
+                        <button type="submit" class="btn btn-primary btn-sm">Save names</button>
+                    </form>
+                </details>
+                {% endif %}
+
+                {% if e.undo_plans and not ui_conn.read_only %}
+                <h3 class="fleet-detail-title">Merged records <span class="mem-count">{{ e.merged_count }}</span></h3>
+                {% for plan in e.undo_plans %}
+                <form method="post" action="/memory/entity/{{ e.entity_id }}/undo-merge" class="mem-undo">
+                    <input type="hidden" name="plan_id" value="{{ plan }}">
+                    <input type="hidden" name="memory_id" value="{{ e.memory_id }}">
+                    <input type="hidden" name="user_id" value="{{ e.user_id or '' }}">
+                    <span class="mono" title="{{ plan }}">Plan {{ plan[:22] }}</span>
+                    {#- The confirmation sits on the button: it is what gets clicked again on a yes. -#}
+                    <button type="submit" class="btn btn-sm" data-confirm="Undo this merge? The merged records come back as separate entities, the names the merge added here are removed, and the other entity changes of the same consolidation plan are undone too." data-confirm-label="Undo merge">Undo merge</button>
+                </form>
+                {% endfor %}
+                {% elif e.superseded_by %}
+                <p class="form-note">This record was merged into <span class="mono">{{ e.superseded_by[:16] }}</span> and is no longer recalled. Undo the merge from that record.</p>
+                {% endif %}
+            </div>
+            {% endif %}
+
             {% if row.body %}
             <div class="mem-body-head">
                 <h3 class="fleet-detail-title">{{ row.body_key|replace('_', ' ')|capitalize }}</h3>
@@ -157,7 +258,10 @@
     </aside>
 </div>
 {% else %}
-{{ empty_state('Nothing stored yet', 'The connected memory provider has no ' ~ page_info[0]|lower ~ ' entries. They appear here once agents write them during runs, or after you save them with the Python SDK.') }}
+{% call empty_state('Nothing stored yet', 'The connected memory provider has no ' ~ page_info[0]|lower ~ ' entries. They appear here once agents write them during runs, or after you save them with the Python SDK.') %}
+    <a class="btn" href="/playground">Open the playground</a>
+    <a class="btn" href="/memory-transfer">Import memory</a>
+{% endcall %}
 {% endif %}
 
 <script>
@@ -171,6 +275,44 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (body && navigator.clipboard) navigator.clipboard.writeText(body.textContent);
             },
         },
+    });
+    // Tick records to copy or download them together, as stored.
+    function picked(keys) {
+        return keys.map(function(key) {
+            const body = document.getElementById('mem-body-' + key);
+            const detail = document.getElementById('mem-detail-' + key);
+            const record = {};
+            if (detail) detail.querySelectorAll('.mem-fields > div').forEach(function(field) {
+                record[field.querySelector('dt').textContent.trim()] = field.querySelector('dd').textContent.trim();
+            });
+            if (body) {
+                const text = body.textContent;
+                try { return Object.assign(record, { content: JSON.parse(text) }); } catch (_) { record.content = text; }
+            }
+            return record;
+        });
+    }
+    MemorizzMonitor.rowMenu('mem-table', function(row) {
+        const key = row.dataset.key;
+        const copy = function(text) { if (navigator.clipboard) navigator.clipboard.writeText(text); };
+        const id = row.querySelector('.mem-col-id');
+        return [
+            { label: 'Copy content', run: function() { const body = document.getElementById('mem-body-' + key); copy(body ? body.textContent : ''); } },
+            id && id.title ? { label: 'Copy ID', run: function() { copy(id.title); } } : null,
+            { label: 'Copy as JSON', run: function() { copy(JSON.stringify(picked([key])[0], null, 2)); } },
+            { label: 'Download JSON', run: function() { MemorizzMonitor.download('{{ active_page }}-record.json', JSON.stringify(picked([key])[0], null, 2)); } },
+        ];
+    });
+    MemorizzMonitor.bulk('mem-table', {
+        noun: 'record',
+        actions: [
+            { label: 'Copy as JSON', run: function(keys, rows, bar) {
+                if (navigator.clipboard) navigator.clipboard.writeText(JSON.stringify(picked(keys), null, 2)).then(function() { bar.clear(); });
+            } },
+            { label: 'Download JSON', run: function(keys) {
+                MemorizzMonitor.download('{{ active_page }}-' + keys.length + '-records.json', JSON.stringify(picked(keys), null, 2));
+            } },
+        ],
     });
 });
 </script>

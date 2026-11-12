@@ -27,7 +27,7 @@ from typing import (
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
-from ...._time import utc_now_iso
+from ...._time import to_epoch, utc_now_iso
 from ....embeddings import get_embedding
 from ....enums.memory_type import MemoryType
 from ....memory_provider import MemoryProvider
@@ -114,9 +114,284 @@ _LENGTH_ERROR_RE = re.compile(
 
 #: Earlier values an attribute keeps, newest first. Forgetting a conversation
 #: restores the newest value another conversation (or the user) gave.
-ATTRIBUTE_HISTORY_LIMIT = 5
+ATTRIBUTE_HISTORY_LIMIT = 20
 #: What a history entry keeps of the value it replaced.
-_HISTORY_FIELDS = ("value", "confidence", "source", "thread_id", "pinned", "updated_at")
+_HISTORY_FIELDS = (
+    "value",
+    "confidence",
+    "source",
+    "thread_id",
+    "pinned",
+    "level",
+    "updated_at",
+    "confirmations",
+    "last_seen",
+)
+#: Keys only a history entry carries: when the value stopped being true
+#: (``valid_to``) and whether it ever was current (``applied``: a weaker write
+#: that disagreed is kept, not applied); when the system learned it
+#: (``recorded_at``) and stopped believing it (``superseded_at``); and, for a
+#: value that turned out to be wrong rather than out of date, ``corrected``
+#: with ``corrected_at``. ``backfilled`` marks an earlier value the host
+#: supplied after the fact.
+_HISTORY_ONLY_FIELDS = (
+    "valid_from",
+    "valid_to",
+    "applied",
+    "recorded_at",
+    "superseded_at",
+    "corrected",
+    "corrected_at",
+    "backfilled",
+)
+#: The same value from the same place counts as a new confirmation only
+#: after this long, so an agent that repeats a fact every turn does not
+#: inflate its count (or cause a write per turn).
+REINFORCE_QUIET_SECONDS = 3600.0
+#: The newest confirmations an attribute keeps the detail of.
+CONFIRMED_BY_LIMIT = 5
+
+#: How much a write's source is trusted, strongest first. A write replaces
+#: the current value only when its level is the same or higher.
+SOURCE_LEVEL_HOST = 3  # pinned, or written by the host through the SDK
+SOURCE_LEVEL_USER = 2  # stated by a user in conversation
+SOURCE_LEVEL_AGENT = 1  # inferred by the agent, from a tool, or by consolidation
+SOURCE_LEVEL_LABELS = {
+    SOURCE_LEVEL_HOST: "Host or pinned",
+    SOURCE_LEVEL_USER: "Stated by the user",
+    SOURCE_LEVEL_AGENT: "Inferred, tool or consolidation",
+}
+_USER_SOURCES = ("turn", "entity_capture", "conversation", "user", "mcp")
+_HOST_SOURCES = ("host", "sdk", "operator", "ui")
+
+
+def source_level(attribute: Mapping[str, Any]) -> int:
+    """The level of a stored attribute value (or a history entry).
+
+    A value written since levels existed carries its own ``level``. An older
+    one is ranked from what it does say: pinned is the host's level, a source
+    that names the conversation is the user's, and anything else (a tool, an
+    inference, consolidation, or no source at all) is the lowest, so it stays
+    as replaceable as it was before the rule.
+    """
+    if attribute.get("pinned"):
+        return SOURCE_LEVEL_HOST
+    try:
+        stored = int(attribute.get("level") or 0)
+    except (TypeError, ValueError):
+        stored = 0
+    if stored in SOURCE_LEVEL_LABELS:
+        return stored
+    source = str(attribute.get("source") or "").strip().casefold()
+    head = source.split(":", 1)[0]
+    tail = source.split(":", 1)[1] if ":" in source else ""
+    if head in _HOST_SOURCES:
+        return SOURCE_LEVEL_HOST
+    if head in _USER_SOURCES or (head == "memory_routing" and tail == "turn"):
+        return SOURCE_LEVEL_USER
+    return SOURCE_LEVEL_AGENT
+
+
+def _moment(value: Any) -> Optional[float]:
+    """Epoch seconds of a stored or caller-supplied time (a date alone is
+    midnight UTC); None when there is none."""
+    return to_epoch(value)
+
+
+def attribute_timeline(attribute: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """An attribute's values, current first, each with its dates.
+
+    Every row has ``value``, ``valid_from``, ``valid_to`` (None while
+    current), ``applied``, ``current``, ``level`` and what provenance was
+    stored. For values written before dates were kept, ``valid_from`` falls
+    back to ``updated_at``, so nothing has to be migrated.
+
+    Two clocks. ``valid_from`` and ``valid_to`` say when the value was true
+    in the world. ``recorded_at`` says when the system learned it and
+    ``superseded_at`` when it stopped believing it (None while current). A
+    value that was *corrected* (it was wrong, not out of date) has
+    ``corrected: True`` and no ``valid_to``: it was believed from
+    ``recorded_at`` to ``superseded_at`` and was never true.
+
+    ``confirmations`` counts how often the value was stated again after it
+    was first stored, ``last_seen`` is when that last happened and
+    ``confirmed_by`` lists the newest of them.
+    """
+    rows: List[Dict[str, Any]] = []
+    current = {
+        key: attribute.get(key)
+        for key in ("value", "confidence", "source", "thread_id", "pinned")
+        if attribute.get(key) not in (None, "")
+    }
+    current.update(
+        valid_from=attribute.get("valid_from")
+        or attribute.get("created_at")
+        or attribute.get("updated_at"),
+        valid_to=None,
+        applied=True,
+        current=True,
+        level=source_level(attribute),
+        recorded_at=attribute.get("created_at") or attribute.get("updated_at"),
+        superseded_at=None,
+        corrected=False,
+        confirmations=_count(attribute.get("confirmations")),
+        last_seen=attribute.get("last_seen"),
+    )
+    if attribute.get("confirmed_by"):
+        current["confirmed_by"] = [
+            dict(item)
+            for item in attribute.get("confirmed_by") or []
+            if isinstance(item, dict)
+        ]
+    rows.append(current)
+    for item in attribute.get("history") or []:
+        if not isinstance(item, dict):
+            continue
+        row = {
+            key: item.get(key)
+            for key in ("value", "confidence", "source", "thread_id", "pinned")
+            if item.get(key) not in (None, "")
+        }
+        applied = item.get("applied") is not False
+        corrected = bool(item.get("corrected")) and applied
+        row.update(
+            valid_from=item.get("valid_from") or item.get("updated_at"),
+            valid_to=item.get("valid_to") if applied and not corrected else None,
+            applied=applied,
+            current=False,
+            level=source_level(item),
+            recorded_at=item.get("recorded_at")
+            or item.get("valid_from")
+            or item.get("updated_at"),
+            superseded_at=(
+                item.get("superseded_at")
+                or item.get("corrected_at")
+                or item.get("valid_to")
+            )
+            if applied
+            else None,
+            corrected=corrected,
+            confirmations=_count(item.get("confirmations")),
+            last_seen=item.get("last_seen"),
+        )
+        if corrected:
+            row["corrected_at"] = item.get("corrected_at") or item.get("superseded_at")
+        if item.get("backfilled"):
+            row["backfilled"] = True
+        if not applied:
+            row["offered_at"] = item.get("updated_at")
+        rows.append(row)
+    return rows
+
+
+def _count(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def entity_attribute_timeline(
+    record: Mapping[str, Any], attribute: str
+) -> List[Dict[str, Any]]:
+    """Every value an entity has held for ``attribute``, current first.
+
+    :func:`attribute_timeline` of the live attribute, followed by the values
+    a consolidation pass retired (they sit in the record's metadata): each of
+    those ends, on both clocks, when it was retired. Empty when the entity
+    never had the attribute.
+    """
+    wanted = str(attribute or "").strip().casefold()
+    rows: List[Dict[str, Any]] = []
+    for item in (record or {}).get("attributes") or []:
+        if isinstance(item, dict) and str(item.get("name") or "").casefold() == wanted:
+            rows.extend(attribute_timeline(item))
+            break
+    metadata = (record or {}).get("metadata")
+    retired = (metadata or {}).get("retired_attributes") if metadata else None
+    for item in reversed(list(retired or [])):
+        if (
+            not isinstance(item, dict)
+            or str(item.get("name") or "").casefold() != wanted
+        ):
+            continue
+        ended = item.get("retired_at")
+        for index, row in enumerate(attribute_timeline(item)):
+            if index == 0:
+                row.update(
+                    current=False,
+                    valid_to=ended,
+                    superseded_at=ended,
+                    retired=True,
+                    retired_by=item.get("retired_by"),
+                )
+            rows.append(row)
+    return rows
+
+
+def value_as_of(
+    rows: Sequence[Mapping[str, Any]],
+    when: Any = None,
+    *,
+    known_at: Any = None,
+) -> Optional[Dict[str, Any]]:
+    """The timeline row that answers a point-in-time question, or None.
+
+    ``rows`` is :func:`attribute_timeline` or :func:`entity_attribute_timeline`.
+
+    ``when`` asks by valid time: the value that was true in the world then,
+    as the system understands it today. A corrected value was never true, so
+    it is not returned. ``known_at`` asks by recorded time: only what the
+    system had learned by then counts, and a value corrected or replaced
+    after ``known_at`` is still what it believed. Give both for "what did the
+    system believe on ``known_at`` about ``when``"; give only ``known_at``
+    for the value it believed then. A weaker write that was never applied is
+    never returned.
+    """
+    at = _moment(when)
+    known = _moment(known_at)
+    if at is None and known is None:
+        return next((dict(row) for row in rows if row.get("current")), None)
+    best: Optional[Tuple[float, float, Dict[str, Any]]] = None
+    for row in rows:
+        if not row.get("applied"):
+            continue
+        recorded = _moment(row.get("recorded_at")) or 0.0
+        superseded = _moment(row.get("superseded_at"))
+        if known is not None:
+            if recorded > known:
+                continue
+            still_believed = superseded is None or superseded > known
+        else:
+            still_believed = superseded is None
+        corrected = bool(row.get("corrected")) and not still_believed
+        if corrected:
+            continue
+        started = _moment(row.get("valid_from")) or recorded
+        ended = None if still_believed else _moment(row.get("valid_to"))
+        if at is None:
+            # What the system believed at ``known_at``.
+            if not still_believed:
+                continue
+        elif started > at or (ended is not None and at >= ended):
+            continue
+        rank = (started, recorded)
+        if best is None or rank > best[:2]:
+            best = (started, recorded, dict(row))
+    return best[2] if best else None
+
+
+def entity_aliases(record: Mapping[str, Any]) -> List[str]:
+    """Other names this entity answers to: the names of records merged into
+    it, and any an operator added. Stored in the record's metadata."""
+    metadata = record.get("metadata") if isinstance(record, Mapping) else None
+    raw = (metadata or {}).get("aliases") if isinstance(metadata, Mapping) else None
+    seen: List[str] = []
+    for item in raw or []:
+        text = " ".join(str(item or "").split())
+        if text and text.casefold() not in {name.casefold() for name in seen}:
+            seen.append(text)
+    return seen
 
 
 def _estimate_tokens(text: str) -> int:
@@ -209,6 +484,65 @@ def _presence_set(provider: Any, scope: Tuple[Any, Any], found: bool) -> None:
             pass
 
 
+_LISTENERS_ATTRIBUTE = "_memorizz_supersession_listeners"
+
+
+def add_supersession_listener(provider: Any, listener: Any) -> None:
+    """Call ``listener(record, changes)`` whenever an entity in ``provider``
+    has a current value replaced by a different one.
+
+    ``changes`` is a list of ``{"attribute", "old_value", "new_value",
+    "at"}``. Every :class:`EntityMemory` on the provider reports to it,
+    whoever made the write. A listener that returns False is dropped, and one
+    that raises is logged and kept: a listener never fails a write.
+    """
+    listeners = getattr(provider, _LISTENERS_ATTRIBUTE, None)
+    if not isinstance(listeners, list):
+        listeners = []
+        try:
+            setattr(provider, _LISTENERS_ATTRIBUTE, listeners)
+        except Exception:
+            return
+    if listener not in listeners:
+        listeners.append(listener)
+
+
+def superseded_values(
+    before: Optional[Mapping[str, Any]], after: Mapping[str, Any], at: str
+) -> List[Dict[str, Any]]:
+    """The attributes whose current value differs between two versions of a
+    record (one that is gone from ``after`` is not a supersession)."""
+
+    def _values(record: Optional[Mapping[str, Any]]) -> Dict[str, str]:
+        return {
+            str(item.get("name") or "").casefold(): str(item.get("value") or "")
+            for item in (record or {}).get("attributes") or []
+            if isinstance(item, dict) and item.get("name")
+        }
+
+    old, new = _values(before), _values(after)
+    names = {
+        str(item.get("name") or "").casefold(): str(item.get("name"))
+        for item in after.get("attributes") or []
+        if isinstance(item, dict) and item.get("name")
+    }
+    changes = []
+    for key, value in new.items():
+        earlier = old.get(key)
+        if earlier and " ".join(earlier.casefold().split()) != " ".join(
+            value.casefold().split()
+        ):
+            changes.append(
+                {
+                    "attribute": names[key],
+                    "old_value": earlier,
+                    "new_value": value,
+                    "at": at,
+                }
+            )
+    return changes
+
+
 class EntityAttributeInput(BaseModel):
     """Model-facing contract for a single entity-memory fact."""
 
@@ -260,9 +594,28 @@ class EntityAttribute(BaseModel):
     #: What kind of memory capture took it for: ``preference``, ``fact`` or
     #: ``event``. None when it was not said.
     kind: Optional[str] = None
+    #: How much the write is trusted: 3 host or pinned, 2 stated by the user,
+    #: 1 inferred, from a tool or by consolidation. See :func:`source_level`.
+    level: Optional[int] = None
+    #: Set only by a host that knows when the value became true; otherwise
+    #: ``created_at`` (when it became the current value here) is used.
+    #: ``created_at`` is also the recorded time: when the system learned it.
+    valid_from: Optional[str] = None
+    #: On a write only, never stored: this value replaces one that was wrong
+    #: rather than one that stopped being true. The replaced value is kept
+    #: in the history as ``corrected`` and the new one takes its valid-from.
+    correction: bool = False
+    #: How often this value was stated again after it was first stored, when
+    #: that last happened, and the newest few (``source``, ``thread_id``,
+    #: ``level``, ``at``). Stating a value again never changes it.
+    confirmations: Optional[int] = None
+    last_seen: Optional[str] = None
+    confirmed_by: List[Dict[str, Any]] = Field(default_factory=list)
     #: Earlier values of this attribute, newest first, each with its
-    #: ``value``, ``confidence``, ``source``, ``thread_id`` and ``updated_at``
-    #: (at most ``ATTRIBUTE_HISTORY_LIMIT``). Prompts and vectors never read it.
+    #: ``value``, ``confidence``, ``source``, ``thread_id``, ``updated_at``,
+    #: ``valid_from`` and ``valid_to``. A weaker write that disagreed with
+    #: the current value is kept here with ``applied: False``. Prompts and
+    #: vectors never read it.
     history: List[Dict[str, Any]] = Field(default_factory=list)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -305,13 +658,23 @@ class EntityMemory:
         memory_provider: MemoryProvider,
         *,
         max_embedding_tokens: Optional[int] = None,
+        attribute_history_limit: Optional[int] = None,
     ):
         """``max_embedding_tokens`` caps the text an entity's vector is made
         from; by default it follows the embedding model's input limit (see
-        :func:`embedding_input_tokens`)."""
+        :func:`embedding_input_tokens`). ``attribute_history_limit`` is how
+        many replaced values each attribute keeps (20 by default)."""
         if memory_provider is None:
             raise ValueError("EntityMemory requires a MemoryProvider instance")
         self.memory_provider = memory_provider
+        self.attribute_history_limit = max(
+            0,
+            int(
+                ATTRIBUTE_HISTORY_LIMIT
+                if attribute_history_limit is None
+                else attribute_history_limit
+            ),
+        )
         self._max_embedding_tokens = (
             int(max_embedding_tokens) if max_embedding_tokens else None
         )
@@ -331,9 +694,14 @@ class EntityMemory:
         identity_key: Optional[str] = None,
         memory_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        source_level: Optional[int] = None,
     ) -> str:
         """
         Create or update an entity record.
+
+        ``source_level`` says how much this write is trusted (3 host, 2 stated
+        by the user, 1 inferred, tool or consolidation). A direct call is host
+        code, so it defaults to 3; the agent's own write paths pass theirs.
 
         Returns the entity_id used to store the record (generated when absent).
         :meth:`upsert_entity_with_report` also says how much of the record its
@@ -349,6 +717,7 @@ class EntityMemory:
             identity_key=identity_key,
             memory_id=memory_id,
             user_id=user_id,
+            source_level=source_level,
         )["entity_id"]
 
     def upsert_entity_with_report(
@@ -363,6 +732,7 @@ class EntityMemory:
         identity_key: Optional[str] = None,
         memory_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        source_level: Optional[int] = None,
     ) -> Dict[str, Any]:
         """:meth:`upsert_entity`, returning ``entity_id``, ``unchanged`` (no new
         information, nothing written) and ``embedding``: the vector's
@@ -377,6 +747,11 @@ class EntityMemory:
         pinned attribute (``pinned=True``, set by the user) is only replaced
         by another pinned write; ``kept_pinned`` names the attributes a write
         left as they were for that reason.
+
+        A write also replaces the current value only when its source level
+        is the same or higher (:func:`source_level`). A weaker write that
+        disagrees is kept in the attribute's history with ``applied: False``
+        and named in ``kept_stronger``; the current value stays.
         """
         now = self._timestamp()
         normalized_identity = self._normalize_identity_key(identity_key)
@@ -429,6 +804,32 @@ class EntityMemory:
             existing = self._fetch_one(
                 {"entity_id": name_bound_id}, memory_id=memory_id, user_id=user_id
             )
+        if not existing and name and not entity_id and not normalized_identity:
+            # A name a merged record used to carry ("CFU") finds the record
+            # it was merged into, after the identity key and the exact name.
+            existing = self.get_entity_by_alias(
+                name, memory_id=memory_id, user_id=user_id
+            )
+            if existing:
+                # The alias must not rename the record it resolved to.
+                name = None
+        if existing and name and existing.get("name"):
+            # Another spelling of the name the record has ("counter fraud
+            # unit" for "Counter Fraud Unit") is the same name, not a rename.
+            def _spelling(value: Any) -> str:
+                return " ".join(str(value).split()).casefold()
+
+            if _spelling(name) == _spelling(existing["name"]):
+                name = None
+        if existing and entity_type and existing.get("entity_type"):
+            # Likewise "organization" for "organisation" is not a new type.
+            def _type_spelling(value: Any) -> str:
+                return re.sub(
+                    r"is(ation|e|ed|ing)\b", r"iz\1", str(value).casefold().strip()
+                )
+
+            if _type_spelling(entity_type) == _type_spelling(existing["entity_type"]):
+                entity_type = None
         if existing:
             entity_id = str(existing.get("entity_id") or entity_id or uuid.uuid4())
         elif normalized_identity:
@@ -441,6 +842,7 @@ class EntityMemory:
             entity_id = entity_id or str(uuid.uuid4())
 
         kept_pinned: List[str] = []
+        kept_stronger: List[str] = []
         record = self._merge_record(
             existing=existing,
             entity_id=entity_id,
@@ -453,6 +855,8 @@ class EntityMemory:
             user_id=user_id,
             timestamp=now,
             kept_pinned=kept_pinned,
+            kept_stronger=kept_stronger,
+            write_level=source_level,
         )
 
         # Write-path dedup (NOOP guard): when the merge produced no new
@@ -468,6 +872,7 @@ class EntityMemory:
                 "unchanged": True,
                 "embedding": self.embedding_report(existing),
                 "kept_pinned": kept_pinned,
+                "kept_stronger": kept_stronger,
             }
 
         # A change the vector does not read (provenance, history, confidence,
@@ -499,13 +904,201 @@ class EntityMemory:
             memory_store_type=MemoryType.ENTITY_MEMORY,
         )
         _presence_set(self.memory_provider, (memory_id, user_id), True)
+        superseded = superseded_values(existing, record, now)
+        self.notify_superseded(record, superseded)
         # Mongo returns _id for updates; we prefer our stable entity_id
         return {
             "entity_id": record["entity_id"],
             "unchanged": False,
             "embedding": report,
             "kept_pinned": kept_pinned,
+            "kept_stronger": kept_stronger,
+            "superseded": superseded,
         }
+
+    def notify_superseded(
+        self, record: Mapping[str, Any], changes: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """Tell the provider's supersession listeners that ``record`` had
+        current values replaced (see :func:`add_supersession_listener`)."""
+        listeners = getattr(self.memory_provider, _LISTENERS_ATTRIBUTE, None)
+        if not changes or not isinstance(listeners, list):
+            return
+        for listener in list(listeners):
+            try:
+                if listener(dict(record), [dict(item) for item in changes]) is False:
+                    listeners.remove(listener)
+            except Exception as exc:
+                logger.debug("Supersession listener failed: %s", exc)
+
+    def reinforce_attribute(
+        self,
+        attribute: str,
+        *,
+        entity_id: Optional[str] = None,
+        name: Optional[str] = None,
+        value: Optional[str] = None,
+        source: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        source_level: Optional[int] = None,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> bool:
+        """Record that an entity's current value was stated again.
+
+        Adds one to the attribute's ``confirmations``, sets ``last_seen`` and
+        notes who said it (``source``, ``thread_id``, ``source_level``). The
+        value, its source level and its valid-from stay as they are, and the
+        stored vector is kept. With ``value``, nothing is counted unless
+        that is still the current value. A ``source`` that already confirmed
+        the value is not counted twice. Returns whether a confirmation was
+        recorded.
+        """
+        record = self._resolve(entity_id, name, memory_id=memory_id, user_id=user_id)
+        if not record:
+            return False
+        wanted = str(attribute or "").strip().casefold()
+        now = self._timestamp()
+        changed = False
+        attributes: List[Any] = []
+        for item in record.get("attributes") or []:
+            if (
+                not isinstance(item, dict)
+                or str(item.get("name") or "").casefold() != wanted
+                or changed
+            ):
+                attributes.append(item)
+                continue
+            if value is not None and not self._same_value(item, {"value": value}):
+                attributes.append(item)
+                continue
+            if source and any(
+                isinstance(seen, dict) and seen.get("source") == source
+                for seen in item.get("confirmed_by") or []
+            ):
+                attributes.append(item)
+                continue
+            offered = {"source": source, "thread_id": thread_id}
+            if source_level in SOURCE_LEVEL_LABELS:
+                offered["level"] = int(source_level)
+            attributes.append(self._reinforced(item, offered, now, always=True))
+            changed = True
+        if changed:
+            self._store_rewritten(
+                {**record, "attributes": attributes, "updated_at": now},
+                previous=record,
+            )
+        return changed
+
+    def withdraw_confirmations(
+        self,
+        source: str,
+        *,
+        memory_id: Optional[str],
+        user_id: Optional[str],
+    ) -> int:
+        """Take back the confirmations one ``source`` recorded, in this
+        memory and user. Returns how many were removed."""
+        removed = 0
+        for record in self.list_entities(
+            memory_id=memory_id, user_id=user_id, include_superseded=True
+        ):
+            attributes, count = self._without_confirmations(
+                record.get("attributes") or [],
+                lambda seen: str(seen.get("source") or "") == source,
+            )
+            if count:
+                removed += count
+                self._store_rewritten(
+                    {
+                        **record,
+                        "attributes": attributes,
+                        "updated_at": self._timestamp(),
+                    },
+                    previous=record,
+                )
+        return removed
+
+    @staticmethod
+    def _without_confirmations(
+        attributes: Iterable[Any], matches: Any
+    ) -> Tuple[List[Any], int]:
+        """``attributes`` without the confirmations ``matches`` accepts, and
+        how many that was."""
+        kept: List[Any] = []
+        removed = 0
+        for item in attributes:
+            confirmed = item.get("confirmed_by") if isinstance(item, dict) else None
+            if not confirmed:
+                kept.append(item)
+                continue
+            staying = [
+                seen
+                for seen in confirmed
+                if not (isinstance(seen, dict) and matches(seen))
+            ]
+            gone = len(confirmed) - len(staying)
+            if not gone:
+                kept.append(item)
+                continue
+            removed += gone
+            updated = dict(item)
+            updated["confirmations"] = max(0, _count(item.get("confirmations")) - gone)
+            if staying:
+                updated["confirmed_by"] = staying
+                updated["last_seen"] = staying[0].get("at")
+            else:
+                updated.pop("confirmed_by", None)
+            if not updated["confirmations"]:
+                for field in ("confirmations", "last_seen", "confirmed_by"):
+                    updated.pop(field, None)
+            kept.append(updated)
+        return kept, removed
+
+    def value_as_of(
+        self,
+        attribute: str,
+        when: Any = None,
+        *,
+        entity_id: Optional[str] = None,
+        name: Optional[str] = None,
+        known_at: Any = None,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """An entity's value for ``attribute`` at a point in time, as a
+        timeline row (``value``, ``valid_from``, ``valid_to``,
+        ``recorded_at``, ``level``, ...), or None.
+
+        ``when`` is the date in the world ("the limit in September");
+        ``known_at`` is the date of the system's knowledge ("what did we
+        believe in October"). See :func:`value_as_of`. The entity is found
+        by ``entity_id``, or by ``name`` or an alias.
+        """
+        record = self._resolve(entity_id, name, memory_id=memory_id, user_id=user_id)
+        if not record:
+            return None
+        return value_as_of(
+            entity_attribute_timeline(record, attribute), when, known_at=known_at
+        )
+
+    def _resolve(
+        self,
+        entity_id: Optional[str],
+        name: Optional[str],
+        *,
+        memory_id: Optional[str],
+        user_id: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        if entity_id:
+            return self._fetch_one_in_scope(
+                {"entity_id": entity_id}, memory_id=memory_id, user_id=user_id
+            )
+        if name:
+            return self.get_entity_by_name(
+                name, memory_id=memory_id, user_id=user_id
+            ) or self.get_entity_by_alias(name, memory_id=memory_id, user_id=user_id)
+        return None
 
     def record_attribute(
         self,
@@ -634,6 +1227,53 @@ class EntityMemory:
     ) -> Optional[Dict[str, Any]]:
         """Return the stored record matching a given name."""
         return self._fetch_one({"name": name}, memory_id=memory_id, user_id=user_id)
+
+    def get_entity_by_alias(
+        self,
+        alias: str,
+        *,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """The live record that lists ``alias`` among its other names."""
+        wanted = " ".join(str(alias or "").casefold().split())
+        if not wanted:
+            return None
+        for record in self.list_entities(memory_id=memory_id, user_id=user_id):
+            if wanted in {name.casefold() for name in entity_aliases(record)}:
+                return record
+        return None
+
+    def set_aliases(
+        self,
+        entity_id: str,
+        aliases: Sequence[str],
+        *,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> List[str]:
+        """Replace an entity's alias list (an operator's edit). Returns the
+        list as stored: trimmed, without repeats or the entity's own name."""
+        record = self._fetch_one(
+            {"entity_id": entity_id}, memory_id=memory_id, user_id=user_id
+        )
+        if not record:
+            raise ValueError("entity not found")
+        own = " ".join(str(record.get("name") or "").casefold().split())
+        cleaned = [
+            name
+            for name in entity_aliases({"metadata": {"aliases": list(aliases or [])}})
+            if name.casefold() != own
+        ][:50]
+        metadata = dict(record.get("metadata") or {})
+        if cleaned:
+            metadata["aliases"] = cleaned
+        else:
+            metadata.pop("aliases", None)
+        self._store_rewritten(
+            {**record, "metadata": metadata, "updated_at": self._timestamp()}
+        )
+        return cleaned
 
     def list_entities(
         self,
@@ -790,6 +1430,8 @@ class EntityMemory:
                             "attributes": list(canonical.get("attributes") or []),
                             "relations": list(canonical.get("relations") or []),
                             "merged_at": merged.get("updated_at"),
+                            # The alias list before this merge added to it.
+                            "aliases": entity_aliases(canonical),
                         },
                     }
                     merged["metadata"] = merged_metadata
@@ -1028,6 +1670,10 @@ class EntityMemory:
                     if isinstance(item, dict)
                 ]
                 remaining = [item for item in history if not _from_thread(item)]
+                (attribute,), unconfirmed = self._without_confirmations(
+                    [attribute], _from_thread
+                )
+                changed = changed or bool(unconfirmed)
                 if not _from_thread(attribute):
                     if len(remaining) != len(history):
                         attribute = {**attribute, "history": remaining}
@@ -1037,18 +1683,34 @@ class EntityMemory:
                     attributes.append(attribute)
                     continue
                 changed = True
-                if not remaining:
+                # Only a value that was once current can come back: a weaker
+                # write that was never applied stays in the history.
+                earlier = next(
+                    (
+                        index
+                        for index, item in enumerate(remaining)
+                        if item.get("applied") is not False
+                    ),
+                    None,
+                )
+                if earlier is None:
                     counts["attributes_removed"] += 1
                     continue
                 restored = {
                     key: value
                     for key, value in attribute.items()
-                    if key not in {*_HISTORY_FIELDS, "history"}
+                    if key
+                    not in {*_HISTORY_FIELDS, "history", "valid_from", "confirmed_by"}
                 }
-                restored.update(remaining[0])
+                returning = dict(remaining[earlier])
+                for key in _HISTORY_ONLY_FIELDS:
+                    if key != "valid_from":
+                        returning.pop(key, None)
+                restored.update(returning)
                 restored.setdefault("confidence", 0.8)
-                if remaining[1:]:
-                    restored["history"] = remaining[1:]
+                rest = remaining[:earlier] + remaining[earlier + 1 :]
+                if rest:
+                    restored["history"] = rest
                 attributes.append(restored)
                 counts["attributes_restored"] += 1
             relations = [
@@ -1137,6 +1799,12 @@ class EntityMemory:
                     metadata.pop("merge_undo", None)
                 metadata.pop("merged_entity_ids", None)
                 metadata.pop("consolidated_at", None)
+                if "aliases" in snapshot:
+                    # Take back the aliases this merge added.
+                    if snapshot.get("aliases"):
+                        metadata["aliases"] = list(snapshot["aliases"])
+                    else:
+                        metadata.pop("aliases", None)
                 changed = True
             if metadata.get("superseded_by_plan") == plan_id:
                 for key in ("superseded_by", "superseded_at", "superseded_by_plan"):
@@ -1153,6 +1821,14 @@ class EntityMemory:
             removed = len(record.get("attributes") or []) - len(attributes)
             if removed:
                 counts["facts_removed"] += removed
+                changed = True
+            attributes, unconfirmed = self._without_confirmations(
+                attributes, lambda seen: str(seen.get("source") or "") == source
+            )
+            if unconfirmed:
+                counts["confirmations_removed"] = (
+                    counts.get("confirmations_removed", 0) + unconfirmed
+                )
                 changed = True
             retired = list(metadata.get("retired_attributes") or [])
             returning = [
@@ -1748,8 +2424,15 @@ class EntityMemory:
                     current_confidence = float((current or {}).get("confidence") or 0.0)
                 except (TypeError, ValueError):
                     current_confidence = 0.0
-                item_rank = (confidence, str(item.get("updated_at") or ""))
+                # The stronger source wins first: a merge must not swap a
+                # value the host wrote for the copy a conversation left.
+                item_rank = (
+                    source_level(item),
+                    confidence,
+                    str(item.get("updated_at") or ""),
+                )
                 current_rank = (
+                    source_level(current) if current else 0,
                     current_confidence,
                     str((current or {}).get("updated_at") or ""),
                 )
@@ -1788,6 +2471,23 @@ class EntityMemory:
             set(metadata.get("merged_entity_ids") or []).union(alias_ids)
         )
         metadata["consolidated_at"] = cls._timestamp()
+        # The names of the records merged away become the survivor's aliases,
+        # so a later mention of one resolves here.
+        own = " ".join(str(canonical.get("name") or "").casefold().split())
+        names = entity_aliases(canonical)
+        for record in duplicates:
+            for name in [record.get("name"), *entity_aliases(record)]:
+                text = " ".join(str(name or "").split())
+                if (
+                    text
+                    and text.casefold() != own
+                    and text.casefold() not in {item.casefold() for item in names}
+                ):
+                    names.append(text)
+        if names:
+            metadata["aliases"] = names
+        else:
+            metadata.pop("aliases", None)
         merged["attributes"] = list(attributes.values())
         merged["relations"] = list(relations.values())
         merged["metadata"] = metadata
@@ -2090,13 +2790,23 @@ class EntityMemory:
         timestamp: str,
         user_id: Optional[str] = None,
         kept_pinned: Optional[List[str]] = None,
+        kept_stronger: Optional[List[str]] = None,
+        write_level: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Merge dictionaries for upsert operations."""
         record = existing.copy() if existing else {}
         record["entity_id"] = record.get("entity_id") or entity_id
         if name:
             record["name"] = name
-        if entity_type:
+        # A record keeps the type it has unless the host says otherwise: a
+        # model that files a fact about a "team" as an "organization" has
+        # relabelled it, not learned something, and records of two types
+        # are never merged as duplicates.
+        if entity_type and (
+            not record.get("entity_type")
+            or write_level not in SOURCE_LEVEL_LABELS
+            or int(write_level) >= SOURCE_LEVEL_HOST
+        ):
             record["entity_type"] = entity_type
         if memory_id:
             record["memory_id"] = memory_id
@@ -2118,7 +2828,12 @@ class EntityMemory:
             }
 
         record_attributes = self._merge_attributes(
-            record.get("attributes", []), attributes, timestamp, kept_pinned
+            record.get("attributes", []),
+            attributes,
+            timestamp,
+            kept_pinned,
+            kept_stronger=kept_stronger,
+            write_level=write_level,
         )
         record_relations = self._merge_relations(
             record.get("relations", []), relations, timestamp
@@ -2136,13 +2851,21 @@ class EntityMemory:
         updates: Optional[Sequence[Union[EntityAttribute, Dict[str, Any]]]],
         timestamp: str,
         kept_pinned: Optional[List[str]] = None,
+        *,
+        kept_stronger: Optional[List[str]] = None,
+        write_level: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Apply ``updates`` by attribute name (last write wins), keeping what
-        each replaced value said in the attribute's ``history``.
+        """Apply ``updates`` by attribute name, keeping what each replaced
+        value said, and when it held, in the attribute's ``history``.
 
-        A pinned value is replaced only by a pinned write; the names of the
-        attributes left alone for that reason go into ``kept_pinned``. The
-        same value said again from the same place changes nothing, so the
+        A write replaces the current value only when its source level is the
+        same or higher (:func:`source_level`); at the same level the newer
+        write wins. A pinned value is the strongest and is replaced only by a
+        pinned write; those attributes go into ``kept_pinned``. A weaker
+        write that disagrees is kept in the history with ``applied: False``
+        and its attribute goes into ``kept_stronger``.
+
+        The same value said again from the same place changes nothing, so the
         write stays a no-op; said from another conversation, the earlier
         provenance joins the history, where forgetting either conversation
         still leaves the fact.
@@ -2150,36 +2873,249 @@ class EntityMemory:
         attributes = {attr["name"].lower(): attr for attr in existing if "name" in attr}
         for attr in updates or []:
             normalized = self._stamped(EntityAttribute, attr, timestamp)
+            if normalized.get("pinned"):
+                level = SOURCE_LEVEL_HOST
+            elif normalized.get("level") in SOURCE_LEVEL_LABELS:
+                level = int(normalized["level"])
+            elif write_level in SOURCE_LEVEL_LABELS:
+                level = int(write_level)
+            else:
+                # A direct call with nothing said is host code.
+                level = SOURCE_LEVEL_HOST
+            normalized["level"] = level
+            correction = bool(normalized.pop("correction", False))
             key = normalized["name"].lower()
             previous = attributes.get(key)
             if isinstance(previous, dict):
-                if previous.get("pinned") and not normalized.get("pinned"):
-                    if kept_pinned is not None:
-                        kept_pinned.append(previous["name"])
-                    continue
                 same_value = self._same_value(previous, normalized)
+                pinned_kept = previous.get("pinned") and not normalized.get("pinned")
+                weaker = level < source_level(previous)
+                if pinned_kept or weaker:
+                    if pinned_kept and kept_pinned is not None:
+                        kept_pinned.append(previous["name"])
+                    if same_value:
+                        # A weaker source saying the same thing confirms the
+                        # value; it changes nothing else about it.
+                        attributes[key] = self._reinforced(
+                            previous, normalized, timestamp
+                        )
+                    else:
+                        if not pinned_kept and kept_stronger is not None:
+                            kept_stronger.append(previous["name"])
+                        attributes[key] = self._with_unapplied(
+                            previous, normalized, timestamp
+                        )
+                    continue
                 if same_value and all(
                     previous.get(field) == normalized.get(field)
                     for field in ("source", "thread_id", "pinned")
                 ):
-                    # Re-asserted verbatim. A higher confidence still counts.
+                    # Re-asserted verbatim. A higher confidence still counts,
+                    # and so does saying it again after a while.
+                    kept = dict(previous)
                     if float(normalized.get("confidence") or 0) > float(
                         previous.get("confidence") or 0
                     ):
-                        attributes[key] = {
-                            **previous,
-                            "confidence": normalized["confidence"],
-                            "updated_at": timestamp,
-                        }
+                        kept.update(
+                            confidence=normalized["confidence"], updated_at=timestamp
+                        )
+                    attributes[key] = self._reinforced(kept, normalized, timestamp)
                     continue
-                history = self._attribute_history(previous)
-                normalized["created_at"] = (
-                    previous.get("created_at") if same_value else timestamp
-                ) or timestamp
+                if same_value:
+                    # The same value from somewhere else: the earlier
+                    # provenance joins the history, and it is a confirmation.
+                    history = self._attribute_history(previous, replaced_at=timestamp)
+                    if history:
+                        for field in ("confirmations", "last_seen"):
+                            history[0].pop(field, None)
+                        normalized["history"] = history
+                    normalized["created_at"] = previous.get("created_at") or timestamp
+                    if not normalized.get("valid_from") and previous.get("valid_from"):
+                        normalized["valid_from"] = previous["valid_from"]
+                    counted = self._reinforced(
+                        previous, normalized, timestamp, always=True
+                    )
+                    for field in ("confirmations", "last_seen", "confirmed_by"):
+                        if counted.get(field):
+                            normalized[field] = counted[field]
+                    attributes[key] = normalized
+                    continue
+                started = (
+                    previous.get("valid_from")
+                    or previous.get("created_at")
+                    or previous.get("updated_at")
+                )
+                offered = _moment(normalized.get("valid_from"))
+                held = _moment(previous.get("valid_from"))
+                if not correction and offered is not None and held is not None:
+                    if offered < held:
+                        # The host is filling in an earlier period: the
+                        # current value stays, and this one takes its place
+                        # in the past.
+                        attributes[key] = self._with_backfilled(
+                            previous, normalized, timestamp
+                        )
+                        continue
+                    correction = offered == held
+                history = self._attribute_history(
+                    previous,
+                    replaced_at=timestamp,
+                    valid_to=None if correction else normalized.get("valid_from"),
+                    corrected=correction,
+                )
+                normalized["created_at"] = timestamp
+                if correction and not normalized.get("valid_from") and started:
+                    # A correction is about the same period the wrong value
+                    # claimed.
+                    normalized["valid_from"] = started
                 if history:
                     normalized["history"] = history
+                for field in ("confirmations", "last_seen", "confirmed_by"):
+                    normalized.pop(field, None)
+            # ``created_at`` is when this value became current (a value said
+            # again keeps it): the recorded time, and the valid-from date
+            # too unless the host gave one. A second copy is not stored.
             attributes[key] = normalized
         return list(attributes.values())
+
+    def _with_unapplied(
+        self,
+        previous: Mapping[str, Any],
+        offered: Mapping[str, Any],
+        timestamp: str,
+    ) -> Dict[str, Any]:
+        """``previous`` with ``offered`` noted in its history as a write that
+        was not applied. Offering the same value again adds nothing."""
+        history = [
+            dict(item)
+            for item in previous.get("history") or []
+            if isinstance(item, dict)
+        ]
+        for item in history:
+            if item.get("applied") is False and self._same_value(item, offered):
+                return dict(previous)
+        entry = {
+            field: offered.get(field)
+            for field in _HISTORY_FIELDS
+            if offered.get(field) not in (None, "", False)
+        }
+        entry.update(updated_at=timestamp, applied=False)
+        return {
+            **previous,
+            "history": ([entry] + history)[: self.attribute_history_limit],
+        }
+
+    @staticmethod
+    def _reinforced(
+        previous: Mapping[str, Any],
+        offered: Mapping[str, Any],
+        timestamp: str,
+        *,
+        always: bool = False,
+    ) -> Dict[str, Any]:
+        """``previous`` with one more confirmation: its count, when it was
+        last seen and who said it. Nothing else about the value changes.
+
+        The same source in the same conversation counts again only after
+        :data:`REINFORCE_QUIET_SECONDS`, unless ``always``.
+        """
+        entry = {
+            key: value
+            for key, value in (
+                ("source", offered.get("source")),
+                ("thread_id", offered.get("thread_id")),
+                ("level", offered.get("level")),
+            )
+            if value not in (None, "")
+        }
+        origin = (entry.get("source"), entry.get("thread_id"))
+        confirmed = [
+            dict(item)
+            for item in previous.get("confirmed_by") or []
+            if isinstance(item, dict)
+        ]
+        if not always:
+            seen = [
+                item.get("at")
+                for item in confirmed
+                if (item.get("source"), item.get("thread_id")) == origin
+            ]
+            if (previous.get("source"), previous.get("thread_id")) == origin:
+                seen.append(
+                    previous.get("last_seen")
+                    or previous.get("updated_at")
+                    or previous.get("created_at")
+                )
+            now = _moment(timestamp) or 0.0
+            if any(
+                now - (_moment(at) or 0.0) < REINFORCE_QUIET_SECONDS
+                for at in seen
+                if at
+            ):
+                return dict(previous)
+        entry["at"] = timestamp
+        return {
+            **previous,
+            "confirmations": _count(previous.get("confirmations")) + 1,
+            "last_seen": timestamp,
+            "confirmed_by": ([entry] + confirmed)[:CONFIRMED_BY_LIMIT],
+        }
+
+    def _with_backfilled(
+        self,
+        previous: Mapping[str, Any],
+        offered: Mapping[str, Any],
+        timestamp: str,
+    ) -> Dict[str, Any]:
+        """``previous`` with ``offered`` placed in its history as a value
+        that was true before it: from ``offered``'s valid-from until the
+        next value the history knows began."""
+        history = [
+            dict(item)
+            for item in previous.get("history") or []
+            if isinstance(item, dict)
+        ]
+        begins = _moment(offered.get("valid_from")) or 0.0
+        for item in history:
+            if (
+                item.get("applied") is not False
+                and self._same_value(item, offered)
+                and _moment(item.get("valid_from")) == begins
+            ):
+                return dict(previous)
+        later = [
+            (moment, value)
+            for moment, value in (
+                (_moment(row.get("valid_from")), row.get("valid_from"))
+                for row in [previous, *history]
+                if row.get("applied") is not False and not row.get("corrected")
+            )
+            if moment is not None and moment > begins
+        ]
+        entry = {
+            field: offered.get(field)
+            for field in _HISTORY_FIELDS
+            if offered.get(field) not in (None, "", False)
+        }
+        entry.update(
+            updated_at=timestamp,
+            valid_from=offered.get("valid_from"),
+            valid_to=min(later)[1] if later else None,
+            recorded_at=timestamp,
+            superseded_at=timestamp,
+            backfilled=True,
+        )
+        index = next(
+            (
+                position
+                for position, item in enumerate(history)
+                if (_moment(item.get("valid_from") or item.get("updated_at")) or 0.0)
+                < begins
+            ),
+            len(history),
+        )
+        history.insert(index, entry)
+        return {**previous, "history": history[: self.attribute_history_limit]}
 
     @staticmethod
     def _same_value(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
@@ -2187,24 +3123,58 @@ class EntityMemory:
             str(right.get("value") or "").casefold().split()
         )
 
-    @staticmethod
-    def _attribute_history(previous: Mapping[str, Any]) -> List[Dict[str, Any]]:
-        """``previous``'s own history with ``previous`` itself in front."""
+    def _attribute_history(
+        self,
+        previous: Mapping[str, Any],
+        replaced_at: Optional[str] = None,
+        *,
+        valid_to: Optional[str] = None,
+        corrected: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """``previous``'s own history with ``previous`` itself in front.
+
+        It was true from when it began until ``valid_to`` (when the value
+        replacing it began, if the host said; otherwise ``replaced_at``), and
+        believed from when it was recorded until ``replaced_at``. A
+        ``corrected`` value gets no ``valid_to``: it was never true.
+        """
         entry = {
             field: previous.get(field)
             for field in _HISTORY_FIELDS
             if previous.get(field) not in (None, "", False)
         }
+        if entry:
+            started = (
+                previous.get("valid_from")
+                or previous.get("created_at")
+                or previous.get("updated_at")
+            )
+            if started:
+                entry["valid_from"] = started
+            recorded = previous.get("created_at") or previous.get("updated_at")
+            if recorded and recorded != started:
+                entry["recorded_at"] = recorded
+            if corrected and replaced_at:
+                entry["corrected"] = True
+                entry["corrected_at"] = replaced_at
+            elif replaced_at:
+                ends = valid_to or replaced_at
+                if (
+                    valid_to
+                    and started
+                    and (_moment(valid_to) or 0.0) <= (_moment(started) or 0.0)
+                ):
+                    ends = replaced_at
+                entry["valid_to"] = ends
+                if ends != replaced_at:
+                    entry["superseded_at"] = replaced_at
         older = [
             dict(item)
             for item in previous.get("history") or []
             if isinstance(item, dict)
         ]
-        return (
-            ([entry] + older)[:ATTRIBUTE_HISTORY_LIMIT]
-            if entry
-            else older[:ATTRIBUTE_HISTORY_LIMIT]
-        )
+        limit = self.attribute_history_limit
+        return ([entry] + older)[:limit] if entry else older[:limit]
 
     def _merge_relations(
         self,
@@ -2248,7 +3218,12 @@ class EntityMemory:
                 ("thread_id", None),
                 ("pinned", False),
                 ("kind", None),
+                ("level", None),
+                ("valid_from", None),
                 ("history", []),
+                ("confirmations", None),
+                ("last_seen", None),
+                ("confirmed_by", []),
             ):
                 if payload.get(field) == empty:
                     payload.pop(field, None)

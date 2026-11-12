@@ -129,6 +129,8 @@ CREATE TABLE personas (
     goals CLOB,
     version NUMBER(10) DEFAULT 1,             -- Bumped by each Persona.update
     evolution_history CLOB CHECK (evolution_history IS JSON), -- JSON array of changes
+    guardrails CLOB CHECK (guardrails IS JSON), -- Rules learning cannot write (JSON array)
+    standing_rules CLOB CHECK (standing_rules IS JSON), -- Rules a named owner approved (JSON array)
     memory_id VARCHAR2(255),
     agent_id VARCHAR2(255),
     embedding VECTOR(256, FLOAT32),
@@ -343,6 +345,9 @@ CREATE TABLE workflow_memory (
     promoted_skill_id VARCHAR2(255),          -- Set when covered by an ACTIVE learned skill
     skills_activated CLOB CHECK (skills_activated IS JSON),  -- JSON array of skill IDs in context
     shadow_evaluations CLOB CHECK (shadow_evaluations IS JSON),  -- Passive SHADOW evidence
+    outcome_verified NUMBER(1) DEFAULT 0,     -- A host or an evaluator confirmed the outcome
+    skills_held_out CLOB CHECK (skills_held_out IS JSON),  -- Active skills withheld by the holdout
+    origin_thread_id VARCHAR2(255),           -- The conversation the run came from
     embedding VECTOR(256, FLOAT32),
     created_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),
     updated_at TIMESTAMP DEFAULT SYS_EXTRACT_UTC(SYSTIMESTAMP),

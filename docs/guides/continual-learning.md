@@ -162,6 +162,76 @@ agent = MemAgent.load(
 The builder exposes the same behavior through
 `.with_workflow_outcome_evaluator(evaluate_workflow)`.
 
+## Verified outcomes
+
+A run that does not raise counts as a success, so a skill can be promoted on
+the agent's own opinion of itself. When your application can say whether a
+run really worked, that is recorded on the run as `outcome_verified`:
+
+- a `workflow_outcome_evaluator` marks every run it judges;
+- `agent.record_task_outcome("success", verified=True, ...)` marks the run of
+  that turn, and sets its outcome to what the host reported.
+
+`min_verified_outcomes` is a fifth promotion gate: with a value of 2, a class
+with five clean executions and no verified success stays a candidate. It is
+off by default (0), because an agent whose host reports no outcomes would
+otherwise stop promoting. Set it to 2 once the host reports them. It applies
+to distilled skills only; a procedure the user states is not gated.
+
+## The holdout
+
+Shadow evaluation and the drift monitor observe; neither says whether a skill
+helps. The holdout does. With `holdout_rate` (default 0.1), one matching
+thread in ten runs without an active skill:
+
+- The side is `sha256(skill_id + thread_id)`, so a thread stays on one side
+  and nothing is stored to decide it.
+- On a held-out turn the skill is not injected, the class's workflow records
+  are recalled as they were before promotion (when workflow recall is on),
+  and the run records `skills_held_out`.
+- Each skill keeps success and run counts for both sides. Where the host
+  verifies outcomes on both sides, the figure uses only verified runs;
+  otherwise it uses each run's own outcome and says it is unverified.
+- When each side has at least `holdout_min_runs` (20) runs and the skill's
+  side is lower by more than chance explains, the skill gets a review flag
+  in the promotion report. "More than chance" is `holdout_flag_z` (1.0)
+  standard errors of the difference. Set it to 0 to flag any lower figure,
+  or raise it to flag fewer skills that make no difference at the cost of
+  missing more that do harm. Nothing is demoted on this figure. A person
+  decides.
+
+The share is yours to set, per agent:
+
+- **SDK:** `agent.set_holdout(0.2)`, or `agent.set_holdout(0)` to turn it
+  off. `min_runs=` and `flag_z=` change the flag rule.
+- **CLI:** `memorizz learning holdout --agent-id <id> --rate 0.2` (with no
+  option it prints the settings in force).
+- **UI:** Skills, an active skill, "Holdout settings" under the
+  with-and-without figure.
+- **MCP:** `memorizz_update_agent` takes `holdout_rate`.
+
+`skill.holdout_exempt = True` (or the switch on the skill's card) keeps a
+skill out of the holdout where withholding it is not acceptable. A skill the
+user stated is exempt by default. There is no new lifecycle state: the
+holdout applies only once a skill is active.
+
+!!! note "Changed behaviour"
+    `holdout_rate` defaults to 0.1, so after upgrading one matching thread in
+    ten runs without an active skill. Set it to 0 to keep the old behaviour.
+
+A flag is a prompt to look, not a verdict: with one thread in ten as the
+control, a skill that makes no difference can land below its control by
+chance.
+
+## Duplicate skills
+
+Validation rejects a new skill whose applicability embedding (name,
+description, preconditions and sample queries) has a cosine of
+`duplicate_description_similarity` (0.85) or more with a live skill the same
+user's requests can reach. The report names the existing skill, so an
+operator can keep one. When the live skill is one the user stated, the
+distilled candidate is the one rejected.
+
 ## Five invariants
 
 The whole system is governed by five rules:
@@ -431,6 +501,36 @@ manager.activate_skill(skill_id)               # SHADOW → ACTIVE (+ stamp back
 manager.demote_skill(skill_id, reason="...")   # manual demotion
 ```
 
+## Reading what one agent has done
+
+A store is shared by every agent that uses it, so `provider.list_all(...)`
+returns other agents' records too. Three methods read one agent's own
+records, oldest first:
+
+```python
+agent.workflow_runs()                                  # every run that called a tool
+agent.workflow_runs(thread_id="monday", outcome="failure")
+agent.workflow_runs(since="2026-11-12T09:00:00+00:00", limit=20, newest_first=True)
+
+agent.tool_calls(tool="lookup_claim", failed=True)     # the tool log
+agent.learned_skills(status="shadow")                  # skills learned from runs
+```
+
+| Method | Returns | Filters |
+|---|---|---|
+| `workflow_runs()` | One record per run: the steps, the outcome, the skills in context | `thread_id`, `outcome`, `since`, `limit`, `newest_first` |
+| `tool_calls()` | One record per stored tool call: arguments, result, error | `tool`, `thread_id`, `failed`, `since`, `limit`, `newest_first` |
+| `learned_skills()` | The agent's learned skills, any status | `status`, `newest_first` |
+
+`since` takes a datetime, an ISO string or epoch seconds. Records are ordered
+by when they were written, read as times and not as text. The tool log holds
+every call only when the agent has
+`ToolResultPolicy(persist_all_results=True)`.
+
+Underneath is `provider.list_for_agent(memory_type, agent_id)`, which every
+provider has. MongoDB filters in the database; the filesystem and Oracle
+providers read the type and keep the agent's rows.
+
 ## The local UI: human-in-the-loop promotion
 
 The local UI (`memorizz ui`) exposes the whole loop:
@@ -493,6 +593,11 @@ All knobs live in `continual_learning_config` (see `PromotionConfig`):
 | `demotion_success_delta` | 0.25 | Demote when rolling < baseline − delta |
 | `min_activations_before_drift_check` | 5 | Grace period |
 | `promotion_every_n_runs` | 25 | Cycle cadence (0 = manual) |
+| `min_verified_outcomes` | 0 | Gate: successes a host or an evaluator confirmed. Off at 0; set it to 2 once the host reports outcomes |
+| `holdout_rate` | 0.1 | Share of matching threads that run without an active skill. 0 turns it off |
+| `holdout_min_runs` | 20 | Runs on each side before a lower figure raises a review flag |
+| `holdout_flag_z` | 1.0 | How far below the "without" figure the skill's side must be, in standard errors of the difference, to raise the flag. 0 flags any lower figure |
+| `duplicate_description_similarity` | 0.85 | Validation rejects a new skill at or above this |
 
 ## Measuring whether skills help
 

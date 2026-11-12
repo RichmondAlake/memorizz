@@ -1,0 +1,18 @@
+flowchart LR
+    Q["A handler's request"] --> K{"What is being<br/>asked for?"}
+    K -->|"read or add to a record"| REC["Records<br/>beacon_lookup_claim<br/>beacon_upload_attachment<br/>atlas_lookup_policy"]
+    K -->|"send it to another team"| REF["Referrals, easy to confuse<br/>raise_amber_pack to Counter Fraud<br/>refer_llu to the Large Loss Unit<br/>raise_ibnr to the broker"]
+    K -->|"put a marker on it"| MARK["Markers<br/>set_hsr, set_rvf<br/>request_cat_export"]
+    K -->|"pay it"| PAY["Payments<br/>tally_release, ringfence_screen<br/>beacon_set_status"]
+    REC --> G1{"Claim reference is<br/>CW- and six digits?"}
+    REF --> G1
+    MARK --> G1
+    PAY --> G1
+    G1 -->|no| X1["Refused:<br/>use the full reference"]
+    G1 -->|yes| G2{"A file to attach<br/>over 25MB?"}
+    G2 -->|yes| X2["Refused: BCN-217"]
+    G2 -->|no| OK["The tool runs"]
+    REC --> G3{"Policy number<br/>has its K-?"}
+    REF --> G3
+    G3 -->|no| X3["Refused: ATL-031"]
+    G3 -->|yes| OK

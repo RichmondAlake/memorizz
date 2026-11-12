@@ -157,6 +157,8 @@ class Workflow:
         promoted_skill_id: str = None,
         skills_activated: List[str] = None,
         shadow_evaluations: List[Dict[str, Any]] = None,
+        outcome_verified: bool = False,
+        skills_held_out: List[str] = None,
         embedding: List[float] = None,
         *,
         generate_embedding: bool = True,
@@ -239,6 +241,12 @@ class Workflow:
         self.step_count = step_count
         self.promoted_skill_id = promoted_skill_id
         self.skills_activated = list(skills_activated) if skills_activated else []
+        # True when the host, or the agent's outcome evaluator, confirmed
+        # this run's outcome. A run that merely did not raise is not verified.
+        self.outcome_verified = bool(outcome_verified)
+        # Active skills that matched this run and were withheld from it: the
+        # control side of the holdout that says whether a skill helps.
+        self.skills_held_out = list(skills_held_out) if skills_held_out else []
         self.shadow_evaluations = (
             [dict(item) for item in shadow_evaluations if isinstance(item, dict)]
             if shadow_evaluations
@@ -308,6 +316,8 @@ class Workflow:
             "promoted_skill_id": self.promoted_skill_id,
             "skills_activated": self.skills_activated,
             "shadow_evaluations": self.shadow_evaluations,
+            "outcome_verified": self.outcome_verified,
+            "skills_held_out": self.skills_held_out,
         }
         if self.user_id is not None:
             data["user_id"] = self.user_id
@@ -349,6 +359,8 @@ class Workflow:
             promoted_skill_id=data.get("promoted_skill_id"),
             skills_activated=data.get("skills_activated"),
             shadow_evaluations=data.get("shadow_evaluations"),
+            outcome_verified=bool(data.get("outcome_verified")),
+            skills_held_out=data.get("skills_held_out"),
             embedding=data.get("embedding"),
             generate_embedding=False,
             thread_id=data.get("origin_thread_id"),

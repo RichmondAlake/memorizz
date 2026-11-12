@@ -20,9 +20,13 @@ a single agent, including:
 import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
-from ...long_term.semantic.persona.persona import Persona
+from ...long_term.semantic.persona.persona import (
+    GuardrailWriteRefused,
+    Persona,
+    StandingRuleWriteRefused,
+)
 
 logger = logging.getLogger(__name__)
 _NO_SNAPSHOT = object()
@@ -216,11 +220,59 @@ class PersonaManager:
                 change_trigger=change_trigger,
                 provider=self.memory_provider,
             )
+        except GuardrailWriteRefused as exc:
+            what = (
+                "standing_rules"
+                if isinstance(exc, StandingRuleWriteRefused)
+                else "guardrails"
+            )
+            return {"updated": False, "refused": what, "error": str(exc)}
         except ValueError as exc:
             return {"updated": False, "error": str(exc)}
         except Exception as exc:
             logger.error("persona.update failed: %s", exc, exc_info=True)
             return {"updated": False, "error": f"Internal error: {exc}"}
+
+    def set_guardrails(
+        self,
+        guardrails: List[str],
+        change_trigger: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Replace the active persona's guardrails (host or operator only).
+
+        Delegates to :meth:`Persona.set_guardrails`, which refuses any
+        ``change_trigger.source_type`` that is not the host or an operator.
+        The refusal and a broken limit raise; they are the caller's mistake.
+        """
+        if self._snapshot.get() is not _NO_SNAPSHOT:
+            raise GuardrailWriteRefused(
+                "Request-local persona snapshots are read-only."
+            )
+        if self.current_persona is None:
+            raise ValueError("No active persona set on this agent.")
+        return self.current_persona.set_guardrails(
+            guardrails, change_trigger, provider=self.memory_provider
+        )
+
+    def set_standing_rules(
+        self,
+        standing_rules: List[str],
+        change_trigger: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Replace the active persona's standing rules (a named owner only).
+
+        Delegates to :meth:`Persona.set_standing_rules`. A refusal and a
+        broken limit raise; they are the caller's mistake.
+        """
+        if self._snapshot.get() is not _NO_SNAPSHOT:
+            raise StandingRuleWriteRefused(
+                "Request-local persona snapshots are read-only."
+            )
+        if self.current_persona is None:
+            raise ValueError("No active persona set on this agent.")
+        return self.current_persona.set_standing_rules(
+            standing_rules, change_trigger, provider=self.memory_provider
+        )
 
     # ------------------------------------------------------------------
     # Export / prompt

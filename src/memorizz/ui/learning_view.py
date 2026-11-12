@@ -30,6 +30,11 @@ CRITERIA_MEASURES = {
         "tied to one phrasing."
     ),
     "recency": "Days since the last run. Stale procedures are not distilled.",
+    "verified outcomes": (
+        "Successes your application confirmed, through an outcome evaluator "
+        "or record_task_outcome(verified=True). A run that only did not fail "
+        "is not counted."
+    ),
 }
 
 CLASS_STATUS = {
@@ -162,6 +167,22 @@ def promotion_criteria(
             ),
         },
     ]
+    verified = int(getattr(stat, "verified_successes", 0) or 0)
+    needed = int(getattr(config, "min_verified_outcomes", 0) or 0)
+    rows.append(
+        {
+            "name": "verified outcomes",
+            # With the gate off (0) it never blocks: it shows what the host
+            # has confirmed so far.
+            "passed": verified >= needed,
+            "optional": needed == 0,
+            "detail": (
+                f"{verified} confirmed (need {needed})"
+                if needed
+                else f"{verified} confirmed · gate off"
+            ),
+        }
+    )
     for row in rows:
         row["measures"] = CRITERIA_MEASURES[row["name"]]
     return rows
@@ -176,6 +197,7 @@ def _serialize_run(run: Any) -> Dict[str, Any]:
         "created_dt": created,
         "user_query": run.user_query or "",
         "promoted": bool(run.promoted_skill_id),
+        "verified": bool(getattr(run, "outcome_verified", False)),
     }
 
 
@@ -353,6 +375,36 @@ def build_workflow_monitor(
 # ---------- learned skills ----------
 
 
+def _holdout_view(doc: Dict[str, Any], config: PromotionConfig) -> Dict[str, Any]:
+    """The with-and-without figure of one skill, ready to draw."""
+    from ..long_term.procedural.skillbox.skill import holdout_summary
+
+    baseline = doc.get("baseline") or {}
+    summary = holdout_summary(
+        doc.get("stats"), config.holdout_min_runs, config.holdout_flag_z
+    )
+    exempt = baseline.get("holdout_exempt")
+    if exempt is None:
+        exempt = bool(baseline.get("stated_by_user"))
+    for side in ("with", "without"):
+        rate = summary[side]["rate"]
+        summary[side]["label"] = f"{rate:.0%}" if rate is not None else "—"
+        summary[side]["percent"] = round(100 * rate, 1) if rate is not None else 0
+    difference = summary["difference"]
+    summary.update(
+        exempt=bool(exempt),
+        rate_setting=float(config.holdout_rate or 0.0),
+        min_runs=int(config.holdout_min_runs),
+        flag_z=float(config.holdout_flag_z),
+        rate_percent=round(100 * float(config.holdout_rate or 0.0), 1),
+        difference_label=(
+            f"{difference * 100:+.0f} pts" if difference is not None else "—"
+        ),
+        active=float(config.holdout_rate or 0.0) > 0 and not exempt,
+    )
+    return summary
+
+
 def shape_skill(
     doc: Dict[str, Any],
     config: PromotionConfig,
@@ -419,6 +471,8 @@ def shape_skill(
         "success_rate": f"{rate:.0%}" if rate is not None else "—",
         "success_tone": tone(rate),
         "baseline": doc.get("baseline") or {},
+        "holdout": _holdout_view(doc, config),
+        "stated_by_user": bool((doc.get("baseline") or {}).get("stated_by_user")),
         "created_at": _stamp(created),
         "promoted_at": doc.get("promoted_at") or "",
         "listed_at": _stamp(listed_at) or "—",

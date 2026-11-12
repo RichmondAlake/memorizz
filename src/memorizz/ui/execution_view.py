@@ -176,8 +176,17 @@ def shape_harness_run(
         if end is not None:
             duration_ms = max(0.0, (end - started).total_seconds() * 1000)
     cost = _number(result.get("cost_usd"))
-    input_tokens = _number(usage.get("input_tokens"))
-    output_tokens = _number(usage.get("output_tokens"))
+    input_tokens = _number(usage.get("input_tokens", usage.get("prompt_tokens")))
+    output_tokens = _number(usage.get("output_tokens", usage.get("completion_tokens")))
+    # Anthropic reports cache reads and writes beside input_tokens (OpenAI's
+    # input_tokens already include cached ones), so the prompt's size is their
+    # sum. The compare view counts the same way (tokensOf in harness-compare.js).
+    cache_tokens = [
+        _number(usage.get(key))
+        for key in ("cache_read_input_tokens", "cache_creation_input_tokens")
+    ]
+    if any(value is not None for value in cache_tokens):
+        input_tokens = (input_tokens or 0) + sum(value or 0 for value in cache_tokens)
     tokens = (
         None
         if input_tokens is None and output_tokens is None

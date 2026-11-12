@@ -6,8 +6,7 @@
 {% block content %}
 {% from '_ui.html' import page_header, evalground_tabs %}
 {% call page_header('Evalground', 'Choose models and retrieval strategies with evidence from your workloads.', 'Evaluate', nav=evalground_tabs('evaluations'), actions_class='evaluation-actions') %}<a class="btn btn-primary" href="/evalground/compare">New comparison</a>
-    <a class="btn" href="#agent-evaluation" data-open-section="agent-evaluation">Evaluate an agent</a>
-    <a class="btn" href="#terminal-bench" data-open-section="terminal-bench">Test a harness</a>{% endcall %}
+    <a class="btn" href="#agent-evaluation" data-open-section="agent-evaluation">Evaluate an agent</a>{% endcall %}
 {#- Filled from the run library by evalground-runs.js; placeholders keep the layout steady while it loads. -#}
 <div id="run-library-stats" class="fleet-tape eval-tape" role="list" aria-label="Evaluation summary" aria-busy="true">
     {% for label in ['Evaluations', 'In progress', 'Completed', 'Needs attention', 'Known API cost', 'Latest run'] %}<div role="listitem"><span>{{ label }}</span><strong>—</strong></div>{% endfor %}
@@ -15,7 +14,6 @@
 <div class="evaluation-starts" aria-label="Start an evaluation">
     <a href="/evalground/compare?type=reader"><strong>Compare answer models <span aria-hidden="true">↗</span></strong><p>Same evidence. Compare answer quality, latency and API cost.</p></a>
     <a href="/evalground/compare?type=reranker"><strong>Compare rerankers <span aria-hidden="true">↗</span></strong><p>Same candidates. Measure which method finds the right evidence.</p></a>
-    <a href="#agent-evaluation" data-open-section="agent-evaluation"><strong>Evaluate an agent <span aria-hidden="true">↗</span></strong><p>Run a memory benchmark against an agent or retrieval pipeline.</p></a>
     <a href="#terminal-bench" data-open-section="terminal-bench"><strong>Test a harness <span aria-hidden="true">↗</span></strong><p>Run Codex, Claude Code or a MemAgent on Terminal-Bench 4.0 tasks in Docker.</p></a>
 </div>
 
@@ -72,6 +70,9 @@
 </div>
 {% endif %}
 
+{#- The setup panels as one row of tabs: select one to open it, select it
+    again to close. Each is still a <details>, so links to its ID open it. -#}
+<div class="eg-tabs" id="eg-tabs" role="group" aria-label="Set up and review" hidden></div>
 <details id="suggested-experiments" class="detail-section evalground-section evaluation-resource"><summary>Suggested experiments</summary>
     <p class="form-hint">Accepted Trace Insights become versioned drafts here. A draft is evidence for an evaluation plan; it does not mutate the production agent.</p>
     {% if trace_experiments %}
@@ -803,7 +804,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 window.location.href = `/evalground?run_id=${encodeURIComponent(runId)}`;
             } catch (error) {
                 button.disabled = false;
-                window.alert(error?.message || String(error));
+                MemorizzDialogs.notify(error?.message || String(error));
             }
         });
     });
@@ -994,5 +995,39 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     });
 });
+</script>
+<script>
+(function() {
+    const bar = document.getElementById('eg-tabs');
+    const panels = Array.from(document.querySelectorAll('details.evaluation-resource'));
+    if (!bar || panels.length < 2) return;
+    const buttons = panels.map(function(panel) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'eg-tab';
+        button.textContent = panel.querySelector(':scope > summary').textContent.trim();
+        button.setAttribute('aria-controls', panel.id);
+        button.addEventListener('click', function() {
+            const open = !panel.open;
+            panels.forEach(function(other) { other.open = other === panel && open; });
+        });
+        bar.appendChild(button);
+        // Anything else that opens a panel (a header button, a link to its
+        // ID) keeps the row in step and closes the others.
+        panel.addEventListener('toggle', function() {
+            if (panel.open) panels.forEach(function(other) { if (other !== panel) other.open = false; });
+            sync();
+        });
+        return button;
+    });
+    function sync() {
+        panels.forEach(function(panel, index) {
+            buttons[index].setAttribute('aria-expanded', panel.open ? 'true' : 'false');
+        });
+    }
+    document.body.classList.add('eg-tabbed');
+    bar.hidden = false;
+    sync();
+})();
 </script>
 {% endblock %}

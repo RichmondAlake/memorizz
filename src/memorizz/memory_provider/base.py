@@ -775,6 +775,29 @@ class MemoryProvider(ABC):
         only anonymous/legacy rows, and a string selects that exact tenant.
         """
 
+    def list_for_agent(
+        self, memory_store_type: Any, agent_id: str, user_id: Any = _UNSET
+    ) -> List[Dict[str, Any]]:
+        """The records of one memory type that one agent wrote.
+
+        A store is shared by every agent that uses it, so a plain
+        :meth:`list_all` returns other agents' records too. This is the
+        scoped read. The default reads the type and keeps the agent's rows;
+        a provider that can filter in the store overrides it. ``user_id``
+        follows the same contract as :meth:`list_all`.
+        """
+        if not agent_id:
+            return []
+        if user_id is _UNSET:
+            rows = self.list_all(memory_store_type)
+        else:
+            rows = self.list_all(memory_store_type, user_id=user_id)
+        return [
+            row
+            for row in rows or []
+            if isinstance(row, dict) and row.get("agent_id") == agent_id
+        ]
+
     def list_archive_records(self, memory_type):
         """Complete portable records for archive export (no silent page truncation)."""
         return self.list_all(memory_type)

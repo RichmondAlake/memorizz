@@ -2433,6 +2433,25 @@ class MongoDBProvider(
             return []
         return list(collection.find(mongo_filter, projection))
 
+    def list_for_agent(
+        self,
+        memory_store_type: MemoryType,
+        agent_id: str,
+        user_id: Any = _MONGO_UNSET,
+    ) -> List[Dict[str, Any]]:
+        """One agent's records of a memory type, filtered in MongoDB."""
+        if not agent_id:
+            return []
+        collection = self._collection(memory_store_type)
+        if collection is None:
+            return []
+        mongo_filter: Dict[str, Any] = {"agent_id": agent_id}
+        if user_id is not _MONGO_UNSET and _mongo_memory_type_supports_user_id(
+            memory_store_type
+        ):
+            mongo_filter.update(_mongo_user_id_predicate(user_id, memory_store_type))
+        return list(collection.find(mongo_filter, {"embedding": 0}))
+
     def estimate_count(self, memory_store_type: MemoryType) -> Optional[int]:
         """Approximate document count from collection metadata, without a scan.
 

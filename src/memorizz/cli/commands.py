@@ -735,6 +735,12 @@ def cmd_consolidate(session, args: str):
     memory_upkeep.cmd_consolidate(session, args)
 
 
+def cmd_refine(session, args: str):
+    from . import memory_upkeep
+
+    memory_upkeep.cmd_refine(session, args)
+
+
 def cmd_timer(session, args: str):
     """Show, start or stop a countdown."""
     from . import timer_commands
@@ -2484,6 +2490,11 @@ COMMANDS: Dict[str, Command] = {
         cmd_consolidate,
         "Tidy this memory: merge duplicates, retire stale facts, add missed ones.",
         "/consolidate [kb] · /consolidate undo <plan id>",
+    ),
+    "refine": Command(
+        cmd_refine,
+        "Run memory upkeep once, in order: entities, facts, skills, persona, retention.",
+        "/refine [dry] · /refine runs · /refine on|off",
     ),
     "background-model": Command(
         cmd_background_model,

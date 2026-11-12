@@ -48,6 +48,12 @@
             <button class="btn btn-sm btn-danger" type="submit">Remove budget</button>
         </form>
     </details>
-    {% elif editable %}{{ _budget_form() }}{% endif %}
+    {% elif editable %}
+    {#- No budget yet: one line, so the charts below are not pushed down. -#}
+    <details class="usage-budget-edit"{% if error %} open{% endif %}>
+        <summary>Set a monthly budget</summary>
+        {{ _budget_form() }}
+    </details>
+    {% endif %}
 </section>
 {%- endmacro %}

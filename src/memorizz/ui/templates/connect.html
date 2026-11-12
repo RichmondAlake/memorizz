@@ -4,85 +4,39 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Connect - Memorizz</title>
-    <link rel="stylesheet" href="/static/css/styles.css?v=9">
-    <style>
-        /* Ensure select dropdown matches dark theme */
-        select {
-            color: var(--text-primary) !important;
-        }
-
-        select option {
-            background-color: #000000 !important;
-            color: var(--text-primary) !important;
-        }
-
-        select option:checked {
-            background-color: #00d9ff !important;
-            color: #000000 !important;
-        }
-
-        /* CRITICAL: Force connect button to be black - override ALL possible rules */
-        button.connect-btn,
-        .connect-btn,
-        input[type="submit"].connect-btn,
-        button[type="submit"].connect-btn,
-        button[type="submit"],
-        form button[type="submit"],
-        .connect-form button:not(.local-store),
-        .connect-form .connect-btn {
-            background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%) !important;
-            background-color: #000000 !important;
-            background-image: none !important;
-            color: #00d9ff !important;
-            border: 1px solid rgba(0, 217, 255, 0.3) !important;
-            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.7), 0 2px 4px rgba(0, 0, 0, 0.5) !important;
-            font-weight: 700 !important;
-        }
-
-        button.connect-btn:hover,
-        .connect-btn:hover,
-        input[type="submit"].connect-btn:hover,
-        button[type="submit"].connect-btn:hover,
-        button[type="submit"]:hover,
-        form button[type="submit"]:hover,
-        .connect-form button:not(.local-store):hover,
-        .connect-form .connect-btn:hover {
-            background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%) !important;
-            background-color: #000000 !important;
-            background-image: none !important;
-            color: #00e6ff !important;
-            border-color: rgba(0, 217, 255, 0.5) !important;
-            transform: translateY(-2px) !important;
-            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.8), 0 4px 8px rgba(0, 0, 0, 0.6) !important;
-        }
-
-        button.connect-btn:active,
-        .connect-btn:active,
-        input[type="submit"].connect-btn:active,
-        button[type="submit"].connect-btn:active,
-        button[type="submit"]:active,
-        form button[type="submit"]:active,
-        .connect-form button:not(.local-store):active,
-        .connect-form .connect-btn:active {
-            background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%) !important;
-            background-color: #000000 !important;
-            background-image: none !important;
-            transform: translateY(0) !important;
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.8) !important;
-        }
-
-        /* Additional connect page enhancements */
-        .connect-card {
-            backdrop-filter: blur(10px);
-        }
-    </style>
+    <script>
+        // The saved theme, else the system's, before the first paint.
+        (function () {
+            var saved = null;
+            try { saved = window.localStorage.getItem('memorizz_ui_light_mode'); } catch (_) {}
+            var light = saved === '1' || (saved === null && window.matchMedia
+                && window.matchMedia('(prefers-color-scheme: light)').matches);
+            document.documentElement.classList.toggle('theme-light', light);
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/css/styles.css?v=46">
+    <link rel="stylesheet" href="/static/css/console.css?v=31">
+    <link rel="stylesheet" href="/static/css/shell.css?v=9">
+    <link rel="stylesheet" href="/static/css/pages/connect.css?v=1">
 </head>
 <body class="connect-page">
+    <script>if (document.documentElement.classList.contains('theme-light')) document.body.classList.add('theme-light');</script>
     <div class="connect-container">
         <div class="connect-card">
             <div class="connect-header">
-                <h1>🧠 Memorizz</h1>
-                <p>Connect to your memory provider</p>
+                <div class="auth-brand">
+                    <span class="logo-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M9 3a3 3 0 0 0-3 3v.3A3.7 3.7 0 0 0 4 9.7V10a4 4 0 0 0 1.2 2.9A4 4 0 0 0 4 16v.3A3.7 3.7 0 0 0 6 19.7V20a3 3 0 0 0 3 3"/>
+                            <path d="M15 3a3 3 0 0 1 3 3v.3A3.7 3.7 0 0 1 20 9.7V10a4 4 0 0 1-1.2 2.9A4 4 0 0 1 20 16v.3a3.7 3.7 0 0 1-2 3.4V20a3 3 0 0 1-3 3"/>
+                            <path d="M9 12h6"/>
+                            <path d="M12 3v18"/>
+                        </svg>
+                    </span>
+                    <span>Memorizz</span>
+                </div>
+                <h1>Connect a memory provider</h1>
+                <p>Choose where this console reads and writes agent memory.</p>
             </div>
 
             {% if ui_read_only %}
@@ -92,7 +46,7 @@
             {% if current_connection %}
             <div class="connect-current" role="status">
                 <span>Connected to <strong>{{ current_connection.label or (current_connection.provider_type|title) }}</strong> <span class="connect-current-target" title="{{ current_connection.title }}">{{ current_connection.target }}</span>.</span>
-                <a href="/dashboard">Open the dashboard</a>
+                <a href="/dashboard">Open the overview</a>
             </div>
             {% if embedding_check and embedding_check.message %}
             <div class="{{ 'error-message' if embedding_check.status == 'mismatch' else 'success-message' }}" id="embedding-check">{{ embedding_check.message }}</div>
@@ -102,31 +56,31 @@
 
             {% if error %}
             <div class="error-message" id="connect-error">
-                <span>⚠️</span> {% if startup_failed %}Could not connect at startup. {% endif %}{{ error }}
+                {% if startup_failed %}Could not connect at startup. {% endif %}{{ error }}
             </div>
             {% endif %}
 
             <!-- Oracle Docker recovery (hidden by default, revealed by JS when the
                  error looks like connection-refused and Docker is available) -->
-            <div id="docker-recovery" style="display:none; margin-top: 0.75rem; padding: 0.85rem 1rem; border: 1px solid rgba(0, 217, 255, 0.25); border-radius: 8px; background: rgba(0, 217, 255, 0.04);">
-                <div id="docker-recovery-title" style="font-weight: 600; color: #00d9ff; margin-bottom: 0.35rem;">Oracle container check</div>
-                <div id="docker-recovery-body" style="font-size: 0.85rem; color: var(--text-secondary, #aaa); margin-bottom: 0.6rem;">
+            <div id="docker-recovery" class="docker-recovery" style="display:none;">
+                <div id="docker-recovery-title" class="docker-recovery-title">Oracle container check</div>
+                <div id="docker-recovery-body" class="docker-recovery-body">
                     Checking local Docker for a Memorizz Oracle container…
                 </div>
-                <button type="button" id="docker-recovery-action" style="display:none; background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%); color: #00d9ff; border: 1px solid rgba(0, 217, 255, 0.4); padding: 0.5rem 1rem; border-radius: 6px; font-weight: 600; cursor: pointer;"></button>
+                <button type="button" id="docker-recovery-action" class="btn" style="display:none;"></button>
             </div>
 
             <!-- Confirmation + progress modal -->
-            <div id="docker-modal-overlay" style="display:none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); z-index: 1000; align-items: center; justify-content: center;">
-                <div class="docker-modal-dialog" style="background: #0a0a0a; border: 1px solid rgba(0, 217, 255, 0.3); border-radius: 10px; padding: 1.5rem; max-width: 640px; width: 92%; max-height: 86vh; overflow-y: auto; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.8);">
-                    <h3 id="docker-modal-title" style="color: #00d9ff; margin: 0 0 0.75rem 0; font-size: 1.1rem;">Confirm</h3>
-                    <p id="docker-modal-body" style="color: var(--text-secondary, #bbb); font-size: 0.9rem; line-height: 1.5; margin: 0 0 1rem 0;"></p>
-                    <div id="docker-modal-progress" style="display:none; font-size: 0.85rem; color: #00d9ff; margin-bottom: 1rem;">
-                        <div style="display:flex; align-items:center; gap:0.5rem;">
-                            <div class="docker-spinner" style="width:14px; height:14px; border: 2px solid rgba(0, 217, 255, 0.3); border-top-color: #00d9ff; border-radius: 50%; animation: docker-spin 0.9s linear infinite;"></div>
+            <div id="docker-modal-overlay" class="docker-modal-overlay" style="display:none;">
+                <div class="docker-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="docker-modal-title">
+                    <h3 id="docker-modal-title">Confirm</h3>
+                    <p id="docker-modal-body"></p>
+                    <div id="docker-modal-progress" class="docker-modal-progress" style="display:none;">
+                        <div class="docker-modal-working">
+                            <div class="docker-spinner"></div>
                             <span id="docker-progress-text">Working…</span>
                         </div>
-                        <div id="docker-progress-elapsed" style="font-size: 0.75rem; color: #888; margin-top: 0.35rem;"></div>
+                        <div id="docker-progress-elapsed" class="docker-progress-elapsed"></div>
                     </div>
 
                     <!-- Phase checklist (Option 3: structured progress above the raw log) -->
@@ -142,195 +96,17 @@
                         <pre id="docker-log-panel" class="docker-log-panel" aria-live="polite"></pre>
                     </details>
 
-                    <div id="docker-modal-buttons" style="display:flex; justify-content:flex-end; gap: 0.5rem; margin-top: 0.75rem;">
-                        <button type="button" id="docker-modal-cancel" style="background: transparent; color: #aaa; border: 1px solid #333; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer;">Cancel</button>
-                        <button type="button" id="docker-modal-confirm" style="background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%); color: #00d9ff; border: 1px solid rgba(0, 217, 255, 0.4); padding: 0.5rem 1rem; border-radius: 6px; font-weight: 600; cursor: pointer;">Confirm</button>
+                    <div id="docker-modal-buttons" class="docker-modal-buttons" style="display:flex;">
+                        <button type="button" id="docker-modal-cancel" class="btn">Cancel</button>
+                        <button type="button" id="docker-modal-confirm" class="btn btn-primary">Confirm</button>
                     </div>
                 </div>
             </div>
 
-            <style>
-                @keyframes docker-spin { to { transform: rotate(360deg); } }
-
-                /* The store this UI is connected to now */
-                .connect-current {
-                    display: flex;
-                    flex-wrap: wrap;
-                    align-items: baseline;
-                    justify-content: space-between;
-                    gap: 0.35rem 1rem;
-                    margin-bottom: 1rem;
-                    padding: 0.75rem 1rem;
-                    font-size: 0.85rem;
-                    color: var(--text-secondary, #aaa);
-                    border: 1px solid rgba(0, 217, 255, 0.25);
-                    border-radius: 8px;
-                }
-
-                .connect-current-target {
-                    font-family: ui-monospace, "SF Mono", Menlo, monospace;
-                    overflow-wrap: anywhere;
-                }
-
-                .connect-current a {
-                    color: #00d9ff;
-                }
-
-                #embedding-check {
-                    margin-bottom: 1rem;
-                    line-height: 1.5;
-                    overflow-wrap: anywhere;
-                }
-
-                /* FileSystem stores found on this computer */
-                .local-stores {
-                    display: flex;
-                    flex-direction: column;
-                    gap: 0.35rem;
-                    margin-top: 0.6rem;
-                }
-                .local-stores-label {
-                    color: #888;
-                    font-size: 0.78rem;
-                }
-                .local-store {
-                    display: flex;
-                    flex-wrap: wrap;
-                    justify-content: space-between;
-                    gap: 0.25rem 0.75rem;
-                    padding: 0.5rem 0.75rem;
-                    color: #ddd;
-                    font: inherit;
-                    font-size: 0.85rem;
-                    text-align: left;
-                    background: #050505;
-                    border: 1px solid rgba(255, 255, 255, 0.1);
-                    border-radius: 8px;
-                    cursor: pointer;
-                }
-                .local-store:hover,
-                .local-store:focus-visible {
-                    border-color: rgba(0, 217, 255, 0.45);
-                }
-                .local-store.is-selected {
-                    color: #00d9ff;
-                    border-color: rgba(0, 217, 255, 0.6);
-                }
-                .local-store-path {
-                    min-width: 0;
-                    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-                    overflow-wrap: anywhere;
-                }
-                .local-store-meta {
-                    color: #888;
-                    font-size: 0.78rem;
-                }
-                .local-dbs {
-                    margin: 0 0 1rem;
-                }
-                .local-db-state.is-running {
-                    color: #4ade80;
-                }
-                .local-db-state.is-stopped {
-                    color: #fbbf24;
-                }
-                .local-db-hint {
-                    flex-basis: 100%;
-                    color: #888;
-                    font-size: 0.75rem;
-                }
-                .local-db-hint code {
-                    color: #ccc;
-                }
-
-                /* Phase checklist */
-                .docker-phase-list {
-                    list-style: none;
-                    padding: 0;
-                    margin: 0 0 1rem 0;
-                    border: 1px solid rgba(0, 217, 255, 0.15);
-                    border-radius: 8px;
-                    overflow: hidden;
-                }
-                .docker-phase-list li {
-                    display: flex;
-                    align-items: center;
-                    gap: 0.6rem;
-                    padding: 0.55rem 0.8rem;
-                    font-size: 0.85rem;
-                    color: #888;
-                    border-top: 1px solid rgba(255, 255, 255, 0.05);
-                }
-                .docker-phase-list li:first-child { border-top: none; }
-                .docker-phase-list li .phase-icon {
-                    display: inline-block;
-                    width: 1.2em;
-                    text-align: center;
-                    font-weight: 700;
-                }
-                .docker-phase-list li.is-active {
-                    color: #00d9ff;
-                    background: rgba(0, 217, 255, 0.04);
-                }
-                .docker-phase-list li.is-active .phase-icon {
-                    animation: docker-phase-pulse 1.1s ease-in-out infinite;
-                }
-                .docker-phase-list li.is-done {
-                    color: #77ffaa;
-                }
-                @keyframes docker-phase-pulse {
-                    0%, 100% { opacity: 1; }
-                    50%      { opacity: 0.35; }
-                }
-
-                /* Collapsible log panel */
-                .docker-log-details {
-                    margin-top: 0.5rem;
-                    border: 1px solid rgba(255, 255, 255, 0.08);
-                    border-radius: 8px;
-                    background: #050505;
-                }
-                .docker-log-details > summary {
-                    cursor: pointer;
-                    padding: 0.5rem 0.8rem;
-                    font-size: 0.82rem;
-                    color: #aaa;
-                    list-style: none;
-                    user-select: none;
-                }
-                .docker-log-details > summary::-webkit-details-marker { display: none; }
-                .docker-log-details > summary::before {
-                    content: '▸ ';
-                    display: inline-block;
-                    transition: transform 0.15s ease;
-                }
-                .docker-log-details[open] > summary::before {
-                    transform: rotate(90deg);
-                }
-                .docker-log-count {
-                    color: #666;
-                    font-size: 0.75rem;
-                    margin-left: 0.35rem;
-                }
-                .docker-log-panel {
-                    margin: 0;
-                    padding: 0.6rem 0.8rem;
-                    max-height: 280px;
-                    overflow-y: auto;
-                    background: #000;
-                    color: #b8d4e3;
-                    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-                    font-size: 0.74rem;
-                    line-height: 1.4;
-                    white-space: pre-wrap;
-                    word-break: break-word;
-                    border-top: 1px solid rgba(255, 255, 255, 0.06);
-                }
-            </style>
 
             <form method="post" action="/connect" class="connect-form">
                 <div class="form-group">
-                    <label for="provider_type">Memory Provider</label>
+                    <label for="provider_type">Memory provider</label>
                     <select name="provider_type" id="provider_type" onchange="toggleProviderFields()">
                         <option value="oracle" {% if provider_type == 'oracle' %}selected{% endif %}>Oracle Database</option>
                         <option value="mongodb" {% if provider_type == 'mongodb' %}selected{% endif %}>MongoDB</option>
@@ -405,7 +181,7 @@
                         {% if has_env_mongodb_uri %}<small>Using the URI from this process environment when left blank.</small>{% endif %}
                     </div>
                     <div class="form-group">
-                        <label for="mongodb_db_name">Database Name <span class="optional">(optional)</span></label>
+                        <label for="mongodb_db_name">Database name <span class="optional">(optional)</span></label>
                         <input type="text" name="mongodb_db_name" id="mongodb_db_name" value="{{ env_mongodb_db_name }}" placeholder="memorizz">
                     </div>
                 </div>
@@ -413,7 +189,7 @@
                 <!-- FileSystem Fields -->
                 <div id="filesystem-fields" class="provider-fields" style="display: none;">
                     <div class="form-group">
-                        <label for="filesystem_path">Storage Path</label>
+                        <label for="filesystem_path">Storage path</label>
                         <input type="text" name="filesystem_path" id="filesystem_path" placeholder="{{ default_filesystem_path }}" value="{{ env_filesystem_path or '' }}">
                     </div>
                     {% if local_stores %}
@@ -451,15 +227,15 @@
                     </div>
                 </div>
 
-                <div class="form-group" style="margin-top: 0.5rem;">
-                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.85rem;">
-                        <input type="checkbox" id="remember_me" style="accent-color: #00d9ff; width: 16px; height: 16px; cursor: pointer;">
+                <div class="form-group connect-remember">
+                    <label>
+                        <input type="checkbox" id="remember_me">
                         Remember non-secret connection details
                     </label>
                 </div>
 
-                <button type="submit" class="connect-btn" id="connect-button" style="background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%) !important; background-color: #000000 !important; background-image: none !important; color: #00d9ff !important; border: 1px solid rgba(0, 217, 255, 0.3) !important; box-shadow: 0 6px 12px rgba(0, 0, 0, 0.7), 0 2px 4px rgba(0, 0, 0, 0.5) !important; font-weight: 700 !important;">
-                    Connect →
+                <button type="submit" class="connect-btn" id="connect-button">
+                    Connect
                 </button>
             </form>
         </div>
@@ -578,16 +354,7 @@
             }
         }
 
-        // Force button styling on load (override any cached styles)
         window.addEventListener('DOMContentLoaded', function() {
-            const btn = document.getElementById('connect-button') || document.querySelector('.connect-btn');
-            if (btn) {
-                btn.style.setProperty('background', 'linear-gradient(135deg, #1a1a1a 0%, #000000 100%)', 'important');
-                btn.style.setProperty('background-color', '#000000', 'important');
-                btn.style.setProperty('background-image', 'none', 'important');
-                btn.style.setProperty('color', '#00d9ff', 'important');
-                btn.style.setProperty('border', '1px solid rgba(0, 217, 255, 0.3)', 'important');
-            }
             setupPasswordToggles();
 
             // Restore saved credentials
@@ -662,16 +429,16 @@
             if (existing.length > 0) {
                 // Build a per-container list with Start (stopped) or status (running).
                 const lines = existing.map(c => {
-                    const portInfo = c.ports ? ` <span style="color:#888; font-size:0.8rem;">${escapeHtml(c.ports)}</span>` : '';
+                    const portInfo = c.ports ? ` <span class="docker-row-ports">${escapeHtml(c.ports)}</span>` : '';
                     if (c.state === 'running') {
-                        return `<div style="display:flex; align-items:center; justify-content:space-between; gap:0.5rem; padding:0.4rem 0; border-top:1px solid rgba(255,255,255,0.05);">
-                            <span><code>${escapeHtml(c.name)}</code>${portInfo} <span style="color:#77ffaa; font-size:0.75rem;">● running</span></span>
-                            <span style="font-size:0.75rem; color:#888;">check DSN/creds</span>
+                        return `<div class="docker-row">
+                            <span><code>${escapeHtml(c.name)}</code>${portInfo} <span class="docker-row-state is-running">● running</span></span>
+                            <span class="docker-row-note">check the DSN and credentials</span>
                         </div>`;
                     }
-                    return `<div style="display:flex; align-items:center; justify-content:space-between; gap:0.5rem; padding:0.4rem 0; border-top:1px solid rgba(255,255,255,0.05);">
-                        <span><code>${escapeHtml(c.name)}</code>${portInfo} <span style="color:#aaa; font-size:0.75rem;">● stopped</span></span>
-                        <button type="button" data-container="${escapeHtml(c.name)}" class="docker-start-btn" style="background: linear-gradient(135deg, #1a1a1a 0%, #000000 100%); color: #00d9ff; border: 1px solid rgba(0, 217, 255, 0.4); padding: 0.3rem 0.75rem; border-radius: 5px; font-size: 0.8rem; font-weight: 600; cursor: pointer;">Start</button>
+                    return `<div class="docker-row">
+                        <span><code>${escapeHtml(c.name)}</code>${portInfo} <span class="docker-row-state">● stopped</span></span>
+                        <button type="button" data-container="${escapeHtml(c.name)}" class="btn btn-sm docker-start-btn">Start</button>
                     </div>`;
                 }).join('');
                 bodyEl.innerHTML = `Found existing Oracle container(s):${lines}`;
@@ -872,7 +639,7 @@
         function setModalDone({ title, body, isError }) {
             modalTitle().textContent = title;
             modalBody().textContent = body;
-            modalBody().style.color = isError ? '#ff7777' : '#77ffaa';
+            modalBody().style.color = isError ? 'var(--accent-danger)' : 'var(--accent-secondary)';
             modalProgress().style.display = 'none';
             modalButtons().style.display = 'flex';
             // Always keep a dismiss button — user might want to inspect the

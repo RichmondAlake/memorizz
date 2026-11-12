@@ -185,6 +185,8 @@ def test_records_written_before_the_new_fields_keep_their_shape(work_dir):
         "source",
         "created_at",
         "updated_at",
+        # The source level every new write carries (a direct call is the host).
+        "level",
     }
 
 

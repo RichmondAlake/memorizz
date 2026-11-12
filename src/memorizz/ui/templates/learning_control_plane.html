@@ -3,7 +3,7 @@
 {% from '_learning_tabs.html' import learning_tabs %}
 
 {% block title %}Learning control plane - Memorizz{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/pages/learning-control-plane.css?v=8">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/learning-control-plane.css?v=11">{% endblock %}
 
 {% block content %}
 {#- Links out of an event: its trace, and the exact scope its compile stream covers. -#}
@@ -146,32 +146,172 @@
 </section>
 {% endif %}
 
+{% if selected_agent_id and refine is defined and refine is mapping and 'runs' in refine %}
+{% set dact = action if action and action.kind == 'refine' else none %}
+{% set last = refine.runs[0] if refine.runs else none %}
+<details class="panel lcp-consolidation lcp-fold lcp-refine" id="refine-cycles" aria-labelledby="lcp-refine-title"{% if view.record_count == 0 or dact or refine.waiting %} open{% endif %}>
+    <summary class="lcp-fold-summary">
+        <span class="lcp-fold-heading">
+            <h2 class="panel-title" id="lcp-refine-title">Refine cycles</h2>
+            <span class="lcp-fold-hint">Upkeep in one ordered run: entities, facts, skills, persona, retention.{% if last %} Last ran {{ last.started_at[:16]|replace('T', ' ') }} UTC.{% endif %}</span>
+        </span>
+        {% if refine.waiting %}<span class="pill pill--warning">{{ refine.waiting }} waiting for review</span>{% endif %}
+        <span class="pill{% if refine.enabled %} pill--success{% endif %}">{% if refine.enabled %}On · every {{ '%g'|format(refine.interval_hours|float) }} h{% if not refine.scheduled %} · not scheduled{% endif %}{% else %}Off · per-turn counters{% endif %}</span>
+    </summary>
+    <p class="panel-description">A cycle runs the upkeep jobs once, in a fixed order, because later jobs read what earlier ones cleaned: notes are verified first, vectors are refreshed after everything that edits text. Each job keeps its own apply rule, so a change that needs your review is left waiting here. Guardrails are never changed by a cycle.{% if not refine.enabled %} While this is off, each job fires on its own turn counter.{% endif %}</p>
+    {% if not ui_read_only %}
+    <div class="lcp-refine-actions">
+        <form method="post" action="/learning-control-plane/refine">
+            <input type="hidden" name="agent_id" value="{{ selected_agent_id }}">
+            <button class="btn btn-primary" type="submit" title="Runs every job now, on the agent's background model. Each job applies or waits for review as it is set to.">Run now</button>
+        </form>
+        <form method="post" action="/learning-control-plane/refine">
+            <input type="hidden" name="agent_id" value="{{ selected_agent_id }}">
+            <input type="hidden" name="dry_run" value="1">
+            <button class="btn" type="submit" title="Plans every job and applies nothing">Dry run</button>
+        </form>
+        <form method="post" action="/learning-control-plane/refine-schedule">
+            <input type="hidden" name="agent_id" value="{{ selected_agent_id }}">
+            <input type="hidden" name="enabled" value="{{ '0' if refine.enabled else '1' }}">
+            <button class="btn" type="submit" title="{{ 'Go back to the separate per-turn counters' if refine.enabled else 'Run upkeep as one scheduled cycle and stop the per-turn counters, so nothing runs twice' }}">{{ 'Turn off the schedule' if refine.enabled else 'Run on a schedule' }}</button>
+        </form>
+    </div>
+    {% endif %}
+
+    {% macro job_changes(job) -%}
+    {%- if job.changes -%}{% for kind, count in job.changes|dictsort %}{{ count }} {{ kind|replace('planned_', 'planned ')|replace('_', ' ') }}{{ ', ' if not loop.last }}{% endfor %}{%- else -%}—{%- endif -%}
+    {%- endmacro %}
+
+    {% macro run_changes(run) -%}
+    {%- set ns = namespace(items=0) -%}
+    {%- for job in run.jobs %}{% set ns.items = ns.items + (job['items'] or [])|length %}{% endfor -%}
+    {% if ns.items %}
+    <ul class="lcp-refine-changes">
+        {% for job in run.jobs %}{% for item in job['items'] or [] %}
+        <li>
+            <span class="lcp-refine-job">{{ job.label }}</span>
+            <span class="lcp-refine-what"><strong>{{ item.text }}</strong>{% if item.detail %}<small>{{ item.detail }}</small>{% endif %}</span>
+            <span class="pill{{ ' pill--success' if item.applied else '' }}">{{ 'Applied' if item.applied else ('Would change' if run.dry_run else ('Flagged' if item.kind in ('unsupported', 'source_missing', 'source_sealed', 'stale_reference', 'usage_flag') else 'Not applied' if item.kind in ('reject', 'review_flag') or (item.kind == 'add_fact' and 'beside it' in item.text) else 'Waiting for review')) }}</span>
+        </li>
+        {% endfor %}{% endfor %}
+    </ul>
+    {% set scope = (run.scopes or [{}])[0] %}
+    {% if not run.dry_run and scope.memory_id %}<p class="lcp-refine-more">Every applied change is also on the <a href="/traces/memory-evolution?agent_id={{ selected_agent_id|urlencode }}&memory_id={{ scope.memory_id|urlencode }}">memory evolution</a> timeline, where it can be traced and undone.</p>{% endif %}
+    {% elif run.changed %}
+    <p class="lcp-refine-more">{% for job in run.jobs if job.changes %}{{ job.label }}: {{ job_changes(job) }}{{ '; ' if not loop.last }}{% endfor %}. This cycle ran before change details were recorded.</p>
+    {% elif run.status == 'skipped' %}
+    <p class="lcp-refine-more">{{ run.reason or 'Nothing to do.' }}</p>
+    {% else %}
+    <p class="lcp-refine-more">This cycle found nothing to change.</p>
+    {% endif %}
+    {%- endmacro %}
+
+    {% set shown = dact.report if dact else last %}
+    {% if shown %}
+    <h3 class="lcp-subtitle">{{ 'This run' if dact else 'Latest cycle' }} <span class="mono lcp-refine-id">{{ shown.run_id }}</span></h3>
+    <p class="lcp-refine-meta">
+        <span class="pill {{ {'done': 'pill--success', 'failed': 'pill--danger', 'dry_run': 'pill--info', 'skipped': ''}.get(shown.status, 'pill--info') }}">{{ {'done': 'Done', 'failed': 'Failed', 'dry_run': 'Dry run', 'skipped': 'Skipped', 'running': 'Running'}.get(shown.status, shown.status) }}</span>
+        <span>Started by {{ {'manual': 'a person', 'schedule': 'the schedule', 'mcp': 'an MCP client'}.get(shown.trigger, shown.trigger) }}</span>
+        <span class="mono">{{ shown.started_at[:16]|replace('T', ' ') }} UTC</span>
+        <span>{{ shown.changed }} change{{ '' if shown.changed == 1 else 's' }}</span>
+        <span>{{ 'about ' if shown.tokens_estimated else '' }}{{ '{:,}'.format(shown.tokens) }} tokens</span>
+        {% if shown.reason %}<span>{{ shown.reason }}</span>{% endif %}
+    </p>
+    <div class="table-scroll">
+        <table class="data-table lcp-compact lcp-refine-jobs">
+            <caption class="visually-hidden">What each job of the cycle did, in the order they ran</caption>
+            <thead><tr><th scope="col" class="num">#</th><th scope="col">Job</th><th scope="col">Status</th><th scope="col">Changes</th><th scope="col" class="num">Waiting</th><th scope="col" class="num">Tokens</th></tr></thead>
+            <tbody>
+                {% for job in shown.jobs %}
+                <tr>
+                    <td class="num">{{ loop.index }}</td>
+                    <td>{{ job.label }}{% if job.notes %}<small class="lcp-refine-note" title="{{ job.notes|join(' · ') }}">{{ job.notes[0] }}</small>{% endif %}</td>
+                    <td><span class="lcp-status lcp-status--{{ {'done': 'compiled', 'failed': 'failed'}.get(job.status, 'pending') }}">{{ job.status|capitalize }}</span></td>
+                    <td>{{ job_changes(job) }}</td>
+                    <td class="num{{ ' is-warn' if job.waiting else '' }}">{{ job.waiting }}</td>
+                    <td class="num">{{ ('~' if job.tokens_estimated else '') ~ '{:,}'.format(job.tokens) if job.tokens else '—' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <h3 class="lcp-subtitle">{{ 'What it would change' if shown.dry_run else 'What changed' }}</h3>
+    {{ run_changes(shown) }}
+    {% if shown.pending %}
+    <h3 class="lcp-subtitle">Waiting for review</h3>
+    <ul class="lcp-plan-list">
+        {% for item in shown.pending %}
+        <li>
+            <span class="pill">{{ {'consolidation': 'Consolidation', 'persona': 'Persona', 'persona_rule': 'Standing rule', 'tool_revision': 'Tool', 'retention': 'Retention', 'skill_activation': 'Skill'}.get(item.kind, item.kind) }}</span>
+            {{ item.summary }}{% if item.memory_id %} · <span class="mono">{{ item.memory_id[:24] }}</span>{% endif %}
+            {% if item.kind == 'consolidation' and not ui_read_only %}
+            <form method="post" action="/learning-control-plane/consolidation-review" class="cl-inline-form"><input type="hidden" name="agent_id" value="{{ selected_agent_id }}"><input type="hidden" name="plan_id" value="{{ item.plan_id }}"><button class="btn btn-sm" type="submit">Review</button></form>
+            {% elif item.kind in ('persona', 'persona_rule') %}<a class="btn btn-sm" href="#persona-learning">Review</a>
+            {% elif item.kind == 'skill_activation' %}<a class="btn btn-sm" href="/memory/skills">Review</a>
+            {% elif item.kind == 'retention' and not ui_read_only %}
+            <form method="post" action="/learning-control-plane/retention-plan" class="cl-inline-form"><input type="hidden" name="agent_id" value="{{ selected_agent_id }}"><input type="hidden" name="memory_id" value="{{ item.memory_id or '' }}"><button class="btn btn-sm" type="submit">Plan again to review</button></form>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+    {% else %}
+    <p class="panel-empty">No cycle has run for this agent yet. Run one now, or try a dry run first to see what it would change.</p>
+    {% endif %}
+
+    {% if refine.runs|length > 1 %}
+    <h3 class="lcp-subtitle">Earlier cycles</h3>
+    <p class="lcp-refine-more">Open a cycle to see what it changed.</p>
+    <div class="lcp-refine-runs" role="list">
+        <div class="lcp-refine-run-head" aria-hidden="true"><span>Started (UTC)</span><span>Started by</span><span>Status</span><span class="num">Changes</span><span class="num">Waiting</span><span class="num">Tokens</span><span>Run</span></div>
+        {% for run in refine.runs[1:] %}
+        <details class="lcp-refine-run" role="listitem">
+            <summary>
+                <span class="mono">{{ run.started_at[:16]|replace('T', ' ') }}</span>
+                <span>{{ {'manual': 'A person', 'schedule': 'Schedule', 'mcp': 'MCP client'}.get(run.trigger, run.trigger) }}</span>
+                <span>{{ {'done': 'Done', 'failed': 'Failed', 'dry_run': 'Dry run', 'skipped': 'Skipped', 'running': 'Running'}.get(run.status, run.status) }}</span>
+                <span class="num">{{ run.changed }}</span>
+                <span class="num{{ ' is-warn' if run.waiting else '' }}">{{ run.waiting }}</span>
+                <span class="num">{{ '{:,}'.format(run.tokens) if run.tokens else '—' }}</span>
+                <span class="mono" title="{{ run.run_id }}">{{ run.run_id[:18] }}</span>
+            </summary>
+            <div class="lcp-refine-run-body">{{ run_changes(run) }}</div>
+        </details>
+        {% endfor %}
+    </div>
+    {% endif %}
+</details>
+{% endif %}
+
 {% if selected_agent_id and consolidation %}
 {% set cact = action if action and action.kind in ('consolidation-plan', 'consolidation-applied', 'consolidation-restored') else none %}
 {% set hidden_scope %}<input type="hidden" name="agent_id" value="{{ selected_agent_id }}"><input type="hidden" name="memory_id" value="{{ memory_id }}"><input type="hidden" name="user_id" value="{{ user_id }}"><input type="hidden" name="thread_id" value="{{ thread_id }}">{% endset %}
 {% macro op_row(op) -%}
 {%- set d = op.details -%}
 <tr>
-    <td><span class="pill {{ 'pill--warning' if op.kind in ('retire_attribute', 'suppress_duplicate') else '' }}">{{ {'merge_entities': 'Merge', 'suppress_duplicate': 'Hide duplicate', 'retire_attribute': 'Retire fact', 'add_fact': ('Update fact' if 'replaces' in d else 'Add fact')}[op.kind] }}</span></td>
+    <td><span class="pill {{ 'pill--warning' if op.kind in ('retire_attribute', 'suppress_duplicate') else '' }}">{{ {'merge_entities': 'Merge', 'suppress_duplicate': 'Hide duplicate', 'retire_attribute': 'Retire fact', 'add_fact': ('Keep beside' if 'beside' in d else ('Update fact' if 'replaces' in d else 'Add fact')), 'reinforce_fact': 'Confirm fact'}[op.kind] }}</span></td>
     <td>
         {%- if op.kind == 'merge_entities' -%}{{ (d.names or [])|reject('none')|unique|join(' + ') or op.target_id }} <small class="mono">→ {{ op.target_id[:12] }}</small>
         {%- elif op.kind == 'suppress_duplicate' -%}{{ op.memory_type|replace('_', ' ') }} <span class="mono" title="{{ op.target_id }}">{{ op.target_id[:12] }}</span> <small>same as <span class="mono">{{ (d.duplicate_of or '')[:12] }}</span></small>
         {%- elif op.kind == 'retire_attribute' -%}<strong>{{ d.entity }}.{{ d.attribute }}</strong> = {{ d.value }} <small>keeps {{ d.kept }} = {{ d.kept_value }}</small>
-        {%- else -%}<strong>{{ d.entity }}.{{ d.attribute }}</strong> = {{ d.value }}{% if 'replaces' in d %} <small>was {{ d.replaces }}</small>{% endif %}
+        {%- else -%}<strong>{{ d.entity }}.{{ d.attribute }}</strong> = {{ d.value }}{% if 'replaces' in d %} <small>was {{ d.replaces }}</small>{% elif 'beside' in d %} <small title="The stored value came from your application, so it stays. This one is kept in the history as not applied.">stays {{ d.beside }}</small>{% endif %}
         {%- endif -%}
     </td>
-    <td class="lcp-reason" title="{{ op.reason }}">{% if op.kind == 'add_fact' %}“{{ d.evidence }}”{% else %}{{ op.reason }}{% endif %}</td>
+    <td class="lcp-reason" title="{{ op.reason }}">{% if op.kind in ('add_fact', 'reinforce_fact') %}“{{ d.evidence }}”{% else %}{{ op.reason }}{% endif %}</td>
 </tr>
 {%- endmacro %}
-<section class="panel lcp-consolidation" id="memory-consolidation" aria-labelledby="lcp-consolidation-title">
-    <div class="panel-header">
-        <div>
+{% set fold_open = view.record_count == 0 %}
+<details class="panel lcp-consolidation lcp-fold" id="memory-consolidation" aria-labelledby="lcp-consolidation-title"{% if fold_open or cact or consolidation.pending %} open{% endif %}>
+    <summary class="lcp-fold-summary">
+        <span class="lcp-fold-heading">
             <h2 class="panel-title" id="lcp-consolidation-title">Memory consolidation</h2>
-            <p class="panel-description">Merges duplicate entities and summaries, retires the older of two facts about the same thing, and adds facts a user stated that were never stored, each quoting the user. The model steps run on {% if consolidation.model %}<strong>{{ consolidation.model }}</strong> ({{ 'background model' if consolidation.model_is_background else 'the chat model; set a background model on the agent' }}){% else %}no model, so only duplicates are checked{% endif %}. Nothing is deleted; every change can be undone. Conversations that ran sealed are never read.</p>
-        </div>
+            <span class="lcp-fold-hint">Merge duplicates, retire replaced facts and add stated facts that were never stored.</span>
+        </span>
+        {% if consolidation.pending %}<span class="pill pill--warning">{{ consolidation.pending|length }} waiting for review</span>{% endif %}
         {% set sched = consolidation.schedule %}
         <span class="pill" title="Set on the agent's form, under Memory upkeep">{% if sched and sched.enabled %}Every {{ sched.every_n_turns }} turns{% if sched.every_hours %} or {{ sched.every_hours|int }} h{% endif %} · {{ 'applies automatically' if sched.auto_apply else 'waits for review' }}{% else %}On demand{% endif %}</span>
-    </div>
+    </summary>
+    <p class="panel-description">Merges duplicate entities and summaries, retires the older of two facts about the same thing, and adds facts a user stated that were never stored, each quoting the user. The model steps run on {% if consolidation.model %}<strong>{{ consolidation.model }}</strong> ({{ 'background model' if consolidation.model_is_background else 'the chat model; set a background model on the agent' }}){% else %}no model, so only duplicates are checked{% endif %}. Nothing is deleted; every change can be undone. Conversations that ran sealed are never read.</p>
     {% if consolidation.entity_scope != 'memory' %}<p class="form-note lcp-note">This agent keeps entity facts per conversation, so only duplicate summaries and knowledge-base chunks are checked.</p>{% endif %}
     {% if not ui_read_only %}
     <form method="post" action="/learning-control-plane/consolidation-plan" class="filter-bar lcp-consolidation-form" aria-label="Plan memory consolidation">
@@ -212,7 +352,7 @@
     {% elif cact and cact.kind == 'consolidation-applied' %}
     {% set report = cact.report %}
     <div class="lcp-consolidation-plan">
-        <p class="panel-description">Applied plan <span class="mono">{{ report.plan_id }}</span> as {{ report.approved_by }}: {{ report.applied.merge_entities }} merge(s), {{ report.applied.suppress_duplicate }} hidden duplicate(s), {{ report.applied.retire_attribute }} retired fact(s), {{ report.applied.add_fact }} added fact(s). The changes are on the <a href="/traces/memory-evolution?agent_id={{ selected_agent_id|urlencode }}&memory_id={{ report.memory_id|urlencode }}">memory evolution</a> timeline.</p>
+        <p class="panel-description">Applied plan <span class="mono">{{ report.plan_id }}</span> as {{ report.approved_by }}: {{ report.applied.merge_entities }} merge(s), {{ report.applied.suppress_duplicate }} hidden duplicate(s), {{ report.applied.retire_attribute }} retired fact(s), {{ report.applied.add_fact }} added fact(s){% if report.applied.fact_not_applied %}, {{ report.applied.fact_not_applied }} kept beside a value your application wrote{% endif %}. The changes are on the <a href="/traces/memory-evolution?agent_id={{ selected_agent_id|urlencode }}&memory_id={{ report.memory_id|urlencode }}">memory evolution</a> timeline.</p>
         {% for error in report.errors %}<p class="error-message">{{ error }}</p>{% endfor %}
     </div>
     {% endif %}
@@ -255,18 +395,20 @@
         </table>
     </div>
     {% endif %}
-</section>
+</details>
 {% if persona_learning and persona_learning.has_persona %}
 {% set pl = persona_learning %}
 {% set pl_sched = pl.schedule %}
-<section class="panel lcp-consolidation" id="persona-learning" aria-labelledby="lcp-persona-title">
-    <div class="panel-header">
-        <div>
+<details class="panel lcp-consolidation lcp-fold" id="persona-learning" aria-labelledby="lcp-persona-title"{% if fold_open or pl.pending or (action and action.kind == 'persona-learning') %} open{% endif %}>
+    <summary class="lcp-fold-summary">
+        <span class="lcp-fold-heading">
             <h2 class="panel-title" id="lcp-persona-title">Persona learning</h2>
-            <p class="panel-description">Looks for work the user keeps coming back to across conversations, then adds one sentence to the persona's goals or background, keeping the quotes it rests on. Reviews run on {% if pl.model %}<strong>{{ pl.model }}</strong> ({{ 'background model' if pl.model_is_background else 'the chat model; set a background model on the agent' }}){% else %}no model yet{% endif %}. The name and role never change this way, and conversations that ran sealed are never read.</p>
-        </div>
+            <span class="lcp-fold-hint">Adds what the user keeps coming back to, to the persona's goals or background.</span>
+        </span>
+        {% if pl.pending %}<span class="pill pill--warning">1 waiting for review</span>{% endif %}
         <span class="pill" title="Set on the agent's form, under Persona">{% if pl.enabled %}Every {{ pl_sched.every_n_turns }} turns{% if pl_sched.every_hours %} or {{ pl_sched.every_hours|int }} h{% endif %} · {{ 'applies automatically' if pl_sched.auto_apply else 'waits for review' }}{% else %}Off{% endif %}</span>
-    </div>
+    </summary>
+    <p class="panel-description">Looks for work the user keeps coming back to across conversations, then adds one sentence to the persona's goals or background, keeping the quotes it rests on. Reviews run on {% if pl.model %}<strong>{{ pl.model }}</strong> ({{ 'background model' if pl.model_is_background else 'the chat model; set a background model on the agent' }}){% else %}no model yet{% endif %}. The name and role never change this way, and conversations that ran sealed are never read.</p>
     {% if pl.multi_tenant %}<p class="form-note lcp-note">This agent serves several users who share its persona, so it doesn't learn from any one of them.</p>
     {% elif not pl.enabled %}<p class="form-note lcp-note">Off for this agent. <a href="/agents/{{ selected_agent_id }}/edit#persona-learning">Turn it on in the agent's persona settings</a>, or run one review now.</p>{% endif %}
     {% if pl.last_review %}<p class="form-note lcp-note">Last review {{ (pl.last_review.at or '')[:16]|replace('T', ' ') }}: {{ pl.last_review.reason }}</p>{% endif %}
@@ -327,7 +469,7 @@
         </table>
     </div>
     {% endif %}
-</section>
+</details>
 {% endif %}
 {% endif %}
 
@@ -550,6 +692,13 @@
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
+    // A link to a folded panel (from the playground, say) opens it.
+    function openTarget() {
+        const target = location.hash && document.getElementById(location.hash.slice(1));
+        if (target && target.matches('details.lcp-fold')) target.open = true;
+    }
+    openTarget();
+    window.addEventListener('hashchange', openTarget);
     if (!window.MemorizzMonitor) return;
     function go(row, field) {
         const url = row.dataset[field];

@@ -52,11 +52,22 @@ class SkillMonitor:
         """
         try:
             skill_ids = list(getattr(workflow, "skills_activated", None) or [])
-            if not skill_ids:
+            held_out = list(getattr(workflow, "skills_held_out", None) or [])
+            if not skill_ids and not held_out:
                 return
             outcome = getattr(getattr(workflow, "outcome", None), "value", "success")
             succeeded = outcome == "success"
+            verified = bool(getattr(workflow, "outcome_verified", False))
             run_hash = getattr(workflow, "canonical_hash", None)
+
+            # The control side: the skill matched and was withheld. Only the
+            # with-and-without figure moves; activations and drift do not.
+            for skill_id in held_out:
+                skill = self.skillbox.get_skill_by_id(skill_id)
+                if not skill or skill.status != SkillStatus.ACTIVE:
+                    continue
+                self._credit_holdout(skill, "without", succeeded, verified)
+                self.skillbox.update_skill(skill)
 
             for skill_id in skill_ids:
                 skill = self.skillbox.get_skill_by_id(skill_id)
@@ -81,10 +92,54 @@ class SkillMonitor:
                     -self.config.drift_window_activations :
                 ]
                 skill.stats = stats
+                self._credit_holdout(skill, "with", succeeded, verified)
                 self.skillbox.update_skill(skill)
                 self._maybe_demote(skill)
         except Exception as exc:
             logger.error("Skill monitor attribution failed: %s", exc)
+
+    @staticmethod
+    def _credit_holdout(
+        skill: Skill,
+        side: str,
+        succeeded: bool,
+        verified: bool,
+        count_run: bool = True,
+    ) -> None:
+        """Add one run to a side of the skill's with-and-without figure.
+
+        ``count_run=False`` credits only the verified counters: a host that
+        confirms an outcome after the run was stored must not count the run
+        twice."""
+        holdout = skill.stats.setdefault("holdout", {})
+        counters = holdout.setdefault(side, {})
+        for key in ("runs", "successes", "verified_runs", "verified_successes"):
+            counters.setdefault(key, 0)
+        if count_run:
+            counters["runs"] += 1
+            counters["successes"] += 1 if succeeded else 0
+        if verified:
+            counters["verified_runs"] += 1
+            counters["verified_successes"] += 1 if succeeded else 0
+
+    def record_verified_outcome(self, workflow_doc: dict, succeeded: bool) -> None:
+        """A host confirmed the outcome of a run already stored: credit the
+        verified counters of the skills it ran with and without."""
+        try:
+            for side, key in (
+                ("with", "skills_activated"),
+                ("without", "skills_held_out"),
+            ):
+                for skill_id in workflow_doc.get(key) or []:
+                    skill = self.skillbox.get_skill_by_id(skill_id)
+                    if not skill or skill.status != SkillStatus.ACTIVE:
+                        continue
+                    self._credit_holdout(
+                        skill, side, succeeded, verified=True, count_run=False
+                    )
+                    self.skillbox.update_skill(skill)
+        except Exception as exc:
+            logger.error("Verified-outcome attribution failed: %s", exc)
 
     # ----------------------------------------------------------------- drift
 

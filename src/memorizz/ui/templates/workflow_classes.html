@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}Workflow trajectories - Memorizz{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/pages/learning.css?v=11">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/learning.css?v=12">{% endblock %}
 
 {% block content %}
 {% from '_ui.html' import page_header, empty_state, id_chip %}
@@ -237,7 +237,7 @@
                     <span class="fleet-run-dot fleet-run-dot--{{ 'success' if run.outcome == 'success' else 'failed' }}" title="{{ run.outcome|capitalize }}"></span>
                     <span class="lw-run-time" title="{{ run.created_at }}">{{ run.created_at[5:] or '—' }}</span>
                     <span class="lw-run-query" title="{{ run.user_query }}">{{ run.user_query or '(no user query)' }}</span>
-                    {% if run.promoted %}<span class="lw-run-flag" title="Covered by an active skill, so this run is suppressed from workflow retrieval">Suppressed</span>{% elif run.outcome != 'success' %}<span class="lw-run-outcome is-bad">{{ run.outcome|capitalize }}</span>{% endif %}
+                    {% if run.verified %}<span class="lw-run-flag lw-run-flag--verified" title="Your application confirmed this run's outcome">Verified</span>{% endif %}{% if run.promoted %}<span class="lw-run-flag" title="Covered by an active skill, so this run is suppressed from workflow retrieval">Suppressed</span>{% elif run.outcome != 'success' %}<span class="lw-run-outcome is-bad">{{ run.outcome|capitalize }}</span>{% endif %}
                 </li>
                 {% endfor %}
             </ol>

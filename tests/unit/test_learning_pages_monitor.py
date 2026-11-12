@@ -131,8 +131,11 @@ class TestPromotionCriteria:
             "success rate",
             "query diversity",
             "recency",
+            "verified outcomes",
         ]
         assert all(row["passed"] for row in rows)
+        # The fifth gate is off by default: it reports and never blocks.
+        assert rows[4]["optional"] and rows[4]["detail"] == "0 confirmed · gate off"
         assert rows[0]["detail"] == "5 / 5 runs"
         assert rows[1]["detail"] == "100% (need 80%)"
         assert rows[2]["detail"] == "3 distinct (need 2)"
@@ -149,6 +152,8 @@ class TestPromotionCriteria:
             False,
             False,
             False,
+            # Verified outcomes: the gate is off, so it passes.
+            True,
         ]
         no_time = _stat(last_seen=None)
         recency = promotion_criteria(no_time, CONFIG, NOW)[3]
@@ -168,7 +173,7 @@ class TestShapeClass:
         assert row["status"] == "ready"
         assert row["tags"] == ["ready"]
         assert row["eligible"] is True
-        assert row["criteria_met"] == 4 and row["criteria_total"] == 4
+        assert row["criteria_met"] == 5 and row["criteria_total"] == 5
         assert row["success_rate"] == "100%" and row["success_tone"] == "is-good"
         assert row["step_count"] == 2
         assert row["key"] == class_key("agent-1", "a" * 64)
@@ -181,7 +186,7 @@ class TestShapeClass:
         assert row["status"] == "evidence"
         assert row["tags"] == ["evidence"]
         assert row["eligible"] is False
-        assert row["criteria_met"] == 3
+        assert row["criteria_met"] == 4
 
     @pytest.mark.unit
     def test_low_success_is_failing_and_needs_evidence(self):
@@ -481,3 +486,36 @@ class TestPages:
         assert 'id="lw-skill-md-skill-1"' in page
         assert 'href="/memory/workflows"' in page
         assert "authority: developer" in page
+        # The holdout share is set from the skill's own panel.
+        assert 'action="/continual-learning/agents/agent-lw/holdout"' in page
+        assert 'name="rate_percent"' in page and 'value="10"' in page
+
+    @pytest.mark.unit
+    def test_holdout_settings_save_from_the_skills_page(self, client):
+        from memorizz.memagent import MemAgent
+        from memorizz.ui import state
+
+        provider = state._state["provider"]
+        MemAgent(
+            instruction="Help.",
+            memory_provider=provider,
+            continual_learning=True,
+            agent_id="agent-lw",
+        ).save()
+        saved = client.post(
+            "/continual-learning/agents/agent-lw/holdout",
+            data={"rate_percent": "25", "min_runs": "30", "flag_z": "0.5"},
+        )
+        assert saved.status_code == 303 and "error" not in saved.headers["location"]
+        config = provider.retrieve_memagent("agent-lw").continual_learning_config
+        assert config["holdout_rate"] == 0.25
+        assert config["holdout_min_runs"] == 30
+        page = client.get("/memory/skills").text
+        assert 'name="rate_percent" min="0" max="100" step="1" value="25"' in page
+        refused = client.post(
+            "/continual-learning/agents/agent-lw/holdout",
+            data={"rate_percent": "250", "min_runs": "30", "flag_z": "0.5"},
+        )
+        assert "error=" in refused.headers["location"]
+        config = provider.retrieve_memagent("agent-lw").continual_learning_config
+        assert config["holdout_rate"] == 0.25

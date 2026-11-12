@@ -117,6 +117,8 @@ def shape_record(record: Dict[str, Any]) -> Dict[str, Any]:
         if (
             key in _SHOWN_ELSEWHERE
             or key == body_key
+            # Drawn as its own section of the pane.
+            or (key == "guardrails" and record.get("persona_id"))
             or _is_vector_key(str(key))
             or _is_vector(value)
             or _is_empty(value)
@@ -137,6 +139,92 @@ def shape_record(record: Dict[str, Any]) -> Dict[str, Any]:
         "fields": fields,
         "size": len(body),
         "vector_note": vector_note(record),
+        "entity": _entity_extras(record),
+        "persona": _persona_extras(record),
+    }
+
+
+def _day(value: Any) -> str:
+    """An ISO time as ``YYYY-MM-DD HH:MM``; anything else as it is."""
+    text = str(value or "")
+    return text[:16].replace("T", " ") if len(text) >= 16 else text
+
+
+def _entity_extras(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """What the entity pane shows beyond the raw record: each fact's source
+    level and the values it had before, with the dates each held; weaker
+    writes that were not applied; aliases; and merges that can be undone."""
+    attributes = record.get("attributes")
+    if not record.get("entity_id") or not isinstance(attributes, list):
+        return None
+    from ..long_term.semantic.entity_memory import (
+        SOURCE_LEVEL_LABELS,
+        attribute_timeline,
+        entity_aliases,
+    )
+
+    facts = []
+    for attribute in attributes:
+        if not isinstance(attribute, dict) or not attribute.get("name"):
+            continue
+        rows = attribute_timeline(attribute)
+        current, earlier = rows[0], rows[1:]
+        facts.append(
+            {
+                "name": str(attribute["name"]),
+                "value": _text(attribute.get("value"), limit=600),
+                "level": current["level"],
+                "level_label": SOURCE_LEVEL_LABELS.get(current["level"], ""),
+                "pinned": bool(attribute.get("pinned")),
+                "source": str(attribute.get("source") or ""),
+                "since": _day(current.get("valid_from")),
+                "history": [
+                    {
+                        "value": _text(row.get("value"), limit=300),
+                        "applied": row["applied"],
+                        "from": _day(row.get("valid_from")),
+                        "to": _day(row.get("valid_to")),
+                        "offered": _day(row.get("offered_at")),
+                        "source": str(row.get("source") or ""),
+                        "level": row["level"],
+                        "level_label": SOURCE_LEVEL_LABELS.get(row["level"], ""),
+                    }
+                    for row in earlier
+                ],
+                "not_applied": sum(1 for row in earlier if not row["applied"]),
+            }
+        )
+    metadata = (
+        record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    )
+    return {
+        "entity_id": str(record.get("entity_id")),
+        "memory_id": str(record.get("memory_id") or ""),
+        "user_id": record.get("user_id"),
+        "facts": facts,
+        "aliases": entity_aliases(record),
+        "merged_count": len(metadata.get("merged_entity_ids") or []),
+        "undo_plans": sorted((metadata.get("merge_undo") or {}).keys()),
+        "superseded_by": str(metadata.get("superseded_by") or ""),
+    }
+
+
+def _persona_extras(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A persona's guardrails, for the pane that edits them."""
+    if not record.get("persona_id") or "background" not in record:
+        return None
+    import json
+
+    raw = record.get("guardrails") or []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = [line for line in raw.splitlines() if line.strip()]
+    return {
+        "persona_id": str(record.get("persona_id")),
+        "guardrails": [str(item) for item in raw if str(item or "").strip()],
+        "version": record.get("version") or 1,
     }
 
 

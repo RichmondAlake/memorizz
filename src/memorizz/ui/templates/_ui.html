@@ -1,6 +1,7 @@
 {#- Shared page chrome. Import with {% from '_ui.html' import page_header, page_tabs, empty_state, id_chip %}.
 
-    page_header: `section` is the breadcrumb (plain text, sentence case), `back`
+    page_header: the breadcrumb is in the top bar (base.html), so `section` is not
+    shown; `back` is
     an optional (href, label) pair, `nav` rendered tabs (page_tabs or an area
     macro below). Wrap it in {% call %} to add actions on the right:
         {% call page_header('Agents', 'Create and run agents.', 'Build') %}
@@ -11,8 +12,8 @@
 {% macro page_header(title, description=None, section=None, back=None, nav=None, title_id=None, description_id=None, actions_class=None) -%}
 <header class="page-header">
     <div class="page-header-text">
-        {#- A back link replaces the breadcrumb: one wayfinding line per page. -#}
-        {% if back %}<a class="page-back" href="{{ back[0] }}">{{ back[1] }}</a>{% elif section %}<span class="page-eyebrow">{{ section }}</span>{% endif %}
+        {#- The top bar carries the breadcrumb; `section` is kept for callers. -#}
+        {% if back %}<a class="page-back" href="{{ back[0] }}">{{ back[1] }}</a>{% endif %}
         <h1{% if title_id %} id="{{ title_id }}"{% endif %}>{{ title }}</h1>
         {% if description %}<p{% if description_id %} id="{{ description_id }}"{% endif %}>{{ description }}</p>{% endif %}
     </div>

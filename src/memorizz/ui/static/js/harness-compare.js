@@ -254,11 +254,18 @@
             ['Verification', s => s.verified === 'passed' ? '<span class="is-good">Passed</span>' : s.verified === 'failed' ? '<span class="is-bad">Failed</span>' : '<span class="hxcmp-muted">Not run</span>'],
         ];
         const head = '<tr><th scope="col"><span class="visually-hidden">Fact</span></th>' + summaries.map((s, i) => '<th scope="col"><span class="hxcmp-key hxcmp-key--' + i + '">' + (i + 1) + '</span> ' + esc(s.label) + '</th>').join('') + '</tr>';
-        const body = rows.map(([label, cell]) => '<tr><th scope="row">' + esc(label) + '</th>' + summaries.map(s => '<td>' + cell(s) + '</td>').join('') + '</tr>').join('');
+        // Who judged, how long and at what cost say nothing until a run is judged.
+        const judged = summaries.some(s => s.judgment);
+        const shownRows = rows.filter(([label]) => judged || !['Judge', 'Evaluation time', 'Evaluation API cost'].includes(label));
+        const body = shownRows.map(([label, cell]) => '<tr><th scope="row">' + esc(label) + '</th>' + summaries.map(s => '<td>' + cell(s) + '</td>').join('') + '</tr>').join('');
         const sameTask = new Set(summaries.map(s => s.task.trim())).size <= 1;
         return (sameTask ? '' : '<p class="hxcmp-note">These runs were given different tasks, so compare them with care.</p>')
             + '<div class="hxcmp-table-wrap"><table class="hxcmp-facts"><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>'
-            + '<p class="hxcmp-note">Cost and time measure harness execution. Evaluation overhead is shown separately. Accuracy badges require all successful answers to be judged on the same task with the same settings. Scores are the judge’s estimates; inspect its reasoning below.</p>';
+            + '<p class="hxcmp-note">Cost and time measure harness execution. '
+            + (judged
+                ? 'Evaluation overhead is shown separately. Accuracy badges require all successful answers to be judged on the same task with the same settings. Scores are the judge’s estimates; inspect its reasoning below.'
+                : 'Evaluate accuracy above to have a judge score the answers; its time and cost are then shown separately.')
+            + '</p>';
     };
 
     const renderTimeline = (summaries) => {

@@ -326,6 +326,7 @@ def test_a_changed_value_replaces_the_old_one_reversibly(work_dir):
         name="user",
         attributes=[{"name": "city", "value": "Lisbon"}],
         memory_id="memory-1",
+        source_level=2,  # what the user said before
     )
     agent._record_interaction(
         "Big news: now I live in Porto.", "Congratulations!", "memory-1", "t1"
@@ -337,6 +338,113 @@ def test_a_changed_value_replaces_the_old_one_reversibly(work_dir):
     assert _facts(agent.memory_provider, "user") == {"city": "Porto"}
     agent.restore_memory_consolidation(plan.plan_id, approved_by="operator-7")
     assert _facts(agent.memory_provider, "user") == {"city": "Lisbon"}
+    agent.close()
+
+
+def test_what_the_user_says_never_replaces_a_value_the_host_wrote(work_dir):
+    from memorizz.learning.consolidation import FACT_NOT_APPLIED
+    from memorizz.long_term.semantic.entity_memory.entity_memory import (
+        attribute_timeline,
+    )
+
+    model = _Model(
+        facts=[
+            {
+                "entity": "Counter Fraud Unit",
+                "attribute": "threshold",
+                "value": "3,000",
+                "evidence": "the threshold is 3,000 now",
+            }
+        ]
+    )
+    agent = _agent(work_dir, model)
+    entities = EntityMemory(agent.memory_provider)
+    entities.upsert_entity(  # the host, from its policy system (level 3)
+        name="Counter Fraud Unit",
+        attributes=[{"name": "threshold", "value": "2,500"}],
+        memory_id="memory-1",
+    )
+    agent._record_interaction(
+        "I think the threshold is 3,000 now.", "Noted.", "memory-1", "t1"
+    )
+    plan = agent.plan_memory_consolidation(thread_ids=["t1"])
+    (op,) = [op for op in plan.ops if op.kind == ADD_FACT]
+    assert op.details["beside"] == "2,500" and "replaces" not in op.details
+    result = agent.apply_memory_consolidation(plan, approved_by="operator-7")
+    assert result.applied[FACT_NOT_APPLIED] == 1 and result.applied[ADD_FACT] == 0
+    record = entities.get_entity_by_name("Counter Fraud Unit", memory_id="memory-1")
+    (threshold,) = record["attributes"]
+    assert threshold["value"] == "2,500"
+    assert [
+        (row["value"], row["applied"]) for row in attribute_timeline(threshold)[1:]
+    ] == [("3,000", False)]
+
+    # A plan stored before the rule may still say "replaces": the host's
+    # value stays all the same.
+    from memorizz.learning.consolidation import (
+        ConsolidationOp,
+        ConsolidationPlan,
+        MemoryConsolidator,
+    )
+
+    old_op = ConsolidationOp(
+        ADD_FACT,
+        "entity_memory",
+        record["entity_id"],
+        "the user said this; memory still had the old value",
+        {
+            "entity": "Counter Fraud Unit",
+            "attribute": "threshold",
+            "value": "9,999",
+            "evidence": "x",
+            "replaces": "2,500",
+        },
+    )
+    old_plan = ConsolidationPlan(
+        plan_id=ConsolidationPlan.make_id("memory-1", None, (old_op,)),
+        memory_id="memory-1",
+        user_id=None,
+        ops=(old_op,),
+    )
+    MemoryConsolidator(agent.memory_provider).apply(old_plan, approved_by="operator-7")
+    assert _facts(agent.memory_provider, "Counter Fraud Unit") == {"threshold": "2,500"}
+    agent.close()
+
+
+def test_a_fact_added_to_a_record_does_not_rename_it(work_dir):
+    model = _Model(
+        facts=[
+            {
+                "entity": "tomasz nowak",
+                "entity_type": "human",
+                "attribute": "handles",
+                "value": "subsidence claims",
+                "evidence": "handles subsidence claims",
+            }
+        ]
+    )
+    agent = _agent(work_dir, model)
+    entities = EntityMemory(agent.memory_provider)
+    entities.upsert_entity(
+        name="Tomasz Nowak",
+        entity_type="person",
+        attributes=[{"name": "team", "value": "property"}],
+        memory_id="memory-1",
+        source_level=2,
+    )
+    agent._record_interaction(
+        "Tomasz Nowak handles subsidence claims.", "Noted.", "memory-1", "t1"
+    )
+    plan = agent.plan_memory_consolidation(thread_ids=["t1"])
+    agent.apply_memory_consolidation(plan, approved_by="operator-7")
+    rows = entities.list_entities(memory_id="memory-1")
+    (record,) = [
+        row
+        for row in rows
+        if any(item["name"] == "handles" for item in row["attributes"])
+    ]
+    assert (record["name"], record["entity_type"]) == ("Tomasz Nowak", "person")
+    assert {item["name"] for item in record["attributes"]} == {"team", "handles"}
     agent.close()
 
 
@@ -593,3 +701,375 @@ def test_instances_of_one_agent_share_the_schedule(work_dir):
     assert _facts(provider, "user") == {"city": "Lisbon"}
     second.close()
     first.close()
+
+
+def test_names_that_agree_need_one_shared_fact_and_never_none(work_dir):
+    from memorizz.learning.consolidation import MERGE_ENTITIES, _names_agree
+
+    assert _names_agree("CFU", "Counter Fraud Unit")
+    assert _names_agree("counter  fraud unit", "Counter Fraud Unit")
+    assert not _names_agree("CFU", "Customer Feedback")
+    assert not _names_agree("Ada", "Ada Lovelace")
+    assert not _names_agree("C", "Counter")
+
+    provider = _provider(work_dir)
+    _entity(provider, "cfu-long", "Counter Fraud Unit", threshold="2,500")
+    _entity(provider, "cfu-short", "CFU", lead="Marcus Webb", office="Leeds")
+    reply = [{"entity_ids": ["cfu-long", "cfu-short"]}]
+
+    def plan():
+        consolidator = MemoryConsolidator(provider, model=_Model(same_entity=reply))
+        return [
+            op
+            for op in consolidator.plan(memory_id="memory-1").ops
+            if op.kind == MERGE_ENTITIES
+        ]
+
+    # The names agree and the model says so, but they share no fact: no merge.
+    assert plan() == []
+    # One shared fact is enough with names that agree, across spellings of
+    # the type.
+    EntityMemory(provider).upsert_entity(
+        entity_id="cfu-long",
+        name="Counter Fraud Unit",
+        entity_type="organisation",
+        attributes=[{"name": "lead", "value": "Marcus Webb"}],
+        memory_id="memory-1",
+    )
+    EntityMemory(provider).upsert_entity(
+        entity_id="cfu-short",
+        name="CFU",
+        entity_type="Organization",
+        memory_id="memory-1",
+    )
+    (merge,) = plan()
+    assert "matching name" in merge.reason
+
+
+def test_another_spelling_of_a_name_does_not_rename_the_record(work_dir):
+    entities = EntityMemory(_provider(work_dir))
+    entities.upsert_entity(
+        name="Counter Fraud Unit",
+        attributes=[{"name": "threshold", "value": "2,500"}],
+        memory_id="memory-1",
+    )
+    entities.upsert_entity(
+        name="counter  fraud unit",
+        attributes=[{"name": "lead", "value": "Marcus Webb"}],
+        memory_id="memory-1",
+        source_level=2,
+    )
+    (record,) = entities.list_entities(memory_id="memory-1")
+    assert record["name"] == "Counter Fraud Unit"
+    assert {item["name"] for item in record["attributes"]} == {"threshold", "lead"}
+
+
+def test_a_merge_keeps_the_copy_of_a_fact_from_the_stronger_source(work_dir):
+    from memorizz.long_term.semantic.entity_memory.entity_memory import source_level
+
+    entities = EntityMemory(_provider(work_dir))
+    scope = {"memory_id": "memory-1", "user_id": "user-1"}
+    host = entities.upsert_entity(  # host code: level 3
+        name="Counter Fraud Unit",
+        entity_type="organisation",
+        attributes=[{"name": "lead", "value": "Marcus Webb", "confidence": 0.5}],
+        **scope,
+    )
+    said = entities.upsert_entity(  # a conversation, later and more confident
+        name="CFU",
+        entity_type="organization",
+        attributes=[{"name": "lead", "value": "Marcus Webb", "confidence": 0.9}],
+        source_level=2,
+        **scope,
+    )
+    entities.consolidate_duplicate_entities(
+        entity_ids=[host, said], apply=True, provenance="plan-1", **scope
+    )
+    (record,) = entities.list_entities(**scope)
+    (lead,) = record["attributes"]
+    assert source_level(lead) == 3
+    # A spelling of the type is not a new type either.
+    entities.upsert_entity(
+        entity_id=record["entity_id"],
+        name=record["name"],
+        entity_type="Organization"
+        if record["entity_type"] == "organisation"
+        else "Organisation",
+        source_level=2,
+        **scope,
+    )
+    kept = entities.get_entity(record["entity_id"], **scope)
+    assert kept["entity_type"] == record["entity_type"]
+
+
+def test_an_older_statement_never_replaces_a_newer_value(work_dir):
+    model = _Model(
+        facts=[
+            {
+                "entity": "user",
+                "attribute": "city",
+                "value": "Lisbon",
+                "evidence": "I live in Lisbon",
+            }
+        ]
+    )
+    agent = _agent(work_dir, model)
+    agent._record_interaction("I live in Lisbon.", "Noted.", "memory-1", "t1")
+    time.sleep(0.02)
+    # Said later, and already in memory: the stored value is the newer one.
+    EntityMemory(agent.memory_provider).upsert_entity(
+        name="user",
+        attributes=[{"name": "city", "value": "Porto"}],
+        memory_id="memory-1",
+        source_level=2,
+    )
+    plan = agent.plan_memory_consolidation(thread_ids=["t1"])
+    assert [op for op in plan.ops if op.kind == ADD_FACT] == []
+    assert _facts(agent.memory_provider, "user")["city"] == "Porto"
+    agent.close()
+
+
+def test_a_fact_aimed_at_a_record_the_plan_merges_lands_on_the_survivor(work_dir):
+    from memorizz.learning.consolidation import ConsolidationOp, ConsolidationPlan
+
+    provider = _provider(work_dir)
+    entities = EntityMemory(provider)
+    scope = {"memory_id": "memory-1", "user_id": "user-1"}
+    host = entities.upsert_entity(
+        name="Counter Fraud Unit",
+        entity_type="team",
+        attributes=[{"name": "led_by", "value": "Marcus Webb"}],
+        **scope,
+    )
+    short = entities.upsert_entity(
+        name="CFU",
+        entity_type="team",
+        attributes=[{"name": "led_by", "value": "Marcus Webb"}],
+        source_level=2,
+        **scope,
+    )
+
+    def fact(target):
+        return ConsolidationOp(
+            ADD_FACT,
+            MemoryType.ENTITY_MEMORY.value,
+            target,
+            "The user said so.",
+            {
+                "entity": "cfu",
+                "entity_type": "team",
+                "attribute": "office",
+                "value": "Manchester",
+                "evidence": "the CFU moved to Manchester",
+            },
+        )
+
+    ops = (
+        ConsolidationOp(
+            MERGE_ENTITIES,
+            MemoryType.ENTITY_MEMORY.value,
+            host,
+            "Same team under two names.",
+            {"duplicate_entity_ids": [short], "names": ["Counter Fraud Unit", "CFU"]},
+        ),
+        # The model asked for the fact once per record, as it saw two.
+        fact(short),
+        fact(host),
+    )
+    plan = ConsolidationPlan(
+        plan_id=ConsolidationPlan.make_id("memory-1", "user-1", ops),
+        memory_id="memory-1",
+        user_id="user-1",
+        ops=ops,
+    )
+    result = MemoryConsolidator(provider, agent_id="agent-1").apply(
+        plan, approved_by="operator-7"
+    )
+
+    assert result.errors == ()
+    (record,) = entities.list_entities(**scope)
+    offices = [a for a in record["attributes"] if a["name"] == "office"]
+    assert [a["value"] for a in offices] == ["Manchester"]
+
+
+def test_the_models_spelling_of_a_name_is_still_the_stored_entity(work_dir):
+    from memorizz.learning.consolidation import FACT_NOT_APPLIED
+
+    model = _Model(
+        facts=[
+            {
+                "entity": "counter_fraud_unit",
+                "attribute": "threshold",
+                "value": "3,000",
+                "evidence": "the threshold is 3,000 now",
+            }
+        ]
+    )
+    agent = _agent(work_dir, model)
+    entities = EntityMemory(agent.memory_provider)
+    entities.upsert_entity(  # the host, from its policy system (level 3)
+        name="Counter Fraud Unit",
+        attributes=[{"name": "threshold", "value": "2,500"}],
+        memory_id="memory-1",
+    )
+    agent._record_interaction(
+        "I think the threshold is 3,000 now.", "Noted.", "memory-1", "t1"
+    )
+    plan = agent.plan_memory_consolidation(thread_ids=["t1"])
+    (op,) = [op for op in plan.ops if op.kind == ADD_FACT]
+    assert op.details["beside"] == "2,500"
+    result = agent.apply_memory_consolidation(plan, approved_by="operator-7")
+    assert result.applied[FACT_NOT_APPLIED] == 1
+    (record,) = entities.list_entities(memory_id="memory-1")
+    assert record["name"] == "Counter Fraud Unit"
+    assert [a["value"] for a in record["attributes"]] == ["2,500"]
+    agent.close()
+
+
+def test_an_older_statement_loses_whatever_the_model_calls_the_entity(work_dir):
+    # Monday: "sits in Leeds". Wednesday, already in memory: Manchester. The
+    # model names the team in snake_case; Monday's words still must not win.
+    model = _Model(
+        facts=[
+            {
+                "entity": "counter_fraud_unit",
+                "attribute": "office",
+                "value": "Leeds",
+                "evidence": "The Counter Fraud Unit sits in Leeds",
+            }
+        ]
+    )
+    agent = _agent(work_dir, model)
+    agent._record_interaction(
+        "The Counter Fraud Unit sits in Leeds.", "Noted.", "memory-1", "t1"
+    )
+    time.sleep(0.02)
+    EntityMemory(agent.memory_provider).upsert_entity(
+        name="Counter Fraud Unit",
+        attributes=[{"name": "office", "value": "Manchester"}],
+        memory_id="memory-1",
+        source_level=2,
+    )
+    plan = agent.plan_memory_consolidation(thread_ids=["t1"])
+    assert [op for op in plan.ops if op.kind == ADD_FACT] == []
+    assert _facts(agent.memory_provider, "Counter Fraud Unit")["office"] == "Manchester"
+    agent.close()
+
+
+def test_a_replaced_value_does_not_come_back_under_another_attribute_name(work_dir):
+    # Tuesday: "is in the Leeds office". Wednesday, in memory: Manchester, with
+    # Leeds in the history. The model files Tuesday's words as a new attribute.
+    model = _Model(
+        facts=[
+            {
+                "entity": "Counter Fraud Unit",
+                "attribute": "location",
+                "value": "Leeds office",
+                "evidence": "the Counter Fraud Unit is in the Leeds office",
+            }
+        ]
+    )
+    agent = _agent(work_dir, model)
+    entities = EntityMemory(agent.memory_provider)
+    entities.upsert_entity(
+        name="Counter Fraud Unit",
+        attributes=[{"name": "office_location", "value": "Leeds office"}],
+        memory_id="memory-1",
+        source_level=2,
+    )
+    agent._record_interaction(
+        "Confirmed: the Counter Fraud Unit is in the Leeds office.",
+        "Noted.",
+        "memory-1",
+        "t1",
+    )
+    time.sleep(0.02)
+    entities.upsert_entity(
+        name="Counter Fraud Unit",
+        attributes=[{"name": "office_location", "value": "Manchester office"}],
+        memory_id="memory-1",
+        source_level=2,
+    )
+    plan = agent.plan_memory_consolidation(thread_ids=["t1"])
+    assert [op for op in plan.ops if op.kind == ADD_FACT] == []
+    facts = _facts(agent.memory_provider, "Counter Fraud Unit")
+    assert facts == {"office_location": "Manchester office"}
+    agent.close()
+
+
+def test_a_value_the_user_states_again_is_confirmed_and_undone(work_dir):
+    from memorizz.learning.consolidation import REINFORCE_FACT
+
+    model = _Model()
+    agent = _agent(work_dir, model)
+    entities = EntityMemory(agent.memory_provider)
+    entities.upsert_entity(  # the host's record
+        name="Counter Fraud Unit",
+        attributes=[{"name": "office", "value": "Leeds"}],
+        memory_id="memory-1",
+    )
+    time.sleep(0.02)
+    agent._record_interaction(
+        "Confirming the Counter Fraud Unit is in Leeds.", "Noted.", "memory-1", "t1"
+    )
+    # The model lists it as confirmed, naming the entity its own way.
+    model.generate_text = lambda prompt, instructions=None: (
+        json.dumps(
+            {
+                "facts": [],
+                "confirmed": [
+                    {
+                        "entity": "counter_fraud_unit",
+                        "attribute": "office",
+                        "evidence": "the Counter Fraud Unit is in Leeds",
+                    }
+                ],
+            }
+        )
+        if "durable facts" in prompt
+        else json.dumps({"same_fact": [], "same_entity": []})
+    )
+    plan = agent.plan_memory_consolidation(thread_ids=["t1"])
+    (op,) = plan.ops
+    assert op.kind == REINFORCE_FACT and plan.counts[REINFORCE_FACT] == 1
+    assert op.details["value"] == "Leeds" and op.details["thread_id"] == "t1"
+    result = agent.apply_memory_consolidation(plan, approved_by="operator-7")
+    assert result.applied[REINFORCE_FACT] == 1 and not result.errors
+    (record,) = entities.list_entities(memory_id="memory-1")
+    (office,) = record["attributes"]
+    assert office["value"] == "Leeds" and office["level"] == 3
+    assert office["confirmations"] == 1
+    assert office["confirmed_by"][0]["thread_id"] == "t1"
+    # The same conversation does not confirm it a second time.
+    assert not agent.plan_memory_consolidation(thread_ids=["t1"]).ops
+    counts = MemoryConsolidator(agent.memory_provider, agent_id="agent-1").restore(
+        plan.plan_id, memory_id="memory-1", approved_by="operator-7"
+    )
+    assert counts["confirmations_removed"] == 1
+    (record,) = entities.list_entities(memory_id="memory-1")
+    assert "confirmations" not in record["attributes"][0]
+    agent.close()
+
+
+def test_the_conversation_a_value_came_from_does_not_confirm_it(work_dir):
+    model = _Model(
+        facts=[
+            {
+                "entity": "user",
+                "attribute": "city",
+                "value": "Lisbon",
+                "evidence": "I live in Lisbon",
+            }
+        ]
+    )
+    agent = _agent(work_dir, model)
+    agent._record_interaction("I live in Lisbon.", "Noted.", "memory-1", "t1")
+    time.sleep(0.02)
+    EntityMemory(agent.memory_provider).upsert_entity(
+        name="user",
+        attributes=[{"name": "city", "value": "Lisbon", "thread_id": "t1"}],
+        memory_id="memory-1",
+        source_level=2,
+    )
+    assert not agent.plan_memory_consolidation(thread_ids=["t1"]).ops
+    agent.close()

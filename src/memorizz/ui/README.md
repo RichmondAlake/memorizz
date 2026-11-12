@@ -31,6 +31,41 @@ and the observability pages are covered in `docs/observability-ui.md`.
 - `templates/` holds the pages; `_ui.html` and the other `_*.html` files are
   shared macros. `static/css/console.css` and `static/js/monitor.js` provide
   the shared monitor layout; page-specific styles live in `static/css/pages/`.
+  `static/css/shell.css` loads last and holds the application shell: the
+  grouped sidebar, the top bar, the command palette (`initializeCommandPalette`
+  in `static/js/app.js`) and the sign-in and connect cards. The theme class is
+  set on `<html>` before the first paint by the inline script in `base.html`.
+  The top bar is sticky on desktop: a new element that sticks to the top of
+  the page uses `top: var(--sticky-top)` (the bar's height, zero on phones).
+  The bar's breadcrumb comes from `active_page` (the `crumb_areas` map in
+  `base.html`): a new area needs an entry there. `page_header` no longer
+  prints its `section`. Go-to keys are the `GO_TO` table in
+  `initializeShortcuts` (`app.js`); the shortcuts sheet also lists a page's
+  own keys from its `.fleet-keys` hints.
+- `static/js/shell-menus.js` draws the inbox bell (`GET /api/inbox`, built by
+  `inbox.py`; add a source there for anything new that waits on a person)
+  and the store switcher (`GET /api/local-stores`). Both routes, and the
+  bulk agent actions, live in `routers/shell_api.py`.
+- `static/js/monitor.js` gives every `MemorizzMonitor.init` table filter
+  chips and a Views menu with no extra markup. `MemorizzMonitor.bulk(table,
+  {noun, actions})` adds a checkbox column and an action bar to any table
+  whose rows carry `data-key`.
+- `activity.py` records changes: the middleware in `app.py` calls
+  `activity.record` for every non-GET request that succeeds. A new route
+  gets a readable line by adding a rule to `_RULES`; one that should not be
+  logged (chat, polling, reads sent as POST) goes in `_SKIP`. Never log
+  request bodies.
+- The operator's name is `localStorage.memorizzApproverId` plus the
+  `memorizz_operator` cookie (`shell-menus.js`). An approver input is filled
+  when it matches `APPROVER_FIELDS` there.
+- `MemorizzDrawer.open`, `MemorizzMonitor.rowMenu` and the automatic
+  *Export CSV* live in `monitor.js`; `chat-preview.js` is the playground's
+  preview pane. Its frame must never get `allow-same-origin`.
+- The Overview's sections carry `data-widget` and `data-widget-label`; a new
+  section needs both to appear under *Customize*.
+- `static/js/page-dialogs.js` is loaded on every page. Use
+  `MemorizzDialogs.confirm`, `.prompt` and `.notify` instead of the browser's
+  `confirm()`, `prompt()` and `alert()`, which block the page.
 - `*_view.py`, `dashboard.py` and the `*_monitor.py` modules shape store
   records into what a page shows, without extra reads.
 - `state.py` holds the connected provider and shared services;

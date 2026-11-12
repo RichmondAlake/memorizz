@@ -98,6 +98,7 @@ COMMAND_KINDS = {
             "clear",
             "ingest",
             "consolidate",
+            "refine",
         ),
         "memory",
     ),

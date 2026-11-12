@@ -8,6 +8,7 @@ Wires the Skillbox, PromotionEngine, and SkillMonitor into a MemAgent.
 Every entry point is fail-safe: learning must never fail a user-facing run.
 """
 
+import hashlib
 import logging
 import queue
 import threading
@@ -147,6 +148,63 @@ class ContinualLearningManager:
         except Exception as exc:
             logger.warning("Learned-skill retrieval failed: %s", exc)
             return []
+
+    # ---------------------------------------------------------------- holdout
+
+    def is_held_out(self, skill, thread_id: Optional[str]) -> bool:
+        """Whether ``thread_id`` runs without ``skill``.
+
+        The side is a hash of the skill and the thread, so a thread stays on
+        one side for its whole life and no state is stored. A turn with no
+        thread is never held out, and neither is an exempt skill."""
+        rate = float(self.config.holdout_rate or 0.0)
+        if rate <= 0 or not thread_id or getattr(skill, "holdout_exempt", False):
+            return False
+        digest = hashlib.sha256(
+            f"{skill.skill_id}{thread_id}".encode("utf-8")
+        ).hexdigest()
+        return int(digest[:8], 16) / 0x100000000 < rate
+
+    def split_holdout(
+        self, scored_skills: List[ScoredSkill], thread_id: Optional[str]
+    ) -> "tuple[List[ScoredSkill], List[str]]":
+        """``(skills to inject, IDs of matching skills withheld)`` for a turn."""
+        injected: List[ScoredSkill] = []
+        held_out: List[str] = []
+        for scored in scored_skills or []:
+            if self.is_held_out(scored.skill, thread_id):
+                held_out.append(scored.skill.skill_id)
+            else:
+                injected.append(scored)
+        return injected, held_out
+
+    def set_holdout_exempt(self, skill_id: str, exempt: bool) -> bool:
+        """Mark a skill as never withheld (or allow withholding again)."""
+        skill = self.skillbox.get_skill_by_id(skill_id)
+        if not skill:
+            return False
+        skill.holdout_exempt = bool(exempt)
+        return self.skillbox.update_skill(skill)
+
+    def holdout_summary(self, skill_id: str) -> Dict[str, Any]:
+        """The with-and-without figure for one skill."""
+        from ...long_term.procedural.skillbox.skill import holdout_summary
+
+        skill = self.skillbox.get_skill_by_id(skill_id)
+        summary = holdout_summary(
+            skill.stats if skill else None,
+            self.config.holdout_min_runs,
+            self.config.holdout_flag_z,
+        )
+        summary["exempt"] = bool(skill.holdout_exempt) if skill else False
+        summary["rate_setting"] = float(self.config.holdout_rate or 0.0)
+        return summary
+
+    def record_verified_outcome(
+        self, workflow_doc: Dict[str, Any], succeeded: bool
+    ) -> None:
+        """A host confirmed a stored run's outcome after the fact."""
+        self.monitor.record_verified_outcome(workflow_doc, succeeded)
 
     def format_skills_prompt_section(
         self,

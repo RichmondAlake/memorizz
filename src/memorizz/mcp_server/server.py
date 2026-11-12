@@ -392,12 +392,16 @@ def create_memorizz_mcp_server(
         persona_background: Optional[str] = None,
         persona_learning: Optional[bool] = None,
         persona_learning_auto_apply: Optional[bool] = None,
+        holdout_rate: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Update safe local agent configuration after host approval.
 
         Persona fields change the persona in place, keeping its version and
         history. persona_learning needs a persona. Reviewing or undoing what it
-        changed stays in the CLI and the local UI.
+        changed stays in the CLI and the local UI. holdout_rate (0 to 1,
+        default 0.1) is the share of matching threads that run without an
+        active learned skill, so each skill has a with-and-without figure;
+        0 turns it off.
         """
         return await _tool_call(
             service.update_agent,
@@ -429,6 +433,7 @@ def create_memorizz_mcp_server(
             persona_background=persona_background,
             persona_learning=persona_learning,
             persona_learning_auto_apply=persona_learning_auto_apply,
+            holdout_rate=holdout_rate,
         )
 
     @server.tool(annotations=destructive)
@@ -509,6 +514,40 @@ def create_memorizz_mcp_server(
             memory_id=memory_id,
             thread_id=thread_id,
             mode=mode,
+        )
+
+    @server.tool(annotations=execute)
+    async def memorizz_refine(
+        agent_id: str,
+        memory_id: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Run one refine cycle: an agent's memory upkeep once, in a fixed order.
+
+        The jobs are entities (merge duplicates, review facts), stated facts,
+        skill staleness, promotion, skill review, persona learning and
+        retention. Each keeps its own apply rule, so a change that needs a
+        person's review is left waiting and listed under ``pending``. With
+        ``dry_run`` every job only plans and nothing changes. Returns the
+        stored report: per job its status, changes by kind and tokens used.
+        A persona's guardrails are never changed by a cycle.
+        """
+        return await _tool_call(
+            service.refine,
+            agent_id,
+            current_identity(),
+            memory_id=memory_id,
+            dry_run=dry_run,
+        )
+
+    @server.tool(annotations=read_only)
+    async def memorizz_list_refine_runs(
+        agent_id: str, limit: int = 10
+    ) -> Dict[str, Any]:
+        """List an agent's stored refine cycles, newest first, with what each
+        job changed, the tokens it used and the plans still waiting for review."""
+        return await _tool_call(
+            service.list_refine_runs, agent_id, current_identity(), limit=limit
         )
 
     @server.tool(annotations=execute)
@@ -1151,6 +1190,10 @@ def create_memorizz_mcp_server(
         """Find entities (people, projects, services) by exact name or query.
 
         Give name for an exact match, query to search their facts, or both.
+        A name also matches an alias (the name of a record merged into this
+        one). Each attribute carries its source level (3 host or pinned, 2
+        stated by the user, 1 inferred, tool or consolidation) and, when its
+        value changed, a timeline of earlier values with the dates each held.
         """
         return await _tool_call(
             service.lookup_entities,
@@ -1173,7 +1216,10 @@ def create_memorizz_mcp_server(
         """Create an entity or merge facts into the one with this name.
 
         attributes maps fact names to values, e.g. {"role": "tech lead"}.
-        A relation target that doesn't exist yet is created by name.
+        A relation target that doesn't exist yet is created by name. A value
+        replaces the stored one only when the stored one does not come from
+        a stronger source (the host, or pinned): such attributes are returned
+        in not_applied and the offered value is kept in the history.
         """
         return await _tool_call(
             service.upsert_entity,

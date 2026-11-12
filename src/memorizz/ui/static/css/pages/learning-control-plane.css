@@ -420,10 +420,13 @@
 }
 .lcp-consolidation .lcp-check {
   display: inline-flex;
+  /* Its own width, so the label wraps to the next row instead of running
+     past the panel edge. */
+  flex: 0 0 auto;
   flex-direction: row;
   align-items: center;
   gap: 6px;
-  align-self: center;
+  min-height: var(--console-control-height);
   white-space: nowrap;
 }
 .lcp-consolidation .lcp-check input {
@@ -474,4 +477,275 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* Consolidation and persona learning fold to one row, so the event ledger
+   stays near the top. They open when something waits for review. */
+.lcp-fold > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  list-style: none;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.lcp-fold > summary::-webkit-details-marker {
+  display: none;
+}
+.lcp-fold > summary::before {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin: 0 4px 0 2px;
+  border-right: 1.5px solid var(--text-muted);
+  border-bottom: 1.5px solid var(--text-muted);
+  content: "";
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+.lcp-fold[open] > summary::before {
+  transform: rotate(45deg);
+}
+.lcp-fold > summary:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 4px;
+}
+.lcp-fold-heading {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+  min-width: 0;
+}
+.lcp-fold-heading .panel-title {
+  margin: 0;
+}
+.lcp-fold-hint {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.lcp-fold[open] > summary {
+  margin-bottom: 10px;
+}
+.lcp-fold[open] .lcp-fold-hint {
+  display: none;
+}
+.lcp-fold > summary .pill {
+  flex: 0 0 auto;
+}
+@media (max-width: 640px) {
+  .lcp-fold-hint {
+    display: none;
+  }
+}
+.lcp-fold-hint {
+  font-weight: 400;
+}
+
+/* Compile streams: the scope wraps instead of shrinking to nothing when the
+   event pane narrows the panel, so the row always says which stream it is. */
+.lcp-panel .lcp-compact .lcp-stream-scope {
+  width: auto;
+  min-width: 150px;
+  max-width: none;
+  padding-left: 8px;
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.lcp-panel .lcp-compact th:first-child {
+  padding-left: 8px;
+}
+.lcp-panel .lcp-compact .lcp-stream-link {
+  width: 1%;
+}
+
+/* With the event pane open the main column is too narrow for two panels side
+   by side: the stream table ran past its panel. Stack them instead. */
+.lcp .fleet-main {
+  container-type: inline-size;
+}
+@container (max-width: 900px) {
+  .lcp .lcp-panels {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 640px) {
+  .lcp-panel .lcp-compact .lcp-stream-scope {
+    min-width: 96px;
+  }
+}
+
+
+/* ---------- Refine cycles ---------- */
+.lcp-refine-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 4px;
+}
+.lcp-refine-actions form {
+  margin: 0;
+}
+.lcp-refine-id {
+  margin-left: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+.lcp-refine-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  margin: 0 0 10px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+.lcp-refine-note {
+  display: block;
+  max-width: 46ch;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lcp-refine-jobs td:first-child,
+.lcp-refine-jobs th:first-child {
+  width: 28px;
+  color: var(--text-muted);
+}
+.lcp-status--failed {
+  color: var(--accent-danger, #c8404b);
+}
+
+/* Refine cycles: what a cycle changed, and earlier cycles that open. */
+.lcp-refine-changes {
+    list-style: none;
+    margin: 0 0 12px;
+    padding: 0;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.lcp-refine-changes li {
+    display: grid;
+    grid-template-columns: 130px minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: start;
+    padding: 9px 12px;
+    font-size: 13px;
+}
+
+.lcp-refine-changes li + li {
+    border-top: 1px solid var(--border-color);
+}
+
+.lcp-refine-job {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.lcp-refine-what strong {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.lcp-refine-what small {
+    display: block;
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
+.lcp-refine-more {
+    margin: 0 0 12px;
+    color: var(--text-muted);
+    font-size: 12.5px;
+}
+
+.lcp-refine-runs {
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.lcp-refine-run-head,
+.lcp-refine-run > summary {
+    display: grid;
+    grid-template-columns: 150px 110px 90px 80px 80px 80px minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    padding: 8px 12px 8px 30px;
+    font-size: 13px;
+}
+
+.lcp-refine-run-head {
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.lcp-refine-run .num,
+.lcp-refine-run-head .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.lcp-refine-run > summary {
+    position: relative;
+    cursor: pointer;
+    list-style: none;
+}
+
+.lcp-refine-run > summary::-webkit-details-marker {
+    display: none;
+}
+
+.lcp-refine-run > summary::before {
+    content: "";
+    position: absolute;
+    left: 13px;
+    top: 50%;
+    width: 6px;
+    height: 6px;
+    border-right: 1.5px solid var(--text-muted);
+    border-bottom: 1.5px solid var(--text-muted);
+    transform: translateY(-60%) rotate(-45deg);
+    transition: transform 0.12s ease;
+}
+
+.lcp-refine-run[open] > summary::before {
+    transform: translateY(-70%) rotate(45deg);
+}
+
+.lcp-refine-run > summary:hover {
+    background: var(--bg-secondary);
+}
+
+.lcp-refine-run + .lcp-refine-run {
+    border-top: 1px solid var(--border-color);
+}
+
+.lcp-refine-run-body {
+    padding: 4px 12px 4px 30px;
+}
+
+@container (max-width: 760px) {
+    .lcp-refine-run-head {
+        display: none;
+    }
+
+    .lcp-refine-run > summary {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .lcp-refine-changes li {
+        grid-template-columns: 1fr;
+        gap: 4px;
+    }
 }

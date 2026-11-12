@@ -356,6 +356,10 @@ _PERSONA_EVOLUTION_FIELDS = (
     _c("goals", kind="lob_or", default=""),
     _c("version", kind="int", default=1),
     _c("evolution_history", kind="json", default=list),
+    # Rules learning cannot write (migration 014).
+    _c("guardrails", kind="json", default=list),
+    # Rules a named owner approved (migration 015).
+    _c("standing_rules", kind="json", default=list),
 )
 
 _TOOLBOX_HEAD = (
@@ -437,6 +441,8 @@ _WORKFLOW_TAIL = (
     _c("promoted_skill_id"),
     _c("skills_activated", kind="json", default=list),
     _c("shadow_evaluations", kind="json", default=list),
+    _c("outcome_verified", kind="bool", default=False),
+    _c("skills_held_out", kind="json", default=list),
 )
 
 
@@ -571,13 +577,16 @@ _SEMANTIC_CACHE_TAIL = (
 # column exists, so reads keep working (and keep their shape) mid-upgrade.
 _OPTIONAL_FIELDS: Dict[MemoryType, tuple] = {
     MemoryType.PERSONAS: _PERSONA_EVOLUTION_FIELDS,
-    # Supersede lifecycle (migration 011).
+    # The conversation a run came from (migration 015). Tool learning reads
+    # it to find a request the user had to make twice.
+    MemoryType.WORKFLOW_MEMORY: (_c("origin_thread_id"),),
+    # Supersede lifecycle (migration 014).
     MemoryType.KNOWLEDGE_BASE: (
         _c("status"),
         _c("superseded_by"),
         _c("superseded_at", kind="ts"),
     ),
-    # The record's fields without a column of their own (migration 011).
+    # The record's fields without a column of their own (migration 014).
     MemoryType.SHORT_TERM_MEMORY: (_c("metadata", kind="json_spread", default=dict),),
     MemoryType.SEMANTIC_CACHE: (_c("last_accessed", kind="epoch"),),
 }
@@ -2021,6 +2030,8 @@ class OracleProvider(
             ("goals", "CLOB"),
             ("version", "NUMBER(10) DEFAULT 1"),
             ("evolution_history", "CLOB CHECK (evolution_history IS JSON)"),
+            ("guardrails", "CLOB CHECK (guardrails IS JSON)"),
+            ("standing_rules", "CLOB CHECK (standing_rules IS JSON)"),
         ],
         MemoryType.TOOLBOX: [
             ("tool_id", "VARCHAR2(255)"),
@@ -2072,6 +2083,9 @@ class OracleProvider(
             ("promoted_skill_id", "VARCHAR2(255)"),
             ("skills_activated", "CLOB"),
             ("shadow_evaluations", "CLOB CHECK (shadow_evaluations IS JSON)"),
+            ("outcome_verified", "NUMBER(1) DEFAULT 0"),
+            ("skills_held_out", "CLOB CHECK (skills_held_out IS JSON)"),
+            ("origin_thread_id", "VARCHAR2(255)"),
             ("importance", "NUMBER(5,4)"),
             ("last_accessed_at", "TIMESTAMP"),
             ("access_count", "NUMBER(10) DEFAULT 0"),
@@ -3164,6 +3178,8 @@ class OracleProvider(
                 goals=goals,
                 version=data.get("version"),
                 evolution_history=data.get("evolution_history"),
+                guardrails=data.get("guardrails"),
+                standing_rules=data.get("standing_rules"),
             )
             conn.commit()
 
@@ -3409,6 +3425,8 @@ class OracleProvider(
         goals: Any = None,
         version: Any = None,
         evolution_history: Any = None,
+        guardrails: Any = None,
+        standing_rules: Any = None,
     ) -> None:
         """Insert or update a personas row using an existing cursor."""
         table_name = self._get_table_name(MemoryType.PERSONAS)
@@ -3422,6 +3440,12 @@ class OracleProvider(
             "version": int(version) if version is not None else None,
             "evolution_history": json.dumps(self._sanitize_for_json(evolution_history))
             if evolution_history is not None
+            else None,
+            "guardrails": json.dumps(self._sanitize_for_json(list(guardrails)))
+            if guardrails is not None
+            else None,
+            "standing_rules": json.dumps(self._sanitize_for_json(list(standing_rules)))
+            if standing_rules is not None
             else None,
         }
         evolution = {
@@ -3982,9 +4006,15 @@ class OracleProvider(
             "canonical_signature",
             "skills_activated",
             "shadow_evaluations",
+            "skills_held_out",
         ):
             value = data.get(column)
             optional_columns[column] = self._ensure_json_text(value) if value else None
+        optional_columns["outcome_verified"] = 1 if data.get("outcome_verified") else 0
+        if data.get("origin_thread_id") and self._memory_type_has_column(
+            MemoryType.WORKFLOW_MEMORY, "origin_thread_id"
+        ):
+            optional_columns["origin_thread_id"] = str(data["origin_thread_id"])[:255]
         optional_columns.update(self._retention_bind_values(data))
 
         self._insert_base_row(
@@ -6039,8 +6069,16 @@ class OracleProvider(
                     "goals",
                     "version",
                     "evolution_history",
+                    "guardrails",
+                    "standing_rules",
                 },
-                "json_fields": {"traits", "expertise", "evolution_history"},
+                "json_fields": {
+                    "traits",
+                    "expertise",
+                    "evolution_history",
+                    "guardrails",
+                    "standing_rules",
+                },
                 "has_updated_at": True,
                 "field_map": {"role": "role_type"},
             },
@@ -6126,6 +6164,9 @@ class OracleProvider(
                     "promoted_skill_id",
                     "skills_activated",
                     "shadow_evaluations",
+                    "outcome_verified",
+                    "skills_held_out",
+                    "origin_thread_id",
                     "embedding",
                 },
                 "json_fields": {
@@ -6134,6 +6175,7 @@ class OracleProvider(
                     "canonical_signature",
                     "skills_activated",
                     "shadow_evaluations",
+                    "skills_held_out",
                 },
                 "has_updated_at": True,
             },
@@ -6340,11 +6382,28 @@ class OracleProvider(
                 value = self._coerce_retention_value(mapped_key, value)
             if (
                 memory_store_type == MemoryType.PERSONAS
-                and mapped_key in ("goals", "version", "evolution_history")
+                and mapped_key
+                in (
+                    "goals",
+                    "version",
+                    "evolution_history",
+                    "guardrails",
+                    "standing_rules",
+                )
                 and not self._memory_type_has_column(memory_store_type, mapped_key)
             ):
                 # Pre-migration-010 schema: keep the rest of the update.
                 continue
+            if (
+                memory_store_type == MemoryType.WORKFLOW_MEMORY
+                and mapped_key
+                in ("outcome_verified", "skills_held_out", "origin_thread_id")
+                and not self._memory_type_has_column(memory_store_type, mapped_key)
+            ):
+                # Pre-migration-014 schema: keep the rest of the update.
+                continue
+            if mapped_key == "outcome_verified":
+                value = 1 if value else 0
             if mapped_key in json_fields:
                 value = self._ensure_json_text(value)
             elif mapped_key in timestamp_fields:
@@ -7832,6 +7891,8 @@ class OracleProvider(
                     goals=persona_goals,
                     version=persona_dict.get("version"),
                     evolution_history=persona_dict.get("evolution_history"),
+                    guardrails=persona_dict.get("guardrails"),
+                    standing_rules=persona_dict.get("standing_rules"),
                 )
                 # An agent has one persona. A replaced one stays in the
                 # library but must not load for this agent again.

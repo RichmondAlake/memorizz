@@ -1,0 +1,7 @@
+flowchart LR
+    H["Handler: this claim<br/>looks staged"] --> L["1 · beacon_lookup_claim<br/>read the claim from Beacon"]
+    L --> Q{"Is there such<br/>a claim?"}
+    Q -- no --> X["Stop. Tell the handler<br/>the reference is wrong"]
+    Q -- yes --> R["2 · beacon_refer_to_cfu<br/>status becomes Q9"]
+    R --> P["3 · raise_amber_pack<br/>send the indicators to the CFU"]
+    P --> D["Reply: referred.<br/>The customer hears<br/>'under review'"]

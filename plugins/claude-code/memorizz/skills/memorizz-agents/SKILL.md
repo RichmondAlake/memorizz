@@ -40,6 +40,20 @@ useful for a second opinion on a design or a bug.
 - `memorizz_compact_conversation` summarizes and compacts one of them, and
   `memorizz_compile_memory` turns its continual-learning events into recall
   material. Both change the agent's memory, so run them only when the user asks.
+- `memorizz_refine` runs one refine cycle: the agent's memory upkeep once, in a
+  fixed order (entities, stated facts, skill staleness, promotion, skill
+  review, persona learning, retention). Pass `dry_run=true` to see what it
+  would do without changing anything. Run a real cycle only when the user
+  asks: it calls the agent's background model. Changes that need a person's
+  review come back under `pending`; tell the user they are waiting.
+- `memorizz_update_agent` takes `holdout_rate` (0 to 1, default 0.1): the
+  share of matching threads that run without an active learned skill, so
+  each skill has a with-and-without figure. 0 turns it off. Change it only
+  when the user asks.
+  `memorizz_list_refine_runs` lists past cycles with what each job changed.
+- `memorizz_get_agent` shows a persona's `guardrails`. They are rules only the
+  host or an operator can change; do not try to change them through
+  `memorizz_update_agent`.
 - `memorizz_query_traces` (when the user enabled it with
   `memorizz config set MEMORIZZ_MCP_SERVER_ALLOW_TRACE_QUERIES true`) shows what
   an agent did on a turn: model calls, tools and memory reads.

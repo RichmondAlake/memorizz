@@ -169,6 +169,8 @@ def test_upsert_canonicalizes_common_attribute_name_aliases(
             "source": None,
             "created_at": stored["attributes"][0]["created_at"],
             "updated_at": stored["attributes"][0]["updated_at"],
+            # A direct SDK write is host code: the strongest source level.
+            "level": 3,
         },
         {
             "name": "role",
@@ -177,6 +179,7 @@ def test_upsert_canonicalizes_common_attribute_name_aliases(
             "source": None,
             "created_at": stored["attributes"][1]["created_at"],
             "updated_at": stored["attributes"][1]["updated_at"],
+            "level": 3,
         },
     ]
 
@@ -253,6 +256,9 @@ def test_duplicate_consolidation_is_dry_run_first_and_soft_supersedes(
         attributes=[{"name": "role", "value": "Engineer", "confidence": 0.7}],
         memory_id="primary-user",
         user_id="user-1",
+        # Both copies come from the same kind of source, so confidence
+        # decides; a host-written copy would win whatever its confidence.
+        source_level=1,
     )
     # A duplicate written by a release before name-only upserts converged on
     # one storage key: the same person under a spelling variant, with its own
@@ -741,6 +747,10 @@ def test_tool_update_by_a_made_up_id_lands_on_the_named_entity(
         name="current trip",
         entity_type="trip",
         attributes=[{"name": "nights", "value": "4"}],
+        # As the user stated it in conversation: a later statement through
+        # the tool, at the same level, replaces it. (A direct host write is
+        # level 3 and would stand against the tool.)
+        source_level=2,
         **scope,
     )
     manager = EntityMemoryManager(provider)
@@ -805,3 +815,37 @@ def test_tool_update_forwards_host_identity_key(
     record = provider.records[first]
     assert record["metadata"]["identity_key"] == "authenticated_user"
     assert {item["name"] for item in record["attributes"]} == {"city", "role"}
+
+
+def test_a_weaker_write_does_not_retype_a_record(entity_store: EntityMemory):
+    entity_store.upsert_entity(
+        name="Counter Fraud Unit",
+        entity_type="team",
+        attributes=[{"name": "lead", "value": "Nadia Hussain"}],
+        memory_id="m1",
+        user_id="u1",
+        source_level=2,
+    )
+    # A capture that calls the same team an "organization" adds its fact and
+    # leaves the type; records of two types are never merged as duplicates.
+    entity_store.upsert_entity(
+        name="Counter Fraud Unit",
+        entity_type="organization",
+        attributes=[{"name": "office", "value": "Leeds"}],
+        memory_id="m1",
+        user_id="u1",
+        source_level=2,
+    )
+    record = entity_store.get_entity_by_name(
+        "Counter Fraud Unit", memory_id="m1", user_id="u1"
+    )
+    assert record["entity_type"] == "team"
+    assert {a["name"] for a in record["attributes"]} == {"lead", "office"}
+    # The host can still say what it is.
+    entity_store.upsert_entity(
+        name="Counter Fraud Unit", entity_type="unit", memory_id="m1", user_id="u1"
+    )
+    record = entity_store.get_entity_by_name(
+        "Counter Fraud Unit", memory_id="m1", user_id="u1"
+    )
+    assert record["entity_type"] == "unit"

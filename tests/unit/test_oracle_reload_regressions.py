@@ -48,6 +48,66 @@ def test_the_archive_gives_a_persona_its_history_as_a_list():
     assert record["evolution_history"] == HISTORY
 
 
+def test_the_archive_gives_a_persona_its_standing_rules_as_a_list():
+    rules = ["Say a claim referred to the CFU is under review."]
+    cursor = _Cursor(
+        ["persona_id", "version", "standing_rules"],
+        [("p1", 3, json.dumps(rules))],
+    )
+    provider = SimpleNamespace(_read_lob_value=lambda value: value)
+    [record] = archive._decode(provider, MemoryType.PERSONAS, cursor)
+    assert record["standing_rules"] == rules
+
+
+def test_standing_rules_have_a_column_everywhere_a_persona_is_written():
+    """A persona's standing rules are read, created, updated and migrated on
+    Oracle like its guardrails; a missing one of these loses them silently."""
+    from memorizz.memory_provider.oracle import provider as oracle_provider
+
+    optional = {
+        field.col for field in oracle_provider._OPTIONAL_FIELDS[MemoryType.PERSONAS]
+    }
+    assert {"guardrails", "standing_rules"} <= optional
+    source = Path(oracle_provider.__file__).read_text()
+    assert '("standing_rules", "CLOB CHECK (standing_rules IS JSON)")' in source
+    assert source.count('standing_rules=data.get("standing_rules")') == 1
+    assert source.count('standing_rules=persona_dict.get("standing_rules")') == 1
+    folder = Path(oracle_provider.__file__).parent
+    assert "standing_rules CLOB" in (folder / "schema_relational.sql").read_text()
+    migration = folder / "migrations" / "015_standing_rules_and_workflow_thread.sql"
+    assert "standing_rules" in migration.read_text()
+
+
+def test_a_run_keeps_the_conversation_it_came_from_on_oracle():
+    """Tool learning finds a request made twice by reading a run's
+    origin_thread_id; without a column for it Oracle dropped it on store."""
+    from memorizz.memory_provider.oracle import provider as oracle_provider
+
+    optional = {
+        field.col
+        for field in oracle_provider._OPTIONAL_FIELDS[MemoryType.WORKFLOW_MEMORY]
+    }
+    assert "origin_thread_id" in optional
+    source = Path(oracle_provider.__file__).read_text()
+    assert '("origin_thread_id", "VARCHAR2(255)")' in source
+    assert 'optional_columns["origin_thread_id"]' in source
+    folder = Path(oracle_provider.__file__).parent
+    assert (
+        "origin_thread_id VARCHAR2(255)"
+        in (folder / "schema_relational.sql").read_text()
+    )
+    migration = folder / "migrations" / "015_standing_rules_and_workflow_thread.sql"
+    assert "origin_thread_id" in migration.read_text()
+
+
+def test_a_persona_stored_before_standing_rules_loads_with_none():
+    persona = Persona.from_dict({"name": "Zed", "guardrails": ["Never disclose Q9."]})
+    assert persona.standing_rules == []
+    assert (
+        Persona.from_dict({"name": "Zed", "standing_rules": None}).standing_rules == []
+    )
+
+
 def test_a_persona_read_back_keeps_its_history():
     persona = Persona.from_dict(
         {"name": "Zed", "version": 2, "evolution_history": json.dumps(HISTORY)}

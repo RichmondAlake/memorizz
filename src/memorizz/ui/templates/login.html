@@ -4,14 +4,38 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Sign in - Memorizz</title>
-    <link rel="stylesheet" href="/static/css/styles.css">
+    <script>
+        // The saved theme, else the system's, before the first paint.
+        (function () {
+            var saved = null;
+            try { saved = window.localStorage.getItem('memorizz_ui_light_mode'); } catch (_) {}
+            var light = saved === '1' || (saved === null && window.matchMedia
+                && window.matchMedia('(prefers-color-scheme: light)').matches);
+            document.documentElement.classList.toggle('theme-light', light);
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/css/styles.css?v=46">
+    <link rel="stylesheet" href="/static/css/console.css?v=31">
+    <link rel="stylesheet" href="/static/css/shell.css?v=9">
 </head>
 <body>
-<main class="login-shell">
-    <section class="login-card">
-        <h1>Memorizz operator access</h1>
-        <p>Enter the local UI access token. It is exchanged for a signed, short-lived HttpOnly session and is never written to the page.</p>
-        {% if error %}<div class="error-message"><span>!</span> {{ error }}</div>{% endif %}
+<script>if (document.documentElement.classList.contains('theme-light')) document.body.classList.add('theme-light');</script>
+<main class="auth-shell">
+    <section class="auth-card" aria-labelledby="login-title">
+        <div class="auth-brand">
+            <span class="logo-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 3a3 3 0 0 0-3 3v.3A3.7 3.7 0 0 0 4 9.7V10a4 4 0 0 0 1.2 2.9A4 4 0 0 0 4 16v.3A3.7 3.7 0 0 0 6 19.7V20a3 3 0 0 0 3 3"/>
+                    <path d="M15 3a3 3 0 0 1 3 3v.3A3.7 3.7 0 0 1 20 9.7V10a4 4 0 0 1-1.2 2.9A4 4 0 0 1 20 16v.3a3.7 3.7 0 0 1-2 3.4V20a3 3 0 0 1-3 3"/>
+                    <path d="M9 12h6"/>
+                    <path d="M12 3v18"/>
+                </svg>
+            </span>
+            <span>Memorizz</span>
+        </div>
+        <h1 id="login-title">Sign in</h1>
+        <p class="auth-lede">Enter the access token for this Memorizz console.</p>
+        {% if error %}<div class="error-message" role="alert">{{ error }}</div>{% endif %}
         <form method="post" action="/login">
             <input type="hidden" name="next" value="{{ next_path }}">
             <div class="form-group">
@@ -20,6 +44,7 @@
             </div>
             <button type="submit" class="btn btn-primary">Sign in</button>
         </form>
+        <p class="auth-foot">The token is exchanged for a signed, short-lived HttpOnly session and is never written to the page.</p>
     </section>
 </main>
 </body>

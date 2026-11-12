@@ -64,6 +64,10 @@ MERGE_ENTITIES = "merge_entities"
 SUPPRESS_DUPLICATE = "suppress_duplicate"
 RETIRE_ATTRIBUTE = "retire_attribute"
 ADD_FACT = "add_fact"
+#: The user stated a value memory already holds: one more confirmation.
+REINFORCE_FACT = "reinforce_fact"
+#: Count of stated facts kept beside a value the host wrote, in an apply result.
+FACT_NOT_APPLIED = "fact_not_applied"
 LINK_ROWS = "link_rows"
 
 #: Knowledge-base notes the agent wrote itself, which relations compare.
@@ -109,9 +113,57 @@ class ConsolidationConfig:
     #: A relation acts only when the model gives it at least this.
     relation_threshold: float = 0.5
     max_relation_pairs: int = 60
+    #: Run upkeep (consolidation, promotion, persona learning, retention) as
+    #: one ordered refine cycle in place of the separate turn counters. The
+    #: counters stop when this is on, so nothing runs twice.
+    refine_cycle: bool = False
+    #: Hours between scheduled refine cycles.
+    refine_interval_hours: float = 24.0
+    #: The cycle's verify job: check stored notes against the conversations
+    #: they cite and flag what is not supported. Nothing is deleted.
+    refine_verify: bool = True
+    #: Captured facts the verify job may ask the background model about in
+    #: one cycle, when code alone cannot tell. 0 keeps it to code checks.
+    refine_verify_model_checks: int = 3
+    #: The cycle's toolbox job: "propose" reviews the agent's tool calls and
+    #: leaves revisions for a person, "auto" applies them, "off" skips it.
+    refine_tool_review: str = "propose"
+    #: The cycle's compact job: re-embed records whose vector is missing or
+    #: the wrong size, and fold repeated unapplied offers of one value.
+    refine_compact: bool = True
+    #: Also drop the vectors of suppressed rows (they are embedded again when
+    #: a row is restored and the next cycle runs). Off by default.
+    refine_drop_suppressed_vectors: bool = False
 
     def __post_init__(self) -> None:
         from ..decision_models import feature_setting
+
+        object.__setattr__(self, "refine_cycle", _truthy(self.refine_cycle))
+        for name in ("refine_verify", "refine_compact"):
+            object.__setattr__(self, name, _truthy(getattr(self, name)))
+        object.__setattr__(
+            self,
+            "refine_drop_suppressed_vectors",
+            _truthy(self.refine_drop_suppressed_vectors),
+        )
+        object.__setattr__(
+            self,
+            "refine_verify_model_checks",
+            max(0, min(int(self.refine_verify_model_checks or 0), 50)),
+        )
+        mode = str(self.refine_tool_review or "off").strip().lower()
+        if mode in {"true", "1", "on", "yes"}:
+            mode = "propose"
+        object.__setattr__(
+            self,
+            "refine_tool_review",
+            mode if mode in {"propose", "auto"} else "off",
+        )
+        object.__setattr__(
+            self,
+            "refine_interval_hours",
+            max(0.25, min(float(self.refine_interval_hours or 24.0), 24.0 * 30)),
+        )
 
         object.__setattr__(self, "relations", feature_setting(self.relations))
         object.__setattr__(
@@ -228,8 +280,9 @@ class ConsolidationPlan:
             RETIRE_ATTRIBUTE: 0,
             ADD_FACT: 0,
         }
-        if any(op.kind == LINK_ROWS for op in self.ops):
-            counts[LINK_ROWS] = 0
+        for optional in (LINK_ROWS, REINFORCE_FACT):
+            if any(op.kind == optional for op in self.ops):
+                counts[optional] = 0
         for op in self.ops:
             counts[op.kind] = counts.get(op.kind, 0) + 1
         return counts
@@ -353,6 +406,12 @@ def _normalized(text: Any) -> str:
     return " ".join(str(text or "").split()).casefold()
 
 
+def _name_key(text: Any) -> str:
+    """A name as its words only, so case, spacing, underscores and hyphens
+    do not make two entities of one."""
+    return " ".join(re.findall(r"[a-z0-9]+", str(text or "").casefold()))
+
+
 def _row_text(row: Mapping[str, Any]) -> str:
     for key in ("text", "summary_content", "content", "excerpt"):
         value = row.get(key)
@@ -388,6 +447,154 @@ def _row_time(row: Mapping[str, Any], memory_type: Any = None) -> float:
     return 0.0
 
 
+def _said_at(messages: Any, evidence: Any) -> float:
+    """When the user last wrote the quoted words in these messages (0.0 when
+    no message holds them or none is dated)."""
+    quote = re.sub(r"^(?:-\s*)?(?:user\s*:\s*)?", "", _normalized(evidence)).strip(
+        " \"'."
+    )
+    latest = 0.0
+    for row in messages or []:
+        if str(row.get("role") or "").lower() != "user":
+            continue
+        if quote and quote in _normalized(_row_text(row)):
+            latest = max(latest, _row_time(row, MemoryType.CONVERSATION_MEMORY))
+    return latest
+
+
+def _attribute_time(record: Any, attribute: str) -> float:
+    """When an entity's current value for ``attribute`` was written."""
+    for item in (record or {}).get("attributes") or []:
+        if (
+            isinstance(item, dict)
+            and str(item.get("name") or "").casefold() == str(attribute).casefold()
+        ):
+            for key in ("updated_at", "created_at"):
+                value = _parse_timestamp(
+                    item.get(key), naive_time_convention(MemoryType.ENTITY_MEMORY, key)
+                )
+                if value is not None:
+                    return value
+    return 0.0
+
+
+def _heard_in(record: Any, attribute: str, thread_id: str) -> bool:
+    """True when ``thread_id`` is where an entity's current value for
+    ``attribute`` came from, or a conversation that already confirmed it."""
+    thread = str(thread_id or "")
+    for item in (record or {}).get("attributes") or []:
+        if (
+            not isinstance(item, dict)
+            or str(item.get("name") or "").casefold() != str(attribute).casefold()
+        ):
+            continue
+        if str(item.get("thread_id") or "") == thread:
+            return True
+        value = _normalized(item.get("value"))
+        heard = [
+            *(item.get("confirmed_by") or []),
+            *[
+                entry
+                for entry in item.get("history") or []
+                if isinstance(entry, dict) and _normalized(entry.get("value")) == value
+            ],
+        ]
+        return any(
+            isinstance(entry, dict) and str(entry.get("thread_id") or "") == thread
+            for entry in heard
+        )
+    return False
+
+
+def _superseded_since(record: Any, value: Any, said_at: float) -> bool:
+    """True when ``value`` is one this entity held and has replaced since the
+    user said it: an earlier value in an attribute's history, or one a
+    consolidation pass retired. Said again from an older conversation, it
+    is the past, whatever attribute name the model files it under."""
+    wanted = _normalized(value)
+    if not wanted or not said_at or not isinstance(record, Mapping):
+        return False
+
+    def same(other: Any) -> bool:
+        held = _normalized(other)
+        return bool(held) and (
+            held == wanted
+            or (len(held) >= 4 and held in wanted)
+            or (len(wanted) >= 4 and wanted in held)
+        )
+
+    def after(stamp: Any) -> bool:
+        when = _parse_timestamp(
+            stamp, naive_time_convention(MemoryType.ENTITY_MEMORY, "updated_at")
+        )
+        return when is not None and when >= said_at
+
+    for attribute in record.get("attributes") or []:
+        if not isinstance(attribute, dict):
+            continue
+        for item in attribute.get("history") or []:
+            if (
+                isinstance(item, dict)
+                and item.get("applied") is not False
+                and same(item.get("value"))
+                and after(item.get("valid_to") or attribute.get("created_at"))
+            ):
+                return True
+    metadata = record.get("metadata")
+    retired = metadata.get("retired_attributes") if isinstance(metadata, dict) else None
+    return any(
+        isinstance(item, dict)
+        and same(item.get("value"))
+        and after(item.get("retired_at"))
+        for item in retired or []
+    )
+
+
+def _type_key(value: Any) -> str:
+    """An entity type for comparison: case and British or American spelling
+    ("organisation", "Organization") are not a difference."""
+    return re.sub(r"is(ation|e|ed|ing)\b", r"iz\1", str(value or "").casefold().strip())
+
+
+def _names_agree(left: Any, right: Any) -> bool:
+    """True when two entity names are one name: the same words whatever the
+    case and spacing, or one the initials of the other ("CFU" and "Counter
+    Fraud Unit")."""
+    first = re.findall(r"[a-z0-9]+", str(left or "").casefold())
+    second = re.findall(r"[a-z0-9]+", str(right or "").casefold())
+    if not first or not second:
+        return False
+    if first == second:
+        return True
+    for short, long in ((first, second), (second, first)):
+        if (
+            len(short) == 1
+            and len(long) >= 2
+            and len(short[0]) == len(long)
+            and short[0] == "".join(word[0] for word in long)
+        ):
+            return True
+    return False
+
+
+def _held_by_host(record: Any, attribute: str) -> bool:
+    """True when the entity's current value for ``attribute`` came from the
+    host application (source level 3).
+
+    A stated fact is the user's own later words, quoted, so it may replace
+    what the user said before or what the agent inferred. It never replaces
+    a value the host wrote."""
+    from ..long_term.semantic.entity_memory.entity_memory import source_level
+
+    for item in (record or {}).get("attributes") or []:
+        if (
+            isinstance(item, dict)
+            and str(item.get("name") or "").casefold() == str(attribute).casefold()
+        ):
+            return source_level(item) >= 3
+    return False
+
+
 def _op_label(op: "ConsolidationOp") -> str:
     """What a change did, for the memory history journal."""
     details = op.details
@@ -411,8 +618,15 @@ def _op_label(op: "ConsolidationOp") -> str:
     if op.kind == LINK_ROWS:
         return "Linked two notes about the same subject"
     if op.kind == ADD_FACT:
+        if details.get("beside") is not None:
+            return (
+                f"Noted {details.get('entity')}.{details.get('attribute')} "
+                "beside the host's value"
+            )
         verb = "Updated" if details.get("replaces") is not None else "Added"
         return f"{verb} {details.get('entity')}.{details.get('attribute')}"
+    if op.kind == REINFORCE_FACT:
+        return f"Confirmed {details.get('entity')}.{details.get('attribute')}"
     return op.reason
 
 
@@ -464,9 +678,10 @@ Below are entities, each with its stored attributes.
    fact under two names (favorite_drink and preferred_drink), or an answer to the same
    question that changed (home_city and current_city). Different facts that merely look
    alike are not a pair.
-2. Find entities that are the same person or thing under two names. An entity named
-   "user" is the person the assistant talks to; if another entity is that person, it is
-   the same entity.
+2. Find entities that are the same person or thing under two names, including a short
+   form or the initials of a longer name ("CFU" and "Counter Fraud Unit"). An entity
+   named "user" is the person the assistant talks to; if another entity is that person,
+   it is the same entity.
 
 Only list what you are sure of. Reply with JSON only, in this shape:
 {"same_fact": [{"entity_id": "...", "attributes": ["<name>", "<name>"]}],
@@ -515,6 +730,10 @@ of the user's lines. Use "user" as the entity for facts about the user. Attribut
 are short snake_case. Reply with JSON only, in this shape:
 {"facts": [{"entity": "user", "entity_type": "person", "attribute": "...", "value": "...", "evidence": "..."}]}
 Reply {"facts": []} when there is nothing new.
+
+When the user states again something listed under "Already known", do not put it in
+"facts". Add it to a second list, "confirmed", naming the known entity and attribute and
+quoting the user: {"confirmed": [{"entity": "...", "attribute": "...", "evidence": "..."}]}
 
 Already known:
 {known}
@@ -986,18 +1205,35 @@ class MemoryConsolidator:
         """The model names the pairs; the code decides what goes.
 
         Of two attributes holding one fact, the newer stays. Two entities
-        merge only when they also share at least two facts word for word.
+        merge only when they also share at least two facts word for word, or
+        one when their names already say so (the same name, or one the
+        initials of the other).
         """
         try:
             records = self.entities.list_entities(memory_id=memory_id, user_id=user_id)
         except Exception as exc:
             warnings.append(f"attribute review skipped: {type(exc).__name__}")
             return []
+
+        def _facts(record: Mapping[str, Any]) -> int:
+            return len(
+                [a for a in record.get("attributes") or [] if isinstance(a, dict)]
+            )
+
+        # A record with one fact is reviewed only when its name pairs it with
+        # another record: there is nothing else in it to compare.
+        paired = {
+            str(record.get("entity_id"))
+            for record in records
+            for other in records
+            if record is not other
+            and _names_agree(record.get("name"), other.get("name"))
+        }
         candidates = [
             record
             for record in records
-            if len([a for a in record.get("attributes") or [] if isinstance(a, dict)])
-            >= 2
+            if _facts(record) >= 2
+            or (_facts(record) == 1 and str(record.get("entity_id")) in paired)
         ]
         candidates.sort(
             key=lambda record: str(record.get("updated_at") or ""), reverse=True
@@ -1054,7 +1290,7 @@ class MemoryConsolidator:
                 continue
             records = [batch[i] for i in ids]
             types = {
-                str(record.get("entity_type")).casefold()
+                _type_key(record.get("entity_type"))
                 for record in records
                 if record.get("entity_type")
             }
@@ -1067,7 +1303,13 @@ class MemoryConsolidator:
                 for record in records
             ]
             shared = set.intersection(*facts)
-            if len(types) > 1 or len(shared) < 2:
+            # Names that already agree are evidence too, so one shared fact
+            # is enough; names alone never are.
+            named = all(
+                _names_agree(records[0].get("name"), record.get("name"))
+                for record in records[1:]
+            )
+            if len(types) > 1 or len(shared) < (1 if named else 2):
                 continue
             canonical = EntityMemory._choose_canonical(records)
             merged.update(ids)
@@ -1078,7 +1320,8 @@ class MemoryConsolidator:
                     target_id=str(canonical["entity_id"]),
                     reason=(
                         f"one entity under {len(ids)} names, sharing "
-                        f"{len(shared)} facts"
+                        f"{len(shared)} fact{'' if len(shared) == 1 else 's'}"
+                        + (" and a matching name" if named else "")
                     ),
                     details={
                         "duplicate_entity_ids": sorted(
@@ -1100,6 +1343,8 @@ class MemoryConsolidator:
         merged: set,
         warnings: List[str],
     ) -> List[ConsolidationOp]:
+        from ..long_term.semantic.entity_memory.entity_memory import source_level
+
         ops: List[ConsolidationOp] = []
         retired: Dict[str, set] = {}
         kept: Dict[str, set] = {}
@@ -1129,13 +1374,25 @@ class MemoryConsolidator:
             )
             first_at = str(first.get("updated_at") or "")
             second_at = str(second.get("updated_at") or "")
-            if first_at == second_at and not same_value:
+            # The source rule decides first: the value from the stronger
+            # source stays, whichever is newer. At the same level the newer
+            # one stays, as before.
+            first_level, second_level = source_level(first), source_level(second)
+            by_level = first_level != second_level
+            if by_level:
+                older, newer = (
+                    (second, first) if first_level > second_level else (first, second)
+                )
+            elif first_at == second_at and not same_value:
                 warnings.append(
                     f"kept {entity_id}.{first.get('name')} and "
                     f"{second.get('name')}: they disagree and neither is newer"
                 )
                 continue
-            older, newer = (first, second) if first_at <= second_at else (second, first)
+            else:
+                older, newer = (
+                    (first, second) if first_at <= second_at else (second, first)
+                )
             name = str(older.get("name")).casefold()
             keep = str(newer.get("name")).casefold()
             gone = retired.setdefault(entity_id, set())
@@ -1152,6 +1409,8 @@ class MemoryConsolidator:
                     reason=(
                         f"same fact as {newer.get('name')}"
                         if same_value
+                        else f"{newer.get('name')} comes from a stronger source"
+                        if by_level
                         else f"replaced by the newer {newer.get('name')}"
                     ),
                     details={
@@ -1218,8 +1477,10 @@ class MemoryConsolidator:
             warnings.append(f"fact extraction skipped: {type(exc).__name__}")
             return []
         known, known_values, known_lines = known_facts(records)
-        ops: List[ConsolidationOp] = []
-        seen: set = set()
+        # The newest statement of each fact wins, whichever conversation the
+        # model read first; a statement older than the stored value is not
+        # an update at all.
+        newest: Dict[Tuple[str, str], Tuple[float, ConsolidationOp]] = {}
         for thread_id in thread_ids[: self.config.max_threads]:
             try:
                 messages = self._thread_messages(memory_id, user_id, thread_id, since)
@@ -1245,19 +1506,73 @@ class MemoryConsolidator:
                 ),
                 warnings,
             )
-            for item in (answer or {}).get("facts") or []:
+            stated = list((answer or {}).get("facts") or [])
+            for item in (answer or {}).get("confirmed") or []:
+                # A known fact the user said again: its value is the stored
+                # one, so it can only ever be a confirmation.
+                if isinstance(item, Mapping):
+                    held = known.get(
+                        (
+                            self._stored_name(item.get("entity"), known),
+                            str(item.get("attribute") or "").strip().casefold(),
+                        )
+                    )
+                    if held is not None:
+                        stated.append({**item, "value": held[0]})
+            for item in stated:
                 op = self._valid_fact(item, said, known, known_values, thread_id)
                 if op is None:
                     continue
+                # The stored name, however the model spelled it: the time
+                # check below has to find the value it is compared with.
                 key = (
-                    _normalized(op.details["entity"]),
+                    self._stored_name(op.details["entity"], known),
                     op.details["attribute"].casefold(),
                 )
-                if key in seen:
-                    continue
-                seen.add(key)
-                ops.append(op)
-        return ops
+                said_at = _said_at(messages, op.details.get("evidence"))
+                if op.kind == REINFORCE_FACT:
+                    # Words older than the stored value are where it came
+                    # from, or the past; only a later statement confirms it.
+                    held = known.get(key)
+                    stored_at = _attribute_time(held[1] if held else None, key[1])
+                    if not said_at or (stored_at and stored_at >= said_at):
+                        continue
+                elif op.details.get("replaces") is not None and said_at:
+                    held = known.get(key)
+                    stored_at = _attribute_time(held[1] if held else None, key[1])
+                    if stored_at and stored_at >= said_at:
+                        continue
+                elif op.details.get("beside") is None and said_at:
+                    # Filed under a name memory does not use for it, an
+                    # old statement would bring a replaced value back.
+                    record = next(
+                        (
+                            held
+                            for (name, _), (_, held) in known.items()
+                            if name == key[0]
+                        ),
+                        None,
+                    )
+                    if _superseded_since(record, op.details["value"], said_at):
+                        continue
+                earlier = newest.get(key)
+                if earlier is None or said_at > earlier[0]:
+                    newest[key] = (said_at, op)
+        return [op for _, op in newest.values()]
+
+    @staticmethod
+    def _stored_name(
+        entity: Any,
+        known: Mapping[Tuple[str, str], Tuple[str, Mapping[str, Any]]],
+    ) -> str:
+        """The name memory holds an entity under. The model may spell it its
+        own way ("surveyor_panel" for "Surveyor Panel"): the same words are
+        the same entity."""
+        wanted = _normalized(entity)
+        if any(name == wanted for name, _ in known):
+            return wanted
+        spelled = _name_key(entity)
+        return next((name for name, _ in known if _name_key(name) == spelled), wanted)
 
     @staticmethod
     def _valid_fact(
@@ -1287,9 +1602,26 @@ class MemoryConsolidator:
         value_words = set(re.findall(r"[a-z0-9]{3,}", value.casefold()))
         if value_words and not value_words & set(re.findall(r"[a-z0-9]{3,}", evidence)):
             return None
-        existing = known.get((_normalized(entity), attribute))
+        wanted = MemoryConsolidator._stored_name(entity, known)
+        existing = known.get((wanted, attribute))
         if existing is not None and _normalized(existing[0]) == _normalized(value):
-            return None
+            # Said again. Unless this conversation is where the value came
+            # from (or it has confirmed it already), that is a confirmation.
+            if _heard_in(existing[1], attribute, thread_id):
+                return None
+            return ConsolidationOp(
+                kind=REINFORCE_FACT,
+                memory_type=MemoryType.ENTITY_MEMORY.value,
+                target_id=str(existing[1].get("entity_id") or ""),
+                reason="the user said this again; memory already holds it",
+                details={
+                    "entity": str(existing[1].get("name") or entity),
+                    "attribute": attribute,
+                    "value": existing[0],
+                    "evidence": str(item.get("evidence") or "")[:300],
+                    "thread_id": thread_id,
+                },
+            )
         # Already stored, under this entity or another name for it.
         if existing is None and (
             _normalized(value) in known_values
@@ -1297,6 +1629,13 @@ class MemoryConsolidator:
         ):
             return None
         record = existing[1] if existing is not None else None
+        if record is None:
+            # A new attribute of an entity memory already holds: add it to
+            # that record, under the name the record has.
+            record = next(
+                (held for (name, _), (_, held) in known.items() if name == wanted),
+                None,
+            )
         details: Dict[str, Any] = {
             "entity": entity,
             "entity_type": str(item.get("entity_type") or "").strip()[:40] or None,
@@ -1305,14 +1644,22 @@ class MemoryConsolidator:
             "evidence": str(item.get("evidence") or "")[:300],
             "thread_id": thread_id,
         }
-        if existing is not None:
+        stronger = existing is not None and _held_by_host(record, attribute)
+        if stronger:
+            # The host's value stands: what the user said is kept beside it
+            # in the attribute's history and replaces nothing.
+            details["beside"] = existing[0]
+        elif existing is not None:
             details["replaces"] = existing[0]
         return ConsolidationOp(
             kind=ADD_FACT,
             memory_type=MemoryType.ENTITY_MEMORY.value,
             target_id=str((record or {}).get("entity_id") or ""),
             reason=(
-                "the user said this; memory still had the old value"
+                "the user said this; the stored value came from the host "
+                "application, so it stays and this is kept beside it"
+                if stronger
+                else "the user said this; memory still had the old value"
                 if existing is not None
                 else "the user said this and it was not in memory"
             ),
@@ -1349,8 +1696,9 @@ class MemoryConsolidator:
             RETIRE_ATTRIBUTE: 0,
             ADD_FACT: 0,
         }
-        if any(op.kind == LINK_ROWS for op in plan.ops):
-            applied[LINK_ROWS] = 0
+        for optional in (LINK_ROWS, REINFORCE_FACT):
+            if any(op.kind == optional for op in plan.ops):
+                applied[optional] = 0
         errors: List[str] = []
         source = f"consolidation:{plan.plan_id}"
         # Retirements are applied per entity, one write each.
@@ -1365,7 +1713,10 @@ class MemoryConsolidator:
                 try:
                     with memory_change_context(label=_op_label(op)):
                         self._apply_one(op, plan, approver, reason, source)
-                    applied[op.kind] += 1
+                    if op.kind == ADD_FACT and op.details.get("beside") is not None:
+                        applied[FACT_NOT_APPLIED] = applied.get(FACT_NOT_APPLIED, 0) + 1
+                    else:
+                        applied[op.kind] += 1
                 except Exception as exc:
                     errors.append(f"{op.kind} {op.target_id}: {exc}")
             for entity_id, ops in retirements.items():
@@ -1419,6 +1770,8 @@ class MemoryConsolidator:
             self._suppress(op, plan.plan_id, approver, reason)
         elif op.kind == ADD_FACT:
             self._add_fact(op, plan, source)
+        elif op.kind == REINFORCE_FACT:
+            self._reinforce(op, plan, source)
         elif op.kind == LINK_ROWS:
             self._link(op, plan.plan_id)
         else:
@@ -1479,9 +1832,36 @@ class MemoryConsolidator:
         self, op: ConsolidationOp, plan: ConsolidationPlan, source: str
     ) -> None:
         details = op.details
-        if details.get("replaces") is not None and op.target_id:
+        target_id, record = self._live_target(op, plan)
+        # Two records that this plan merged can each have asked for the same
+        # fact; the survivor needs it once.
+        for held in record.get("attributes") or []:
+            if (
+                isinstance(held, dict)
+                and str(held.get("name") or "").casefold()
+                == str(details["attribute"]).casefold()
+                and str(held.get("value") or "").strip().casefold()
+                == str(details["value"]).strip().casefold()
+            ):
+                return
+        # A plan made before the source rule could ask to replace a value the
+        # host wrote: that value stays, whatever the plan says.
+        replaces = details.get("replaces") is not None and not _held_by_host(
+            record, details["attribute"]
+        )
+        replaced_value = next(
+            (
+                str(held.get("value") or "")
+                for held in record.get("attributes") or []
+                if isinstance(held, dict)
+                and str(held.get("name") or "").casefold()
+                == str(details["attribute"]).casefold()
+            ),
+            "",
+        )
+        if replaces and target_id:
             self.entities.retire_attributes(
-                op.target_id,
+                target_id,
                 memory_id=plan.memory_id,
                 user_id=plan.user_id,
                 retirements=[
@@ -1493,10 +1873,12 @@ class MemoryConsolidator:
                 ],
                 retired_by=plan.plan_id,
             )
-        self.entities.upsert_entity(
-            entity_id=op.target_id or None,
-            name=details["entity"],
-            entity_type=details.get("entity_type"),
+        written = self.entities.upsert_entity(
+            entity_id=target_id or None,
+            # A fact added to a record keeps the record's own name and type:
+            # the model's spelling of them is not a rename.
+            name=record.get("name") or details["entity"],
+            entity_type=record.get("entity_type") or details.get("entity_type"),
             attributes=[
                 {
                     "name": details["attribute"],
@@ -1507,7 +1889,92 @@ class MemoryConsolidator:
             ],
             memory_id=plan.memory_id,
             user_id=plan.user_id,
+            # Written at the lowest source level: a later statement from the
+            # user or a write from the host replaces it, and on its own it
+            # never replaces a value the host wrote.
+            source_level=1,
         )
+        # The user's words stay with the fact, so a later pass can check
+        # they are still in the conversation (learning/verification.py).
+        from .verification import record_fact_evidence
+
+        record_fact_evidence(
+            self.provider,
+            self.agent_id,
+            entity_id=str(target_id or (written if isinstance(written, str) else "")),
+            entity=str(record.get("name") or details["entity"]),
+            attribute=details["attribute"],
+            value=details["value"],
+            evidence=str(details.get("evidence") or ""),
+            thread_id=details.get("thread_id"),
+            memory_id=plan.memory_id,
+            user_id=plan.user_id,
+            plan_id=plan.plan_id,
+        )
+        if replaces and target_id and replaced_value:
+            # The old value went to the retired shelf, not the history, so
+            # the write above did not see a value being replaced.
+            self.entities.notify_superseded(
+                {**record, "entity_id": target_id},
+                [
+                    {
+                        "attribute": details["attribute"],
+                        "old_value": replaced_value,
+                        "new_value": details["value"],
+                        "at": utc_now_iso(),
+                    }
+                ],
+            )
+
+    def _reinforce(
+        self, op: ConsolidationOp, plan: ConsolidationPlan, source: str
+    ) -> None:
+        details = op.details
+        target_id, _record = self._live_target(op, plan)
+        counted = self.entities.reinforce_attribute(
+            details["attribute"],
+            entity_id=target_id or None,
+            value=details["value"],
+            source=source,
+            thread_id=details.get("thread_id"),
+            source_level=2,
+            memory_id=plan.memory_id,
+            user_id=plan.user_id,
+        )
+        if not counted:
+            raise ValueError("the value is no longer current")
+
+    def _live_target(
+        self, op: ConsolidationOp, plan: ConsolidationPlan
+    ) -> Tuple[str, Dict]:
+        """The record a fact should land on: the op's own, or, when this plan
+        merged that record away, the copy the merge kept. A fact aimed at a
+        merged-away id would otherwise fail, or start a stray record."""
+
+        def live(entity_id: Any) -> Optional[Dict]:
+            if not entity_id:
+                return None
+            found = self.entities.get_entity(
+                str(entity_id), memory_id=plan.memory_id, user_id=plan.user_id
+            )
+            if isinstance(found, dict) and not found.get("superseded_by"):
+                return found
+            return None
+
+        record = live(op.target_id)
+        if record is not None or not op.target_id:
+            return op.target_id, record or {}
+        for other in plan.ops:
+            if other.kind != MERGE_ENTITIES:
+                continue
+            group = [other.target_id, *other.details.get("duplicate_entity_ids", [])]
+            if op.target_id not in group:
+                continue
+            for entity_id in group:
+                kept = live(entity_id)
+                if kept is not None:
+                    return str(entity_id), kept
+        return op.target_id, {}
 
     # -- undoing -------------------------------------------------------------
 
@@ -1571,6 +2038,7 @@ __all__ = [
     "AUTOMATIC_APPROVER",
     "LINK_ROWS",
     "MERGE_ENTITIES",
+    "REINFORCE_FACT",
     "RETIRE_ATTRIBUTE",
     "SUPPRESS_DUPLICATE",
     "ConsolidationConfig",

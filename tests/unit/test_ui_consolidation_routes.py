@@ -183,6 +183,10 @@ def test_plan_apply_and_undo_consolidation_from_the_page(seeded):
             }
 
             html = client.get("/learning-control-plane?agent_id=agent-1").text
+            # The panel folds to one row above the events, and opens itself
+            # when a plan is waiting to be read.
+            panel = html.split('id="memory-consolidation"')[1].split(">")[0]
+            assert panel.endswith(" open")
             assert "Apply 3 change(s)" in html
             assert "Ada Lovelace" in html and "user.city" in html
             assert "“I moved to Lisbon”" in html

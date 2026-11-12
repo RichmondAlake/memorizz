@@ -5,7 +5,7 @@
 {% block body_attrs %} class="page-playground" data-sidebar-scope="playground" data-sidebar-default="collapsed"{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="/static/css/playground.css?v=21">
+<link rel="stylesheet" href="/static/css/playground.css?v=23">
 <link rel="stylesheet" href="/static/css/pages/memory-evolution.css?v=8">
 <script src="/static/js/memory-evolution.js?v=8" defer></script>
 <script src="/static/js/context-history.js?v=2" defer></script>
@@ -16,6 +16,7 @@
 <script src="/static/js/safe-markdown.js?v=2"></script>
 <script src="/static/js/local-models.js?v=1"></script>
 <script src="/static/js/playground-timers.js?v=1" defer></script>
+<script src="/static/js/chat-preview.js?v=1" defer></script>
 <style>
     /* Local-model manager widget styles are shared in styles.css
        (.local-model-status .model-manager etc). Below: page-specific rules.
@@ -1548,7 +1549,7 @@ function serializeConfigCollections() {
         skillPathsHidden.value = JSON.stringify(collectSkillPaths());
         return true;
     } catch (err) {
-        alert(err.message);
+        MemorizzDialogs.notify(err.message);
         return false;
     }
 }
@@ -1990,6 +1991,7 @@ function pgSetAgentName(name) {
     document.querySelectorAll('.pg-message--assistant .pg-message-role').forEach(function(el) { el.textContent = name; });
     document.querySelectorAll('.pg-message--assistant .pg-agent-mark').forEach(function(el) { el.textContent = initial; });
     document.querySelectorAll('.pg-empty-title').forEach(function(el) { el.textContent = `How can ${name} help?`; });
+    document.querySelectorAll('.pg-empty-mark').forEach(function(el) { el.textContent = initial; });
 }
 
 function pgStartAgentRename() {
@@ -2043,18 +2045,21 @@ function pgStartAgentRename() {
 function renderThreadEmptyState(memoryId) {
     const container = document.getElementById('playground-messages');
     if (!container) return;
+    // Each suggestion with its icon path (24px grid, stroked).
     const starters = [
-        'What do you remember about me?',
-        'Which tools can you use?',
-        'Summarize our previous conversations.',
+        ['What do you remember about me?', 'M12 8v4l2.5 2.5M3.5 12a8.5 8.5 0 1 0 2.6-6.1M3.5 4.5v4h4'],
+        ['Which tools can you use?', 'M14.5 6.5a4 4 0 0 0-5.4 5.1L4 16.7V20h3.3l5.1-5.1a4 4 0 0 0 5.1-5.4l-2.6 2.6-2.4-.6-.6-2.4z'],
+        ['Summarize our previous conversations.', 'M5 6h14M5 12h14M5 18h9'],
     ];
+    const name = pgAgentName();
     container.innerHTML = `
         <div class="pg-empty">
-            <h2 class="pg-empty-title">How can ${escapeHtml(pgAgentName())} help?</h2>
+            <span class="pg-empty-mark" aria-hidden="true">${escapeHtml((name.trim()[0] || 'A').toUpperCase())}</span>
+            <h2 class="pg-empty-title">How can ${escapeHtml(name)} help?</h2>
             <p class="pg-empty-hint">Messages stream live. The inspector shows what reaches the model: context use, memory and prompt-cache reuse.</p>
             <div class="pg-starters">
-                ${starters.map(function(text) {
-                    return `<button type="button" class="pg-starter" data-starter="${escapeHtml(text)}">${escapeHtml(text)}</button>`;
+                ${starters.map(function(item) {
+                    return `<button type="button" class="pg-starter" data-starter="${escapeHtml(item[0])}"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${item[1]}"/></svg>${escapeHtml(item[0])}</button>`;
                 }).join('')}
             </div>
         </div>
@@ -2108,18 +2113,43 @@ function renderThreadMessages(messages, memoryId) {
         return;
     }
 
-    // A turn's activity is recorded just before its question; show it
-    // between the question and the answer.
-    messages = messages.slice();
-    for (let i = 0; i < messages.length - 1; i++) {
+    // Show a turn's activity between its question and its answer. A turn
+    // run in the playground stores the activity just before the question; a
+    // turn run through the SDK stores it just after the answer.
+    const isTrace = function(item) { return Boolean(item && item.message_type === 'trace_bundle'); };
+    const roleOf = function(item) { return String((item && item.role) || '').toLowerCase(); };
+    const ordered = [];
+    const withActivity = new Set();
+    for (let i = 0; i < messages.length; i++) {
         const current = messages[i];
-        const next = messages[i + 1];
-        if (current && current.message_type === 'trace_bundle' && next && String(next.role || '').toLowerCase() === 'user') {
-            messages[i] = next;
-            messages[i + 1] = current;
-            i++;
+        if (!isTrace(current)) {
+            ordered.push(current);
+            continue;
         }
+        // After an answer whose question has no activity yet: it is that turn's.
+        let question = -1;
+        if (ordered.length >= 2 && roleOf(ordered[ordered.length - 1]) === 'assistant') {
+            for (let j = ordered.length - 2; j >= 0; j--) {
+                const role = roleOf(ordered[j]);
+                if (isTrace(ordered[j]) || role === 'assistant') break;
+                if (role === 'user') { question = j; break; }
+            }
+        }
+        if (question >= 0 && !withActivity.has(ordered[question])) {
+            withActivity.add(ordered[question]);
+            ordered.splice(question + 1, 0, current);
+            continue;
+        }
+        const next = messages[i + 1];
+        if (next && roleOf(next) === 'user') {
+            withActivity.add(next);
+            ordered.push(next, current);
+            i++;
+            continue;
+        }
+        ordered.push(current);
     }
+    messages = ordered;
 
     messages.forEach(function(msg) {
         if (
@@ -2912,10 +2942,14 @@ async function loadThreadMessages(memoryId, options = {}) {
         const response = await fetch(
             `/agents/${AGENT_ID}/playground/thread?memory_id=${encodeURIComponent(normalized)}`
         );
-        if (!response.ok) {
+        // A conversation that was just started is not saved until its first
+        // message, so the server does not know it yet: that is an empty
+        // conversation, not a failure.
+        const unsaved = response.status === 404;
+        if (!response.ok && !unsaved) {
             throw new Error(`HTTP ${response.status}`);
         }
-        const payload = await response.json();
+        const payload = unsaved ? {messages: []} : await response.json();
         if (requestSeq !== threadLoadSequence) return;
         const messages = Array.isArray(payload.messages) ? payload.messages : [];
         console.debug('[playground] Thread data loaded:', {
@@ -2995,6 +3029,23 @@ function startNewThread() {
 function initThreadTabs() {
     const memoryEl = document.getElementById('pg-memory-id');
     if (!memoryEl) return;
+
+    // A message typed on the Playground home arrives as ?prompt=: start a new
+    // conversation with it. The parameter is dropped first, so a reload or
+    // the back button never sends it twice.
+    const params = new URLSearchParams(window.location.search);
+    const handoff = (params.get('prompt') || '').trim();
+    const queryEl = document.getElementById('pg-query');
+    if (handoff && queryEl) {
+        params.delete('prompt');
+        const rest = params.toString();
+        window.history.replaceState(null, '', window.location.pathname + (rest ? '?' + rest : ''));
+        startNewThread();
+        queryEl.value = handoff;
+        pgAutosize();
+        if (document.body.dataset.readOnly !== 'true') void sendMessage();
+        return;
+    }
 
     const currentMemoryId = (memoryEl.value || '').trim();
     setActiveThreadTab(currentMemoryId);
@@ -3444,8 +3495,15 @@ function renderApprovalCard(messageContainer, payload) {
     if (!proposal.arguments && proposalId) void pgLoadApprovalArguments(card, proposalId);
 
     async function decide(action) {
-        const approverId = window.prompt('Approver identity (email or operator ID):', 'local-ui');
-        if (!approverId || !approverId.trim()) return;
+        let savedApprover = 'local-ui';
+        try { savedApprover = localStorage.getItem('memorizzApproverId') || savedApprover; } catch (_) {}
+        const approverId = await MemorizzDialogs.prompt(action === 'approve' ? 'Approve this call?' : 'Reject this call?', {
+            detail: 'The decision is recorded under this identity.',
+            label: 'Approver identity (email or operator ID)', value: savedApprover, required: true,
+            confirmLabel: action === 'approve' ? 'Approve' : 'Reject',
+        });
+        if (approverId === null) return;
+        try { localStorage.setItem('memorizzApproverId', approverId.trim()); } catch (_) {}
         approveButton.disabled = true;
         rejectButton.disabled = true;
         status.textContent = action === 'approve' ? 'Recording approval…' : 'Rejecting…';

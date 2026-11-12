@@ -373,6 +373,15 @@ def test_local_runtime_creates_persisted_agent_and_blocks_remote_creation(
     assert "workflow_memory" in updated_persisted.memory_types
     assert "skillbox" in updated_persisted.memory_types
 
+    # The holdout share is the operator's to set, within 0 to 1.
+    assert updated["agent"]["holdout_rate"] == 0.1
+    held = runtime.update_agent(agent_id, identity, holdout_rate=0.25)
+    assert held["agent"]["holdout_rate"] == 0.25
+    stored_config = provider.retrieve_memagent(agent_id).continual_learning_config
+    assert stored_config["holdout_rate"] == 0.25
+    with pytest.raises(MemorizzServerError, match="between 0 and 1"):
+        runtime.update_agent(agent_id, identity, holdout_rate=1.5)
+
     # Recalculating mode defaults must not drop an already-enabled learning
     # agent's required workflow/skill stores.
     runtime.update_agent(agent_id, identity, application_mode="assistant")
@@ -750,7 +759,7 @@ def test_memorizz_server_works_over_real_stdio_protocol(tmp_path, monkeypatch):
     tools = manager.list_tools("memorizz-server")
     names = {tool["name"] for tool in tools["tools"]}
     assert tools["ok"] is True
-    assert len(names) == 61
+    assert len(names) == 63
     assert {
         "memorizz_start_timer",
         "memorizz_list_timers",

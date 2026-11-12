@@ -29,7 +29,11 @@ context, run `memorizz plugin memory-id` in the project folder.
 - "What did we do last time?": search `summaries`, then `conversation_memory`
   for detail. A result's `thread_id` names its session; read that session in
   order with `memorizz_get_conversation` (memory_id, thread_id).
-- About a person, service or system: `memorizz_lookup_entities`.
+- About a person, service or system: `memorizz_lookup_entities`. A name also
+  matches an alias. Each attribute has a `level` (3 set by the host or pinned,
+  2 stated by the user, 1 inferred) and, if its value changed, a `timeline`
+  of earlier values with dates. Answer from the current value; use the
+  timeline only when the user asks what something used to be.
 - About the user, or work outside this project: search memory ID `personal`
   too. It holds what the user's connected apps (Grok Bot, ChatGPT, Claude)
   saved; the session start lists the newest if there are any.
@@ -53,6 +57,9 @@ a future session would otherwise rediscover.
   code.
 - Facts about a person, service or system with attributes (owner, URL, version,
   depends-on) go in as entities with `memorizz_upsert_entity`.
+  If the result lists an attribute under `not_applied`, the stored value
+  comes from a stronger source and was kept: tell the user rather than
+  retrying.
 - Preferences that apply across projects go under memory ID `user-preferences`.
 - Tell the user briefly what you saved.
 

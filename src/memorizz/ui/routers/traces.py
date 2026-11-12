@@ -678,10 +678,40 @@ async def traces_page(
         content_mode=content_mode,
     )
 
+    # The landing page (no agent chosen) opens on what ran: the newest runs
+    # of the last 7 days, read the way the Overview reads them.
+    recent_runs: List[Dict[str, Any]] = []
+    run_agent_names: Dict[str, str] = {}
+    from datetime import timezone
+
+    from .. import dashboard as dash
+
+    run_now = datetime.now(timezone.utc)
+
+    # Not under a search or a tag filter: those narrow the page, and this
+    # list would show runs outside them.
+    if not selected_agent_id and not agent_query and not tag_filter:
+        try:
+            from starlette.concurrency import run_in_threadpool
+
+            health = await run_in_threadpool(
+                lambda: dash.load_run_health(
+                    request, "7d", now=run_now, action="trace_recent_runs"
+                )
+            )
+            recent_runs = (health["overview"] or {}).get("recent") or []
+            run_agent_names = dash._agent_names() if recent_runs else {}
+        except Exception:
+            logger.debug("Recent runs unavailable on Observability", exc_info=True)
+
     return templates.TemplateResponse(
         "observability.html",
         {
             "request": request,
+            "recent_runs": recent_runs,
+            "run_agent_names": run_agent_names,
+            "generated_at": run_now,
+            **dash.template_helpers(),
             "provider_type": _state["provider_type"],
             "connection_info": _state["connection_info"],
             "agents_nav": _build_agent_nav_items(

@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% from '_ui.html' import page_header, empty_state %}
+
+{% block title %}Activity - Memorizz{% endblock %}
+
+{% block content %}
+{{ page_header('Activity', 'Changes made through this UI: who, what and when. Chat messages are not listed; message text, form values and secrets are never recorded.') }}
+
+{% if rows %}
+<div class="fleet-bar">
+    <label class="fleet-search">
+        <kbd aria-hidden="true">/</kbd>
+        <input type="search" id="act-filter" data-monitor-filter-for="act-table" placeholder="Filter by person, action or ID" aria-label="Filter activity" autocomplete="off">
+    </label>
+    {% if areas|length > 1 %}
+    <div class="fleet-order">
+        <label for="act-area">Area</label>
+        <select id="act-area" data-monitor-field="area">
+            <option value="">All areas</option>
+            {% for area in areas %}<option value="{{ area }}">{{ area }}</option>{% endfor %}
+        </select>
+    </div>
+    {% endif %}
+    {% if actors|length > 1 %}
+    <div class="fleet-order">
+        <label for="act-actor">Person</label>
+        <select id="act-actor" data-monitor-field="actor">
+            <option value="">Everyone</option>
+            {% for actor in actors %}<option value="{{ actor }}">{{ actor }}</option>{% endfor %}
+        </select>
+    </div>
+    {% endif %}
+    <p class="fleet-keys" aria-label="Keyboard shortcuts"><span><kbd>j</kbd> <kbd>k</kbd> move</span><span><kbd>/</kbd> filter</span></p>
+</div>
+
+<div class="fleet-table-wrap">
+    <table class="fleet-table" id="act-table">
+        <caption class="visually-hidden">Changes made through this UI, newest first</caption>
+        <thead>
+            <tr>
+                <th scope="col" aria-sort="descending"><button type="button" data-sort="when">When</button></th>
+                <th scope="col" aria-sort="none"><button type="button" data-sort="actor" data-sort-type="text">Who</button></th>
+                <th scope="col" aria-sort="none"><button type="button" data-sort="area" data-sort-type="text">Area</button></th>
+                <th scope="col">What</th>
+                <th scope="col">Record</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+            <tr data-key="{{ loop.index0 }}" data-when="{{ rows|length - loop.index0 }}" data-area="{{ row.area }}" data-actor="{{ row.actor }}"
+                data-search="{{ (row.actor ~ ' ' ~ row.area ~ ' ' ~ row.action ~ ' ' ~ row.target ~ ' ' ~ row.path)|lower }}" tabindex="-1">
+                <td class="mono" title="{{ row.timestamp }}">{{ row.timestamp[:16]|replace('T', ' ') }}</td>
+                <td>{{ row.actor }}</td>
+                <td><span class="pill">{{ row.area }}</span></td>
+                <td title="{{ row.method }} {{ row.path }}">{{ row.action }}</td>
+                <td class="mono">{{ row.target or '—' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <p class="fleet-none" hidden>No activity matches this filter.</p>
+</div>
+<p class="form-note">Times are UTC. The newest {{ rows|length }} entries of <span class="mono">{{ log_path }}</span>. Set your name with the person button in the top bar so your changes carry it.</p>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    MemorizzMonitor.init({ table: 'act-table' });
+});
+</script>
+{% else %}
+{{ empty_state('No changes recorded yet', 'Creating or editing an agent, deciding an approval, applying a memory plan, changing settings and similar actions appear here from now on.', '/agents', 'Open agents') }}
+{% endif %}
+{% endblock %}

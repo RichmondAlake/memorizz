@@ -68,6 +68,8 @@ nav:
       - Forgetting Mechanism: guides/forgetting-mechanism.md
       - Memory Consolidation: guides/memory-consolidation.md
       - Persona Learning: guides/persona-learning.md
+      - Refine cycle: guides/refine-cycle.md
+      - Tool Learning: guides/tool-learning.md
       - Memory Routing & Reranking: guides/memory-routing.md
       - Decision Models: guides/decision-models.md
       - Fine-Tuning Models: guides/fine-tuning.md

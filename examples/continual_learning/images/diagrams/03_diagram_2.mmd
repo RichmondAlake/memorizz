@@ -1,0 +1,19 @@
+sequenceDiagram
+    autonumber
+    participant H as Host app (policy handbook)
+    participant P as Priya
+    participant A as Ada (chat model)
+    participant C as Capture (background model)
+    participant E as Entity memory
+    H->>E: Grade 1 TPA = £2,500 (level 3, true from Sept 2026)
+    P->>A: "I think Grade 1 TPA is £3,500 now…"
+    A-->>P: a reply
+    A->>C: after the turn: anything to file?
+    C->>E: Grade 1 TPA = £3,500 (level 2)
+    E-->>C: kept the stronger value · £3,500 stored as "not applied"
+    H->>E: Grade 1 TPA = £3,000 (level 3, true from 4 Jan 2027)
+    E-->>H: superseded · £2,500 kept: true Sept 2026 to Jan 2027
+    E->>E: flag the note and the skill that still say £2,500
+    P->>A: "Can Tom pay £2,800 himself?"
+    E-->>A: current values only: £3,000
+    A-->>P: "Yes."

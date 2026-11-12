@@ -1,0 +1,14 @@
+flowchart LR
+    L[("The morning's<br/>tool log")] --> E{"What did the<br/>code find, twice?"}
+    E -->|"calls refused"| N["Usage note<br/>and example call"]
+    E -->|"requests that missed"| X["Example request"]
+    E -->|"requests that went<br/>to a neighbour"| V["Not for this, use that"]
+    N --> C{"Passes the<br/>code's checks?"}
+    X --> C
+    V --> C
+    C -->|no| RF["Refused,<br/>with a reason"]
+    C -->|yes| P{"A person<br/>approves?"}
+    P -->|no| DM["Dismissed,<br/>nothing written"]
+    P -->|yes| W["Written to the<br/>catalogue entry"]
+    W --> RT["The router searches:<br/>description and examples"]
+    W --> MD["The model is shown:<br/>docstring, notes, Not-for lines,<br/>example call"]

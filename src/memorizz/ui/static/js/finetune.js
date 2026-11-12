@@ -620,7 +620,7 @@
       }
     };
     const remove = async () => {
-      if (!confirm(`Delete "${d.name}" with its ${c.total} examples and its run records? The trained model folders stay on disk.`)) return;
+      if (!(await window.MemorizzDialogs.confirm(`Delete "${d.name}" with its ${c.total} examples and its run records?`, { detail: "The trained model folders stay on disk.", confirmLabel: "Delete dataset" }))) return;
       await api(`/api/finetune/datasets/${d.dataset_id}`, { method: "DELETE" });
       await refreshOverview();
       loadModels();
@@ -933,7 +933,7 @@
         h("button", { class: "btn btn-sm btn-primary", type: "button", disabled: readOnly, title: "Accept every example the blind check agreed with", onclick: async () => { const r = await api(`/api/finetune/datasets/${S.datasetId}/accept-verified`, { method: "POST" }); await after(); say(note, `Accepted ${r.accepted} checked examples.`); } }, "Accept all checked (✓)"),
         h("button", { class: "btn btn-sm", type: "button", disabled: readOnly, onclick: () => bulk("accepted") }, "Accept ticked"),
         h("button", { class: "btn btn-sm", type: "button", disabled: readOnly, onclick: () => bulk("rejected") }, "Reject ticked"),
-        h("button", { class: "btn btn-sm btn-danger", type: "button", disabled: readOnly, onclick: async () => { if (!S.selected.size) return say(note, "Tick some examples first."); if (!confirm(`Delete ${S.selected.size} examples?`)) return; await api("/api/finetune/examples/delete", { method: "POST", body: { ids: [...S.selected] } }); await after(); } }, "Delete ticked"),
+        h("button", { class: "btn btn-sm btn-danger", type: "button", disabled: readOnly, onclick: async () => { if (!S.selected.size) return say(note, "Tick some examples first."); if (!(await window.MemorizzDialogs.confirm(`Delete ${S.selected.size} examples?`, { confirmLabel: "Delete examples" }))) return; await api("/api/finetune/examples/delete", { method: "POST", body: { ids: [...S.selected] } }); await after(); } }, "Delete ticked"),
         note,
       ),
       S.examples.length

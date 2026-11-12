@@ -7,7 +7,7 @@ panel empty with a reason instead of failing the page.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import quote, urlencode
@@ -243,6 +243,54 @@ def load_verdicts(limit: int = VERDICT_RECORD_LIMIT) -> List[Dict[str, Any]]:
     return rows
 
 
+# What the Overview's change figures can compare with, and how far back each
+# one starts. "previous" is the same length of time right before the window.
+COMPARE_STEPS = {"day": timedelta(days=1), "week": timedelta(days=7)}
+COMPARE_LABELS = {
+    "previous": "the period before",
+    "day": "the same time yesterday",
+    "week": "the same time last week",
+}
+
+
+def compare_choices(span: Dict[str, Any]) -> List[Dict[str, str]]:
+    """The comparisons this window allows: one that would overlap is left out."""
+    length = span["end"] - span["start"]
+    return [
+        {"key": key, "label": label}
+        for key, label in COMPARE_LABELS.items()
+        if key == "previous" or COMPARE_STEPS[key] > length
+    ]
+
+
+def row_trends(
+    events: List[Dict[str, Any]], overview: Dict[str, Any]
+) -> Dict[str, Dict[str, List[int]]]:
+    """Calls per chart period for each tool and each model, for the small
+    trend lines in the Overview's tables. Keys are ``tools`` and ``models``."""
+    start = overview["window_start"]
+    size = max(1, int(overview["bucket_seconds"]))
+    count = max(1, len(overview["series"]))
+    trends: Dict[str, Dict[str, List[int]]] = {"tools": {}, "models": {}}
+    for event in events:
+        kind = event.get("trace_kind")
+        if kind == "tool_result":
+            group, name = "tools", event.get("logical_tool_name") or event.get(
+                "tool_name"
+            )
+        elif kind == "model_result":
+            group, name = "models", event.get("model")
+        else:
+            continue
+        stamp = timestamp(event.get("timestamp"))
+        if not name or not stamp:
+            continue
+        index = int((datetime.fromisoformat(stamp) - start).total_seconds() // size)
+        if 0 <= index < count:
+            trends[group].setdefault(str(name), [0] * count)[index] += 1
+    return trends
+
+
 def load_run_health(
     request: Request,
     window: str,
@@ -252,13 +300,17 @@ def load_run_health(
     load: bool = False,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    compare: bool = False,
+    compare_to: str = "previous",
 ) -> Dict[str, Any]:
     """Read recent traces once and summarize them; shared by overview pages.
 
     ``window`` is a key of ``WINDOWS`` or ``custom`` from ``start`` to ``end``.
     Returns ``overview`` (or None), ``events`` inside the window, ``span``,
-    ``error``, ``deferred`` and ``coverage``. Never raises for missing access
-    or stores.
+    ``error``, ``deferred`` and ``coverage``. With ``compare``, ``previous``
+    holds the totals of the same length of time before the window, or None
+    when that time holds no runs or was not read in full. Never raises for
+    missing access or stores.
     """
     span = resolve_window(window, start=start, end=end, now=now)
     result: Dict[str, Any] = {
@@ -268,6 +320,8 @@ def load_run_health(
         "error": None,
         "deferred": _state.get("provider_type") in DEFERRED_PROVIDERS and not load,
         "coverage": {},
+        "previous": None,
+        "compare_to": "previous",
     }
     if result["deferred"]:
         return result
@@ -342,6 +396,27 @@ def load_run_health(
         "oldest": datetime.fromisoformat(min(times)) if times else None,
     }
     result["overview"] = overview
+    if compare:
+        # The same events hold the time before the window only when the read
+        # reached back that far; a partial earlier period would understate it.
+        length = span["end"] - span["start"]
+        # "The same time yesterday" or "last week" only when the window is no
+        # longer than that step; a longer window would overlap itself.
+        step = COMPARE_STEPS.get(compare_to)
+        if step is None or step < length:
+            step, compare_to = length, "previous"
+        result["compare_to"] = compare_to
+        earlier = span["start"] - step
+        oldest = result["coverage"]["oldest"]
+        if not result["coverage"]["truncated"] or (oldest and oldest <= earlier):
+            totals = build_operations_overview(
+                events,
+                now=now,
+                price=price,
+                span={**span, "start": earlier, "end": earlier + length},
+                recent_limit=0,
+            )["totals"]
+            result["previous"] = totals if totals["runs"] else None
     audit_trace_view(
         request,
         action,
@@ -420,6 +495,58 @@ def coding_agent_sessions(
     return sorted(rows.values(), key=lambda row: (row["label"], row["model"]))
 
 
+def _delta(current, previous, *, worse_when_up: Optional[bool] = None, points=False):
+    """One figure's change from the period before, for its tile.
+
+    ``points`` compares two percentages by their difference. The tone is set
+    only where a direction is good or bad (``worse_when_up``), and only for a
+    change large enough to act on.
+    """
+    if current is None or previous is None:
+        return None
+    if points:
+        amount = float(current) - float(previous)
+        text, notable = f"{abs(amount):.1f} pts", abs(amount) >= 0.5
+    else:
+        from .usage_view import change
+
+        amount = change(current, previous)
+        if amount is None:
+            return None
+        text, notable = f"{abs(amount):.0f}%", abs(amount) >= 5
+    if text in {"0.0 pts", "0%"}:
+        return {"arrow": "", "text": "No change", "tone": ""}
+    tone = ""
+    if worse_when_up is not None and notable:
+        tone = "is-bad" if (amount > 0) == worse_when_up else "is-good"
+    return {"arrow": "▲" if amount > 0 else "▼", "text": text, "tone": tone}
+
+
+def period_deltas(current, previous) -> Dict[str, Any]:
+    """Each headline figure's change from the period before; empty when there
+    is nothing to compare with."""
+    if not current or not previous:
+        return {}
+
+    def tokens(totals):
+        return totals["input_tokens"] + totals["output_tokens"]
+
+    figures = {
+        "runs": _delta(current["runs"], previous["runs"]),
+        "success_rate": _delta(
+            current["success_rate"],
+            previous["success_rate"],
+            worse_when_up=False,
+            points=True,
+        ),
+        "p95_ms": _delta(current["p95_ms"], previous["p95_ms"], worse_when_up=True),
+        "model_calls": _delta(current["model_calls"], previous["model_calls"]),
+        "tokens": _delta(tokens(current), tokens(previous)),
+        "cost_usd": _delta(current["cost_usd"], previous["cost_usd"]),
+    }
+    return {key: value for key, value in figures.items() if value}
+
+
 def build_dashboard_context(
     request: Request,
     window: str,
@@ -428,6 +555,7 @@ def build_dashboard_context(
     load: bool = False,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    compare_to: str = "previous",
 ) -> Dict[str, Any]:
     """Collect the overview, per-model usage, automations and agent names."""
     now = datetime.now(timezone.utc)
@@ -439,6 +567,8 @@ def build_dashboard_context(
         load=load,
         start=start,
         end=end,
+        compare=True,
+        compare_to=compare_to,
     )
     span = health["span"]
     context: Dict[str, Any] = {
@@ -447,7 +577,15 @@ def build_dashboard_context(
         "span": span,
         "generated_at": now,
         "overview": health["overview"],
+        "deltas": period_deltas(
+            (health["overview"] or {}).get("totals"), health["previous"]
+        ),
         "usage": None,
+        "compare_to": health["compare_to"],
+        "compare_label": COMPARE_LABELS[health["compare_to"]],
+        "compare_choices": compare_choices(span),
+        "compared": health["previous"] is not None,
+        "trends": {"tools": {}, "models": {}},
         "trace_error": health["error"],
         "deferred": health["deferred"],
         "loaded": load,
@@ -463,6 +601,10 @@ def build_dashboard_context(
     overview = health["overview"]
     if overview is None:
         return context
+    try:
+        context["trends"] = row_trends(health["events"], overview)
+    except Exception:
+        logger.debug("Overview row trends unavailable", exc_info=True)
     pricing = getattr(request.app.state, "usage_pricing", None) or DEFAULT_PRICING
     try:
         context["usage"] = aggregate_usage(
@@ -509,6 +651,68 @@ def build_dashboard_context(
     return context
 
 
+def getting_started(stats: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """First steps for the Overview of a store that is new or barely used.
+
+    ``done`` comes from what the store holds; opening a trace leaves nothing
+    in the store, so the page marks that step itself (``visit``).
+    """
+
+    def has(key: str) -> bool:
+        return int(stats.get(key) or 0) > 0
+
+    # A store in regular use is past first steps, whatever it leaves unused.
+    if has("agents") and int(stats.get("conversation_memory") or 0) >= 50:
+        return []
+    return [
+        {
+            "key": "agent",
+            "title": "Create an agent",
+            "detail": "Choose a model, write its instructions and pick the "
+            "memory types it keeps.",
+            "href": "/agents/new",
+            "action": "Create agent",
+            "done": has("agents"),
+        },
+        {
+            "key": "chat",
+            "title": "Talk to it in the playground",
+            "detail": "Each answer is stored as conversation memory and "
+            "recorded as a run.",
+            "href": "/playground",
+            "action": "Open the playground",
+            "done": has("conversation_memory"),
+        },
+        {
+            "key": "trace",
+            "title": "Open the run's trace",
+            "detail": "See the model calls, tool calls and memory reads behind "
+            "an answer, with their time and cost.",
+            "href": "/traces",
+            "action": "Open Observability",
+            "done": False,
+            "visit": True,
+        },
+        {
+            "key": "knowledge",
+            "title": "Give it something to recall",
+            "detail": "Add documents to the knowledge base, or import memory "
+            "from another store.",
+            "href": "/memory/knowledge-base",
+            "action": "Open the knowledge base",
+            "done": has("knowledge_base"),
+        },
+        {
+            "key": "automation",
+            "title": "Schedule it",
+            "detail": "Run the agent on a timer and read each result here.",
+            "href": "/automations/new",
+            "action": "New automation",
+            "done": has("automations"),
+        },
+    ]
+
+
 def template_helpers() -> Dict[str, Any]:
     """Formatting helpers shared by the overview templates."""
     return {
@@ -519,7 +723,30 @@ def template_helpers() -> Dict[str, Any]:
         "sparkline": sparkline_points,
         "fmt_range": format_range,
         "range_query": range_query,
+        "range_params": range_params,
+        "fmt_period": format_period,
     }
+
+
+def range_params(span: Dict[str, Any]) -> Dict[str, str]:
+    """``range_query`` as a mapping, for a form's hidden fields."""
+    if span["key"] != "custom":
+        return {"window": span["key"]}
+    return {
+        "window": "custom",
+        "start": span["start"].strftime("%Y-%m-%dT%H:%M:%S"),
+        "end": span["end"].strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+
+def format_period(seconds: float) -> str:
+    """A chart bar's length in words: "5 minutes", "1 hour", "1 day"."""
+    seconds = int(seconds or 0)
+    for size, word in ((86400, "day"), (3600, "hour"), (60, "minute")):
+        if seconds >= size and seconds % size == 0:
+            count = seconds // size
+            return f"{count} {word}{'' if count == 1 else 's'}"
+    return f"{seconds} seconds"
 
 
 def format_range(span: Dict[str, Any]) -> str:

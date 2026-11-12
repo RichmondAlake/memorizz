@@ -374,6 +374,43 @@ def _persona_fields(
     return fields
 
 
+def _public_refine_run(run: Dict[str, Any]) -> Dict[str, Any]:
+    """A refine run for a client: its jobs and what waits, without the full
+    plans (they hold memory content; review them in the UI or the SDK)."""
+    public = {
+        key: run.get(key)
+        for key in (
+            "run_id",
+            "trigger",
+            "status",
+            "dry_run",
+            "started_at",
+            "finished_at",
+            "reason",
+            "changed",
+            "waiting",
+            "tokens",
+            "tokens_estimated",
+            "jobs",
+        )
+    }
+    # The per-change lines quote memory content, like the plans: left out.
+    public["jobs"] = [
+        {key: value for key, value in job.items() if key != "items"}
+        for job in run.get("jobs") or []
+        if isinstance(job, dict)
+    ]
+    public["pending"] = [
+        {
+            key: item.get(key)
+            for key in ("kind", "job", "plan_id", "memory_id", "summary", "counts")
+            if item.get(key) is not None
+        }
+        for item in run.get("pending") or []
+    ]
+    return _json_value(public)
+
+
 def _new_persona(fields: Dict[str, str]) -> Any:
     from ..long_term.semantic.persona.persona import Persona
 
@@ -443,6 +480,9 @@ def _persona_public(agent: Any) -> Dict[str, Any]:
             "goals": persona.goals,
             "background": persona.background,
             "version": persona.version,
+            # Read-only here: only the host or an operator can change
+            # guardrails, never a model or a client acting for one.
+            "guardrails": list(getattr(persona, "guardrails", None) or []),
         }
     try:
         config = PersonaLearningConfig.from_value(
@@ -690,6 +730,9 @@ class MemorizzRuntime:
             )
             if value.get(key) is not None
         }
+        if value.get("continual_learning"):
+            learning_config = value.get("continual_learning_config") or {}
+            public["holdout_rate"] = float(learning_config.get("holdout_rate", 0.1))
         public.update(_persona_public(agent))
         return public
 
@@ -1126,6 +1169,7 @@ class MemorizzRuntime:
         persona_background: Optional[str] = None,
         persona_learning: Optional[bool] = None,
         persona_learning_auto_apply: Optional[bool] = None,
+        holdout_rate: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Update the safe persisted-agent surface without accepting credentials."""
         normalized, existing = self._local_agent_record(
@@ -1159,6 +1203,7 @@ class MemorizzRuntime:
                 persona_background,
                 persona_learning,
                 persona_learning_auto_apply,
+                holdout_rate,
             )
         ) or bool(clear_llm)
         if not supplied:
@@ -1257,6 +1302,20 @@ class MemorizzRuntime:
                 }
         if continual_learning is not None:
             updated.continual_learning = bool(continual_learning)
+        if holdout_rate is not None:
+            try:
+                normalized_rate = float(holdout_rate)
+            except (TypeError, ValueError) as exc:
+                raise MemorizzServerError(
+                    "invalid_agent", "holdout_rate must be a number"
+                ) from exc
+            if not 0.0 <= normalized_rate <= 1.0:
+                raise MemorizzServerError(
+                    "invalid_agent", "holdout_rate must be between 0 and 1"
+                )
+            learning_config = dict(updated.continual_learning_config or {})
+            learning_config["holdout_rate"] = normalized_rate
+            updated.continual_learning_config = learning_config
         if learning_control_plane is not None:
             updated.learning_control_plane = bool(learning_control_plane)
             control_config = dict(updated.learning_control_plane_config or {})
@@ -1907,6 +1966,56 @@ class MemorizzRuntime:
                 "provider_error", "Agent memory compilation failed"
             ) from exc
         return {"ok": True, "compile_report": _json_value(report)}
+
+    def refine(
+        self,
+        agent_id: str,
+        identity: RequestIdentity,
+        *,
+        memory_id: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Run one refine cycle of an agent: its upkeep jobs once, in order."""
+        self._require_scope(identity, WRITE_SCOPE)
+        if not dry_run:
+            # A real cycle calls the background model.
+            self._require_scope(identity, EXECUTE_SCOPE)
+        agent = self._load_agent_for_inspection(agent_id, identity)
+        try:
+            report = agent.refine(
+                dry_run=bool(dry_run),
+                memory_id=memory_id,
+                user_id=identity.principal,
+                trigger="mcp",
+            )
+        except ValueError as exc:
+            raise MemorizzServerError("feature_disabled", str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Memorizz MCP refine cycle failed")
+            raise MemorizzServerError(
+                "provider_error", "The refine cycle could not run"
+            ) from exc
+        return {"ok": True, "refine_run": _public_refine_run(report)}
+
+    def list_refine_runs(
+        self, agent_id: str, identity: RequestIdentity, *, limit: int = 10
+    ) -> Dict[str, Any]:
+        """Stored refine cycles of an agent, newest first."""
+        self._require_scope(identity, READ_SCOPE)
+        agent = self._load_agent_for_inspection(agent_id, identity)
+        try:
+            runs = agent.refine_runs(limit=max(1, min(int(limit), 100)))
+        except Exception as exc:
+            raise MemorizzServerError(
+                "provider_error", "Refine runs could not be read"
+            ) from exc
+        return {
+            "ok": True,
+            "refine_cycle": bool(agent.refine_cycle),
+            "interval_hours": agent.refine_interval_hours,
+            "count": len(runs),
+            "refine_runs": [_public_refine_run(run) for run in runs],
+        }
 
     def compact_conversation(
         self,
@@ -3396,7 +3505,32 @@ class MemorizzRuntime:
 
     @staticmethod
     def _entity_public(record: Dict[str, Any]) -> Dict[str, Any]:
-        return _json_value(record)
+        """The record as stored, plus what its fields mean: the entity's
+        ``aliases``, and per attribute the source ``level`` (3 host or pinned,
+        2 stated by the user, 1 inferred, tool or consolidation) and a
+        ``timeline`` of its values with the dates each held. A timeline row
+        with ``applied: false`` is a weaker write that disagreed and was
+        kept without replacing the current value."""
+        from ..long_term.semantic.entity_memory import (
+            attribute_timeline,
+            entity_aliases,
+            source_level,
+        )
+
+        public = _json_value(record)
+        if not isinstance(public, dict):
+            return public
+        public["aliases"] = entity_aliases(record)
+        for attribute in public.get("attributes") or []:
+            if not isinstance(attribute, dict):
+                continue
+            attribute["level"] = source_level(attribute)
+            attribute["valid_from"] = attribute.get("valid_from") or attribute.get(
+                "created_at"
+            )
+            if attribute.get("history"):
+                attribute["timeline"] = _json_value(attribute_timeline(attribute))
+        return public
 
     def lookup_entities(
         self,
@@ -3431,6 +3565,12 @@ class MemorizzRuntime:
                         include_superseded=include_superseded,
                     )
                     if str(row.get("name") or "").strip().lower() == exact.lower()
+                    # A name a merged record used to carry finds the survivor.
+                    or exact.lower()
+                    in {
+                        str(alias).lower()
+                        for alias in (row.get("metadata") or {}).get("aliases") or []
+                    }
                 ]
                 found.extend(rows)
             if text and len(found) < resolved_limit:
@@ -3568,12 +3708,22 @@ class MemorizzRuntime:
                     created_targets.append(target)
                 links.append({"entity_id": target_id, "relation_type": kind})
             existed = entities.get_entity_by_name(label, **scope) is not None
-            entity_id = entities.upsert_entity(
+            report = entities.upsert_entity_with_report(
                 name=label,
                 entity_type=str(entity_type).strip() if entity_type else None,
                 attributes=facts or None,
                 relations=links or None,
+                # An MCP client speaks for its user: above an inference,
+                # below the host's own writes.
+                source_level=2,
                 **scope,
+            )
+            entity_id = report["entity_id"]
+            not_applied = sorted(
+                {
+                    *(report.get("kept_pinned") or ()),
+                    *(report.get("kept_stronger") or ()),
+                }
             )
             record = entities._fetch_one({"entity_id": entity_id}, **scope)
         except MemorizzServerError:
@@ -3588,6 +3738,10 @@ class MemorizzRuntime:
             "entity_id": entity_id,
             "created": not existed,
             "created_related_entities": created_targets,
+            # Attributes whose stored value comes from a stronger source
+            # (the host, or pinned): the new value was kept in the history
+            # as not applied, and the current value stands.
+            "not_applied": not_applied,
             "entity": self._entity_public(
                 record or {"entity_id": entity_id, "name": label}
             ),

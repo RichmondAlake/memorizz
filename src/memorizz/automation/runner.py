@@ -81,9 +81,48 @@ def _get_whatsapp_recipients(job: AutomationJob) -> List[str]:
     return recipients
 
 
+def _run_refine_cycle(job: AutomationJob, *, memory_provider: Any) -> Dict[str, Any]:
+    """One refine cycle of the job's agent: its upkeep jobs in a fixed order.
+
+    The worker gives it the interval, the lock, the retries and the time limit
+    every job has. A cycle is skipped when no conversation has a new message
+    since the last one. The run's response is a one-line summary; the full
+    report is the stored ``RefineRun``.
+    """
+    from ..learning.refine import RefineCycle
+
+    agent = MemAgent.load(
+        job.agent_id, memory_provider=memory_provider, automations_enabled=False
+    )
+    keep_stored_fields(agent, "automations_enabled", "tools")
+    memory_id = str(job.action_config.get("memory_id") or "").strip() or None
+    report = RefineCycle(agent).run(
+        trigger="schedule",
+        memory_id=memory_id,
+        user_id=job.action_config.get("user_id") or None,
+        skip_if_idle=not bool(job.action_config.get("run_when_idle")),
+    )
+    if report["status"] == "skipped":
+        summary = f"Refine cycle skipped: {report.get('reason') or 'nothing new'}"
+    else:
+        summary = (
+            f"Refine cycle {report['status']}: {report['changed']} change(s), "
+            f"{report['waiting']} plan(s) waiting for review, "
+            f"{report['tokens']} tokens."
+        )
+    return {
+        "rendered_query": "refine cycle",
+        "response": summary,
+        "memory_id": memory_id,
+        "refine_run_id": report["run_id"],
+    }
+
+
 def execute_job_action(
     job: AutomationJob, *, scheduled_for_utc: datetime, memory_provider: Any
 ) -> Dict[str, Any]:
+    if job.action_type == "refine_cycle":
+        return _run_refine_cycle(job, memory_provider=memory_provider)
     if job.action_type != "agent_query":
         raise ValueError(f"Unsupported action_type '{job.action_type}'")
 

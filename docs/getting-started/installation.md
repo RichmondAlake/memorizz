@@ -14,6 +14,7 @@ the integrations your application uses.
 | Build a Python application | `pip install memorizz` | [SDK quickstart](python-sdk-quickstart.md) |
 | Use the terminal agent | `uv tool install --python 3.12 memorizz` | [CLI guide](cli.md) |
 | Operate agents in a browser | `pip install "memorizz[ui]"` | [Local UI](local-ui.md) |
+| Use the UI as a Mac app | [Download MemoRizz.dmg](https://memorizzwebsite.vercel.app/downloads/MemoRizz.dmg) | [The Mac app](local-ui.md#the-mac-app) |
 | Connect to or expose MCP | `pip install "memorizz[mcp]"` | [MCP client](../guides/mcp-connectivity.md) or [server](../guides/mcp-server.md) |
 
 `pipx install memorizz` is equivalent to a uv tool install when pipx uses

@@ -1,9 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}{{ form_title|capitalize }} - Memorizz{% endblock %}
-{% block head %}<script src="/static/js/local-models.js?v=1"></script>
-<script src="/static/js/page-dialogs.js?v=1"></script>
-<link rel="stylesheet" href="/static/css/components/dialogs.css?v=2">{% endblock %}
+{% block head %}<script src="/static/js/local-models.js?v=1"></script>{% endblock %}
 
 {% block content %}
 {% macro section_summary(key, title, description) %}
@@ -16,7 +14,8 @@
         </summary>
 {% endmacro %}
 {% from '_ui.html' import page_header, id_chip %}
-{% set form_back = ('/agents/' ~ agent_id ~ '/playground', 'Agent playground') if is_edit else ('/agents', 'All agents') %}
+{#- A new agent has no page to go back to but the list, which the top bar's breadcrumb already links. -#}
+{% set form_back = ('/agents/' ~ agent_id ~ '/playground', 'Agent playground') if is_edit else none %}
 {% if is_edit %}
 {% call page_header(form_title|capitalize, 'Instructions, model, memory, tools and runtime. Every setting here has a Python SDK equivalent.', 'Agents', back=form_back) %}
     <span class="panel-meta">Agent ID</span>{{ id_chip(agent_id|string, 40) }}

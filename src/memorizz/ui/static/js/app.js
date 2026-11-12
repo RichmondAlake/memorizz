@@ -77,7 +77,11 @@ function initializeMemorizzUI() {
         }
     }
 
-    function setLightMode(enabled) {
+    // The class sits on <html> (set before first paint in base.html) and on
+    // <body>, which the stylesheets key on. Only a choice the viewer makes is
+    // saved; until then the theme follows the system's.
+    function setLightMode(enabled, persist = false) {
+        document.documentElement.classList.toggle("theme-light", enabled);
         body.classList.toggle("theme-light", enabled);
         if (themeToggleIcon) {
             themeToggleIcon.innerHTML = enabled ? iconMarkup.moon : iconMarkup.sun;
@@ -85,12 +89,18 @@ function initializeMemorizzUI() {
         if (themeToggleLabel) {
             themeToggleLabel.textContent = enabled ? "Dark mode" : "Light mode";
         }
-        storage.set(storageKeys.lightMode, enabled ? "1" : "0");
+        if (themeToggleBtn) {
+            themeToggleBtn.setAttribute("aria-label", enabled ? "Switch to dark theme" : "Switch to light theme");
+        }
+        if (persist) {
+            storage.set(storageKeys.lightMode, enabled ? "1" : "0");
+        }
     }
 
     function toggleLightMode() {
-        setLightMode(!body.classList.contains("theme-light"));
+        setLightMode(!body.classList.contains("theme-light"), true);
     }
+    window.memorizzToggleTheme = toggleLightMode;
 
     // Full-screen workspaces (the agent playground) keep their own navigation
     // state and start collapsed, so the global preference is left untouched.
@@ -135,11 +145,41 @@ function initializeMemorizzUI() {
         }
     });
 
+    const systemLight = window.matchMedia("(prefers-color-scheme: light)");
     const savedLightMode = storage.get(storageKeys.lightMode);
-    if (savedLightMode === "1") {
-        setLightMode(true);
-    } else {
-        setLightMode(false);
+    setLightMode(savedLightMode === null ? systemLight.matches : savedLightMode === "1");
+    systemLight.addEventListener("change", function(event) {
+        if (storage.get(storageKeys.lightMode) === null) setLightMode(event.matches);
+    });
+
+    // Folded to icons, each item names itself on hover, and a group opens the
+    // sidebar instead of unfolding a list nobody can see.
+    document.querySelectorAll(".sidebar-nav > .nav-item, .sidebar-nav > .nav-dropdown > summary").forEach(function(item) {
+        const label = item.querySelector("span:not(.nav-icon):not(.nav-caret)");
+        if (label && !item.title) item.title = label.textContent.trim();
+    });
+    document.querySelectorAll(".sidebar-nav .nav-dropdown > summary").forEach(function(summary) {
+        summary.addEventListener("click", function(event) {
+            if (!body.classList.contains("sidebar-collapsed") || phoneQuery.matches) return;
+            event.preventDefault();
+            summary.parentElement.open = true;
+            setSidebarCollapsed(false);
+        });
+    });
+
+    // Disconnecting drops this window's store for everyone using this UI.
+    const disconnectLink = document.getElementById("disconnect-btn");
+    if (disconnectLink && window.MemorizzDialogs) {
+        disconnectLink.addEventListener("click", function(event) {
+            event.preventDefault();
+            window.MemorizzDialogs.confirm("Disconnect from this memory provider?", {
+                detail: "Nothing is deleted. The UI returns to the connect page until a provider is connected again.",
+                confirmLabel: "Disconnect",
+                cancelLabel: "Stay connected",
+            }).then(function(ok) {
+                if (ok) window.location.assign(disconnectLink.href);
+            });
+        });
     }
 
     if (sidebarToggleBtn) {
@@ -166,12 +206,427 @@ function initializeMemorizzUI() {
 
     initializeBenchmarkMonitor({ body, storage, storageKeys });
 
-    document.querySelectorAll("[data-confirm]").forEach(function(el) {
-        el.addEventListener("click", function(e) {
-            if (!confirm(el.dataset.confirm)) {
-                e.preventDefault();
-            }
+    // [data-confirm]: ask in the page, then carry out the link or submit.
+    document.addEventListener("click", function(event) {
+        const el = event.target instanceof Element ? event.target.closest("[data-confirm]") : null;
+        if (!el || el.dataset.confirmed === "1" || !window.MemorizzDialogs) return;
+        event.preventDefault();
+        event.stopPropagation();
+        window.MemorizzDialogs.confirm(el.dataset.confirm, {
+            confirmLabel: el.dataset.confirmLabel || "Confirm",
+            cancelLabel: "Cancel",
+        }).then(function(ok) {
+            if (!ok) return;
+            el.dataset.confirmed = "1";
+            el.click();
+            delete el.dataset.confirmed;
         });
+    }, true);
+
+    initializeCommandPalette();
+    initializeShortcuts();
+}
+
+// Keyboard shortcuts: ? lists them, g then a letter opens a page. Neither
+// fires while typing in a field or while a dialog is open.
+function initializeShortcuts() {
+    if (typeof HTMLDialogElement === "undefined") return;
+    const isMac = /Mac|iPhone|iPad/.test(navigator.platform || "");
+    const GO_TO = [
+        ["o", "Overview", "/dashboard"],
+        ["a", "Agents", "/agents"],
+        ["h", "Agent harnesses", "/harnesses"],
+        ["p", "Playground", "/playground"],
+        ["u", "Automations", "/automations"],
+        ["m", "Memory types", "/memory/knowledge-base"],
+        ["l", "Continual learning", "/memory/workflows"],
+        ["c", "MCP connections", "/mcp"],
+        ["k", "Skills", "/vercel-skills"],
+        ["t", "Observability", "/traces"],
+        ["e", "Evalground", "/evalground"],
+        ["s", "Settings", "/settings"],
+        ["y", "Activity", "/activity"],
+    ];
+    let sheet = null;
+    let pending = null;
+    let pendingTimer = 0;
+
+    function group(title, rows) {
+        const section = document.createElement("section");
+        section.className = "kbd-sheet-group";
+        const heading = document.createElement("h3");
+        heading.textContent = title;
+        const list = document.createElement("dl");
+        rows.forEach(function(row) {
+            const line = document.createElement("div");
+            line.className = "kbd-sheet-row";
+            const term = document.createElement("dt");
+            term.textContent = row.label;
+            const keys = document.createElement("dd");
+            row.keys.forEach(function(key, index) {
+                if (index && row.then) keys.append("then");
+                const cap = document.createElement("kbd");
+                cap.textContent = key;
+                keys.append(cap);
+            });
+            line.append(term, keys);
+            list.append(line);
+        });
+        section.append(heading, list);
+        return section;
+    }
+
+    // The hints a page prints above its table, e.g. "j k move".
+    function pageRows() {
+        const rows = [];
+        document.querySelectorAll("main .fleet-keys > span").forEach(function(hint) {
+            const keys = Array.from(hint.querySelectorAll("kbd")).map(function(key) { return key.textContent.trim(); });
+            const copy = hint.cloneNode(true);
+            copy.querySelectorAll("kbd").forEach(function(key) { key.remove(); });
+            const label = copy.textContent.trim();
+            if (!keys.length || !label) return;
+            if (rows.some(function(row) { return row.label === label; })) return;
+            rows.push({ label: label.charAt(0).toUpperCase() + label.slice(1), keys: keys });
+        });
+        return rows;
+    }
+
+    function build() {
+        sheet = document.createElement("dialog");
+        sheet.className = "kbd-sheet";
+        sheet.setAttribute("aria-labelledby", "kbd-sheet-title");
+        const head = document.createElement("div");
+        head.className = "kbd-sheet-head";
+        const title = document.createElement("h2");
+        title.id = "kbd-sheet-title";
+        title.textContent = "Keyboard shortcuts";
+        const close = document.createElement("button");
+        close.type = "button";
+        close.className = "app-bar-btn";
+        close.setAttribute("aria-label", "Close");
+        close.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+        close.addEventListener("click", function() { sheet.close(); });
+        head.append(title, close);
+        const body = document.createElement("div");
+        body.className = "kbd-sheet-body";
+        const general = group("General", [
+            { label: "Search pages, agents and actions", keys: [isMac ? "⌘" : "Ctrl", "K"] },
+            { label: "Switch theme", keys: [isMac ? "⌘" : "Ctrl", "⇧", "L"] },
+            { label: "Show this list", keys: ["?"] },
+            { label: "Close a dialog", keys: ["esc"] },
+        ]);
+        const onPage = pageRows();
+        if (onPage.length) general.append(...group("On this page", onPage).children);
+        body.append(general, group("Go to", GO_TO.map(function(row) {
+            return { label: row[1], keys: ["g", row[0]], then: true };
+        })));
+        sheet.append(head, body);
+        sheet.addEventListener("click", function(event) {
+            if (event.target === sheet) sheet.close();
+        });
+        document.body.append(sheet);
+    }
+
+    function show() {
+        if (!sheet) build();
+        if (!sheet.open) sheet.showModal();
+    }
+    window.memorizzShowShortcuts = show;
+    document.querySelectorAll("[data-shortcuts-open]").forEach(function(button) {
+        button.addEventListener("click", show);
+    });
+
+    function clearPending() {
+        window.clearTimeout(pendingTimer);
+        if (pending) pending.remove();
+        pending = null;
+    }
+
+    function typing(target) {
+        if (!(target instanceof Element)) return false;
+        return Boolean(target.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])"));
+    }
+
+    document.addEventListener("keydown", function(event) {
+        if (event.metaKey || event.ctrlKey || event.altKey || event.defaultPrevented) return;
+        if (typing(event.target) || document.querySelector("dialog[open]")) {
+            clearPending();
+            return;
+        }
+        const key = event.key || "";
+        if (pending) {
+            const match = GO_TO.find(function(row) { return row[0] === key.toLowerCase(); });
+            clearPending();
+            if (match) {
+                // The page's own single-key shortcuts must not also fire.
+                event.preventDefault();
+                event.stopPropagation();
+                window.location.assign(match[2]);
+            }
+            return;
+        }
+        if (key === "?") {
+            event.preventDefault();
+            show();
+        } else if (key === "g" && !event.shiftKey && !event.repeat) {
+            pending = document.createElement("div");
+            pending.className = "kbd-pending";
+            pending.setAttribute("role", "status");
+            const cap = document.createElement("kbd");
+            cap.textContent = "g";
+            pending.append(cap, "then a letter to open a page · ? for the list");
+            document.body.append(pending);
+            pendingTimer = window.setTimeout(clearPending, 1600);
+        }
+    }, true);
+}
+
+// Command palette (Ctrl/⌘ K, or the search field in the top bar): every page
+// in the navigation, the store's agents and a few actions, filtered as you
+// type. Arrow keys move, Enter opens, Escape closes.
+function initializeCommandPalette() {
+    const triggers = document.querySelectorAll("[data-cmdk-open]");
+    if (!triggers.length || typeof HTMLDialogElement === "undefined") return;
+    const isMac = /Mac|iPhone|iPad/.test(navigator.platform || "");
+    const hint = document.getElementById("cmdk-trigger-kbd");
+    if (hint) hint.textContent = isMac ? "⌘K" : "Ctrl K";
+
+    let dialog = null;
+    let input = null;
+    let list = null;
+    let items = [];
+    let shown = [];
+    let selected = 0;
+    let agentsLoaded = false;
+
+    function pageItems() {
+        const pages = [];
+        document.querySelectorAll(".sidebar-nav a.nav-item[href]").forEach(function(link) {
+            if (link.classList.contains("nav-agent-item")) return;
+            const label = (link.querySelector("span:not(.nav-icon)") || link).textContent.trim();
+            const group = link.closest(".nav-dropdown");
+            const parent = group ? group.querySelector("summary span:not(.nav-icon):not(.nav-caret)").textContent.trim() : "";
+            pages.push({ group: "Pages", label: label, hint: parent, href: link.getAttribute("href") });
+        });
+        [
+            ["Failures", "Observability", "/traces/failures"],
+            ["Health", "Observability", "/traces/health"],
+            ["Compare traces", "Observability", "/traces/compare"],
+            ["Usage & cost", "Observability", "/traces/usage"],
+            ["Rate cards", "Observability", "/traces/usage/rates"],
+            ["Memory evolution", "Observability", "/traces/memory-evolution"],
+            ["Compare models & rerankers", "Evalground", "/evalground/compare"],
+            ["Connect a memory provider", "Admin", "/connect"],
+        ].forEach(function(row) {
+            pages.push({ group: "Pages", label: row[0], hint: row[1], href: row[2] });
+        });
+        return pages;
+    }
+
+    function actionItems() {
+        const readOnly = document.body.dataset.readOnly === "true";
+        const actions = [];
+        if (!readOnly) {
+            actions.push({ group: "Actions", label: "Create agent", hint: "Agents", href: "/agents/new" });
+            actions.push({ group: "Actions", label: "Schedule an automation", hint: "Automations", href: "/automations/new" });
+        }
+        actions.push({ group: "Actions", label: "Switch theme", hint: isMac ? "⌘⇧L" : "Ctrl Shift L", run: function() { window.memorizzToggleTheme(); } });
+        actions.push({ group: "Actions", label: "Keyboard shortcuts", hint: "?", run: function() { if (window.memorizzShowShortcuts) window.memorizzShowShortcuts(); } });
+        actions.push({ group: "Actions", label: "Open documentation", hint: "New tab", run: function() { window.open("https://richmondalake.github.io/memorizz", "_blank", "noopener"); } });
+        return actions;
+    }
+
+    function loadAgents() {
+        if (agentsLoaded) return;
+        agentsLoaded = true;
+        fetch("/api/agents", { headers: { Accept: "application/json" } })
+            .then(function(response) { return response.ok ? response.json() : { agents: [] }; })
+            .then(function(data) {
+                (data.agents || []).forEach(function(agent) {
+                    if (!agent || !agent.agent_id) return;
+                    const model = agent.llm_config && agent.llm_config.model ? String(agent.llm_config.model) : "";
+                    items.push({
+                        group: "Agents",
+                        label: String(agent.name || agent.agent_id),
+                        hint: model || "Open playground",
+                        keywords: String(agent.agent_id),
+                        href: "/agents/" + encodeURIComponent(agent.agent_id) + "/playground",
+                    });
+                });
+                if (dialog && dialog.open) render();
+            })
+            .catch(function() { /* The pages and actions still work. */ });
+    }
+
+    // The pages this browser opened last, newest first, for the empty query.
+    const RECENT_KEY = "memorizz_ui_recent_pages";
+    function readRecent() {
+        try {
+            const saved = JSON.parse(window.localStorage.getItem(RECENT_KEY) || "[]");
+            return Array.isArray(saved) ? saved.filter(function(href) { return typeof href === "string"; }) : [];
+        } catch (error) {
+            return [];
+        }
+    }
+    function recordVisit() {
+        const here = window.location.pathname;
+        const known = pageItems().some(function(item) { return item.href.split("?")[0] === here; });
+        if (!known) return;
+        const recent = readRecent().filter(function(href) { return href !== here; });
+        recent.unshift(here);
+        try {
+            window.localStorage.setItem(RECENT_KEY, JSON.stringify(recent.slice(0, 6)));
+        } catch (error) { /* Private windows: the palette works without it. */ }
+    }
+    function recentItems() {
+        const here = window.location.pathname;
+        const recent = [];
+        readRecent().forEach(function(href) {
+            if (href === here || recent.length >= 4) return;
+            const page = items.find(function(item) { return item.group === "Pages" && item.href.split("?")[0] === href; });
+            if (page) recent.push({ group: "Recent", label: page.label, hint: page.hint, href: page.href });
+        });
+        return recent;
+    }
+    recordVisit();
+
+    function matches(item, words) {
+        const text = (item.label + " " + (item.hint || "") + " " + (item.keywords || "") + " " + item.group).toLowerCase();
+        return words.every(function(word) { return text.includes(word); });
+    }
+
+    function render() {
+        const words = input.value.toLowerCase().split(/\s+/).filter(Boolean);
+        const order = ["Recent", "Pages", "Agents", "Actions"];
+        shown = items.filter(function(item) { return matches(item, words); });
+        // Without a query: the pages opened last, then the pages and actions
+        // plus the first few agents.
+        if (!words.length) {
+            let agents = 0;
+            shown = shown.filter(function(item) { return item.group !== "Agents" || ++agents <= 6; });
+            shown = recentItems().concat(shown);
+        }
+        shown.sort(function(a, b) { return order.indexOf(a.group) - order.indexOf(b.group); });
+        selected = Math.min(selected, Math.max(0, shown.length - 1));
+        list.textContent = "";
+        if (!shown.length) {
+            const empty = document.createElement("li");
+            empty.className = "cmdk-empty";
+            empty.setAttribute("role", "presentation");
+            empty.textContent = "Nothing matches “" + input.value.trim() + "”.";
+            list.append(empty);
+            input.removeAttribute("aria-activedescendant");
+            return;
+        }
+        let group = "";
+        shown.forEach(function(item, index) {
+            if (item.group !== group) {
+                group = item.group;
+                const heading = document.createElement("li");
+                heading.className = "cmdk-group";
+                heading.setAttribute("role", "presentation");
+                heading.textContent = group;
+                list.append(heading);
+            }
+            const option = document.createElement("li");
+            option.className = "cmdk-option";
+            option.id = "cmdk-option-" + index;
+            option.setAttribute("role", "option");
+            option.setAttribute("aria-selected", index === selected ? "true" : "false");
+            option.dataset.index = String(index);
+            const label = document.createElement("span");
+            label.className = "cmdk-option-label";
+            label.textContent = item.label;
+            option.append(label);
+            if (item.hint) {
+                const hintEl = document.createElement("span");
+                hintEl.className = "cmdk-option-hint";
+                hintEl.textContent = item.hint;
+                option.append(hintEl);
+            }
+            list.append(option);
+        });
+        input.setAttribute("aria-activedescendant", "cmdk-option-" + selected);
+    }
+
+    function select(index) {
+        if (!shown.length) return;
+        selected = (index + shown.length) % shown.length;
+        list.querySelectorAll(".cmdk-option").forEach(function(option) {
+            const on = Number(option.dataset.index) === selected;
+            option.setAttribute("aria-selected", on ? "true" : "false");
+            if (on) option.scrollIntoView({ block: "nearest" });
+        });
+        input.setAttribute("aria-activedescendant", "cmdk-option-" + selected);
+    }
+
+    function activate(item, newTab) {
+        if (!item) return;
+        dialog.close();
+        if (item.run) item.run();
+        else if (newTab) window.open(item.href, "_blank", "noopener");
+        else window.location.assign(item.href);
+    }
+
+    function build() {
+        dialog = document.createElement("dialog");
+        dialog.className = "cmdk";
+        dialog.setAttribute("aria-label", "Search pages, agents and actions");
+        dialog.innerHTML =
+            '<div class="cmdk-head">' +
+            '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>' +
+            '<input class="cmdk-input" type="text" role="combobox" aria-expanded="true" aria-controls="cmdk-list" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Search pages, agents and actions">' +
+            '</div>' +
+            '<ul class="cmdk-list" id="cmdk-list" role="listbox" aria-label="Results"></ul>' +
+            '<div class="cmdk-foot" aria-hidden="true"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span></div>';
+        input = dialog.querySelector(".cmdk-input");
+        list = dialog.querySelector(".cmdk-list");
+        input.addEventListener("input", function() { selected = 0; render(); });
+        input.addEventListener("keydown", function(event) {
+            if (event.key === "ArrowDown") { event.preventDefault(); select(selected + 1); }
+            else if (event.key === "ArrowUp") { event.preventDefault(); select(selected - 1); }
+            else if (event.key === "Home") { event.preventDefault(); select(0); }
+            else if (event.key === "End") { event.preventDefault(); select(shown.length - 1); }
+            else if (event.key === "Enter") { event.preventDefault(); activate(shown[selected], event.metaKey || event.ctrlKey); }
+        });
+        list.addEventListener("mousemove", function(event) {
+            const option = event.target instanceof Element ? event.target.closest(".cmdk-option") : null;
+            if (option && Number(option.dataset.index) !== selected) select(Number(option.dataset.index));
+        });
+        list.addEventListener("click", function(event) {
+            const option = event.target instanceof Element ? event.target.closest(".cmdk-option") : null;
+            if (option) activate(shown[Number(option.dataset.index)], event.metaKey || event.ctrlKey);
+        });
+        // A click on the backdrop lands on the dialog itself.
+        dialog.addEventListener("click", function(event) {
+            if (event.target === dialog) dialog.close();
+        });
+        document.body.append(dialog);
+        items = pageItems().concat(actionItems());
+    }
+
+    function open() {
+        if (!dialog) build();
+        if (dialog.open) return;
+        loadAgents();
+        input.value = "";
+        selected = 0;
+        render();
+        dialog.showModal();
+        input.focus();
+    }
+
+    triggers.forEach(function(trigger) {
+        trigger.addEventListener("click", open);
+    });
+    document.addEventListener("keydown", function(event) {
+        // ⌘K on a Mac (Ctrl K there deletes to the end of a line), Ctrl K elsewhere.
+        const modifier = isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+        if (modifier && !event.shiftKey && !event.altKey && event.key && event.key.toLowerCase() === "k") {
+            event.preventDefault();
+            if (dialog && dialog.open) dialog.close();
+            else open();
+        }
     });
 }
 
@@ -631,10 +1086,14 @@ async function handleLocalModelAction(button, action, provider, model, refresh) 
         return;
     }
 
-    if (action === 'delete' && !window.confirm('Remove ' + model + ' from local cache?')) return;
+    if (action === 'delete' && !(await window.MemorizzDialogs.confirm('Remove ' + model + ' from the local cache?', {
+        detail: 'It can be downloaded again later.', confirmLabel: 'Remove model',
+    }))) return;
     if (action === 'pull') {
-        const ok = window.confirm('Download ' + model + '?\n\n'
-            + 'Large models can take 5–15 minutes. The page will appear to hang while the download runs in the background.');
+        const ok = await window.MemorizzDialogs.confirm('Download ' + model + '?', {
+            detail: 'Large models can take 5 to 15 minutes. The download runs in the background.',
+            confirmLabel: 'Download', cancelLabel: 'Cancel', danger: false,
+        });
         if (!ok) return;
     }
 
@@ -661,10 +1120,10 @@ async function handleLocalModelAction(button, action, provider, model, refresh) 
         let data = {};
         try { data = await res.json(); } catch (_) { /* ignore */ }
         if (!data.ok) {
-            window.alert('Failed: ' + (data.error || ('HTTP ' + res.status)));
+            window.MemorizzDialogs.notify('Failed: ' + (data.error || ('HTTP ' + res.status)));
         }
     } catch (err) {
-        window.alert('Error: ' + err);
+        window.MemorizzDialogs.notify('Error: ' + err);
     } finally {
         _localModelActionInFlight = false;
         button.disabled = false;

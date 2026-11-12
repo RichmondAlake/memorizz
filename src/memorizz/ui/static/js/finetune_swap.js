@@ -35,7 +35,7 @@
         if (!planned.ok) throw new Error(plan.detail || "Could not check the vector size");
       }
     } catch (error) {
-      return window.confirm(`${error.message}. Swap anyway?`);
+      return window.MemorizzDialogs.confirm(`${error.message}. Swap anyway?`, { detail: "What the swap affects could not be checked.", confirmLabel: "Swap anyway", cancelLabel: "Cancel" });
     }
     const a = impact.agents;
     const own = a.own_choice || [];

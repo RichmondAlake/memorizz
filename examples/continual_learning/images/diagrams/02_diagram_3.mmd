@@ -1,0 +1,17 @@
+flowchart TB
+    subgraph T1["Tier 1 · outranks everything below"]
+        direction LR
+        A1["Host code<br/>or an operator"] -->|"the only way in"| G["GUARDRAILS"]
+        B1["Persona learning ·<br/>the agent's own tool"] -. "refused" .-> G
+    end
+    subgraph T2["Tier 2 · house rules"]
+        direction LR
+        A2["A named rule owner"] -->|"approves or adds"| S["STANDING RULES"]
+        B2["Persona learning"] -. "proposes only" .-> S
+    end
+    subgraph T3["Tier 3 · what the assistant is for"]
+        direction LR
+        A3["Persona learning"] -->|"one quoted sentence"| GB["GOALS · BACKGROUND"]
+        B3["The agent's own tool ·<br/>people"] --> GB
+    end
+    T1 ~~~ T2 ~~~ T3

@@ -311,6 +311,24 @@ class ToolManager:
                 all_metadata.append(metadata)
             return all_metadata
 
+    def set_learned_notes(self, tool_name: str, notes: List[str]) -> bool:
+        """Show usage notes learned for a tool after its own description.
+
+        The notes come from tool learning (``memorizz.learning.tool_learning``).
+        The author's description is kept as it is; the notes follow it under
+        one heading, and an empty list takes them away again.
+        """
+        from ...learning.tool_learning import join_description, split_description
+
+        entry = self.tools.get(tool_name)
+        metadata = entry.get("metadata") if isinstance(entry, dict) else None
+        if not isinstance(metadata, dict):
+            return False
+        base, _ = split_description(metadata.get("description"))
+        metadata["description"] = join_description(base, notes)
+        self._tool_metadata_cache[tool_name] = metadata
+        return True
+
     def remove_tool(self, tool_name: str) -> bool:
         """
         Remove a tool from the manager.

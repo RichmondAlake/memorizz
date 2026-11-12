@@ -49,12 +49,23 @@ class EntityPolicy:
     ``"self"`` keeps only facts about the user: a tool write about anyone else
     is refused (the model is told to store facts about the user as "user"),
     and capture drops facts about anyone else.
+    ``attribute_history_limit``: how many replaced values each attribute
+    keeps, with the dates each one held (20 by default).
     """
 
     self_identity_key: Optional[str] = None
     subjects: str = "all"
+    #: Replaced values kept per attribute, each with the dates it held.
+    attribute_history_limit: int = 20
 
     def __post_init__(self) -> None:
+        try:
+            limit = int(self.attribute_history_limit)
+        except (TypeError, ValueError):
+            raise ValueError("attribute_history_limit must be a whole number")
+        if not 0 <= limit <= 500:
+            raise ValueError("attribute_history_limit must be between 0 and 500")
+        object.__setattr__(self, "attribute_history_limit", limit)
         key = self.self_identity_key
         if key is not None:
             key = _KEY_RE.sub("_", str(key).strip().lower()).strip("_") or None
@@ -78,13 +89,22 @@ class EntityPolicy:
             return cls()
         if not isinstance(value, Mapping):
             raise TypeError("entity_policy must be a mapping or EntityPolicy")
+        limit = value.get("attribute_history_limit")
         return cls(
             self_identity_key=value.get("self_identity_key"),
             subjects=value.get("subjects") or "all",
+            attribute_history_limit=20 if limit in (None, "") else limit,
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"self_identity_key": self.self_identity_key, "subjects": self.subjects}
+        data: Dict[str, Any] = {
+            "self_identity_key": self.self_identity_key,
+            "subjects": self.subjects,
+        }
+        if self.attribute_history_limit != 20:
+            # Only a changed limit is saved, so stored agents keep their shape.
+            data["attribute_history_limit"] = self.attribute_history_limit
+        return data
 
     @property
     def active(self) -> bool:

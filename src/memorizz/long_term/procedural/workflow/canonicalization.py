@@ -190,6 +190,8 @@ class RunRef:
     user_query: Optional[str]
     promoted_skill_id: Optional[str] = None
     record_id: Optional[str] = None
+    # The host or the outcome evaluator confirmed this run's outcome.
+    outcome_verified: bool = False
 
 
 @dataclass
@@ -210,6 +212,8 @@ class TrajectoryStats:
     promoted_skill_id: Optional[str] = None
     runs: List[RunRef] = field(default_factory=list)
     user_id: Optional[str] = None
+    # Successes a host or an evaluator confirmed (the verified-outcome gate).
+    verified_successes: int = 0
 
     def baseline_snapshot(self) -> Dict[str, Any]:
         """Frozen promotion-time baseline stored on the skill document."""
@@ -286,6 +290,7 @@ def aggregate_trajectory_stats(
                     user_query=doc.get("user_query"),
                     promoted_skill_id=doc.get("promoted_skill_id"),
                     record_id=str(record_id) if record_id is not None else None,
+                    outcome_verified=bool(doc.get("outcome_verified")),
                 )
             )
             normalized = normalize_query(doc.get("user_query"))
@@ -323,6 +328,7 @@ def aggregate_trajectory_stats(
                 promoted_skill_id=promoted,
                 runs=runs,
                 user_id=scope_user_id,
+                verified_successes=sum(1 for run in successes if run.outcome_verified),
             )
         )
 

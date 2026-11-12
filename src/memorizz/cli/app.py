@@ -229,6 +229,14 @@ def ui(
         "--no-connect",
         help="Start on the connect page even when the environment names a store.",
     ),
+    open_browser: Optional[bool] = typer.Option(
+        None,
+        "--open/--no-open",
+        help=(
+            "Open the UI in your browser once it is running (the default, "
+            "except over SSH, in CI or with MEMORIZZ_UI_OPEN_BROWSER=false)."
+        ),
+    ),
 ):
     from .operations import run_local, ui_startup_from_flags
 
@@ -251,7 +259,13 @@ def ui(
         startup = None
     elif startup is None:
         startup = "env"
-    ok = run_local(host=host, port=port, startup_connect=startup, read_only=read_only)
+    ok = run_local(
+        host=host,
+        port=port,
+        startup_connect=startup,
+        read_only=read_only,
+        open_browser=open_browser,
+    )
     raise typer.Exit(0 if ok else 1)
 
 

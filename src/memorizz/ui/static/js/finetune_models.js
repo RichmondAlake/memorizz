@@ -352,7 +352,7 @@
   }
 
   async function rename(v, note) {
-    const label = prompt(`Name ${v.label} (empty for its version number):`, v.label.startsWith("v") ? "" : v.label);
+    const label = await window.MemorizzDialogs.prompt(`Rename ${v.label}`, { detail: "Leave it empty to show the version number.", label: "Name", value: v.label.startsWith("v") ? "" : v.label, confirmLabel: "Rename" });
     if (label === null) return;
     try {
       await api(`/api/finetune/runs/${v.run_id}`, { method: "PATCH", body: { label } });
@@ -363,7 +363,7 @@
   }
 
   async function remove(v, button, note) {
-    if (!confirm(`Delete ${v.label} (${v.short_base}) and its model files? Its scores stay in the history.`)) return;
+    if (!(await window.MemorizzDialogs.confirm(`Delete ${v.label} (${v.short_base}) and its model files?`, { detail: "Its scores stay in the history.", confirmLabel: "Delete model" }))) return;
     button.disabled = true;
     try {
       await api(`/api/finetune/runs/${v.run_id}`, { method: "DELETE" });
@@ -372,7 +372,7 @@
     } catch (error) {
       button.disabled = false;
       if (note) say(note, error.message, true);
-      else alert(error.message);
+      else window.MemorizzDialogs.notify(error.message);
     }
   }
 

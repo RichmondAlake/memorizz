@@ -352,7 +352,7 @@ async function copyMcpSetup(id, button) {
         button.textContent = 'Copied';
         window.setTimeout(() => { button.textContent = previous; }, 1400);
     } catch (_) {
-        window.prompt('Copy this configuration', value);
+        await MemorizzDialogs.prompt('Copy this configuration', {detail: 'The browser did not allow copying. Select the text and copy it.', value, multiline: true, mono: true, readOnly: true, confirmLabel: 'Done', cancelLabel: 'Close'});
     }
 }
 
@@ -489,27 +489,40 @@ function renderToolButtons(name, tools) {
 }
 
 async function callMcpTool(serverName, toolName) {
-    const raw = window.prompt(`JSON arguments for ${toolName}`, '{}');
+    const raw = await MemorizzDialogs.prompt(`Call ${toolName}`, {
+        detail: `Runs on ${serverName} with these arguments. A call the agent's policy holds for approval asks before it runs.`,
+        label: 'Arguments (JSON object)', value: '{}', multiline: true, mono: true, rows: 7, confirmLabel: 'Call tool',
+        validate: (value) => {
+            try {
+                const parsed = JSON.parse(value);
+                return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? '' : 'Arguments must be a JSON object, such as {"query": "refunds"}.';
+            } catch (error) { return `Invalid JSON: ${error.message}`; }
+        },
+    });
     if (raw === null) return;
-    let args; try { args = JSON.parse(raw); } catch (error) { alert(`Invalid JSON: ${error.message}`); return; }
+    const args = JSON.parse(raw);
     outputFor(serverName, 'Calling tool…');
     try {
         let body = await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/servers/${encodeURIComponent(serverName)}/call`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tool_name:toolName, arguments:args})});
         if (body.status === 'approval_required' && body.proposal) {
             const proposal = body.proposal;
-            const summary = `${proposal.policy_reason}\n\nTool: ${proposal.tool_name}\nArguments hash: ${proposal.argument_hash}\nExpires: ${proposal.expires_at}\n\nApprove this exact call?`;
-            if (!window.confirm(summary)) {
-                const approver = window.prompt('Your approver identity', localStorage.getItem('memorizzApproverId') || 'local-ui-user');
-                if (approver) {
-                    localStorage.setItem('memorizzApproverId', approver);
-                    await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/approvals/${encodeURIComponent(proposal.proposal_id)}/reject`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({approver_id:approver, reason:'Rejected in MemoRizz UI'})});
-                }
+            // One dialog: what is held and why, who is deciding, and the decision.
+            const decision = await MemorizzDialogs.prompt('This call needs approval', {
+                detail: proposal.policy_reason || 'The agent\'s policy holds this call for a decision.',
+                facts: [['Tool', proposal.tool_name], ['Server', serverName], ['Arguments hash', proposal.argument_hash], ['Expires', proposal.expires_at]],
+                label: 'Your approver identity (email or operator ID)',
+                value: localStorage.getItem('memorizzApproverId') || 'local-ui-user',
+                required: true, confirmLabel: 'Approve and run', altLabel: 'Reject', cancelLabel: 'Decide later',
+            });
+            // Closed without a decision: the proposal stays pending until it expires.
+            if (decision === null) { outputFor(serverName, body); return; }
+            const approver = decision.value.trim();
+            localStorage.setItem('memorizzApproverId', approver);
+            if (decision.action === 'alt') {
+                await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/approvals/${encodeURIComponent(proposal.proposal_id)}/reject`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({approver_id:approver, reason:'Rejected in MemoRizz UI'})});
                 outputFor(serverName, {...body, status:'rejected'});
                 return;
             }
-            const approver = window.prompt('Your approver identity', localStorage.getItem('memorizzApproverId') || 'local-ui-user');
-            if (!approver) { outputFor(serverName, body); return; }
-            localStorage.setItem('memorizzApproverId', approver);
             await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/approvals/${encodeURIComponent(proposal.proposal_id)}/approve`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({approver_id:approver})});
             body = await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/approvals/${encodeURIComponent(proposal.proposal_id)}/resume`, {method:'POST'});
         }
@@ -534,13 +547,13 @@ async function authorizeMcp(name) {
 }
 
 async function disconnectMcp(name) {
-    if (!window.confirm(`Delete stored credentials for ${name}?`)) return;
+    if (!(await MemorizzDialogs.confirm(`Delete stored credentials for ${name}?`, {detail: 'The server stays configured. It needs signing in again before its tools can be used.', confirmLabel: 'Delete credentials', cancelLabel: 'Keep'}))) return;
     try { await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/servers/${encodeURIComponent(name)}/credentials`, {method:'DELETE'}); window.location.reload(); }
     catch (error) { outputFor(name, {ok:false,error:error.message}); }
 }
 
 async function removeMcp(name) {
-    if (!window.confirm(`Remove ${name} and its credentials?`)) return;
+    if (!(await MemorizzDialogs.confirm(`Remove ${name} and its credentials?`, {detail: 'Agents lose access to this server\'s tools.', confirmLabel: 'Remove server', cancelLabel: 'Keep'}))) return;
     try { await mcpFetch(`/api/mcp/agents/${encodeURIComponent(MCP_AGENT_ID)}/servers/${encodeURIComponent(name)}`, {method:'DELETE'}); window.location.reload(); }
     catch (error) { outputFor(name, {ok:false,error:error.message}); }
 }

@@ -30,6 +30,9 @@ KEPT_BY_MCP_TOOL_INDEX = (MCP_TOOL, MCP_TOOL_CATALOG)
 # Longer tool descriptions add little meaning and cost embedding tokens.
 MAX_SEARCH_TEXT = 2000
 
+#: Heading of the usage notes tool learning keeps after a tool's description.
+LEARNED_HEADING = "Learned from use:"
+
 
 def row_type(row: Dict[str, Any]) -> str:
     """The row's tool type, lower-cased (``function`` when unset)."""
@@ -42,20 +45,59 @@ def is_agent_mirror_row(row: Dict[str, Any], agent_id: str) -> bool:
     Rows a Toolbox registered have their own ids and owners; saving the agent
     leaves them alone.
     """
-    row_id = str(row.get("_id") or row.get("tool_id") or row.get("id") or "")
-    return bool(agent_id) and row_id.startswith(f"{agent_id}:")
+    # Any of its ids: on Oracle ``_id`` is the row's own id and the mirror id
+    # is kept as ``tool_id``.
+    if not agent_id:
+        return False
+    return any(
+        str(row.get(key) or "").startswith(f"{agent_id}:")
+        for key in ("_id", "tool_id", "id")
+    )
 
 
 def search_text(row: Dict[str, Any]) -> str:
-    """The text a tool row is embedded from: its name, what it does and the
-    names of its arguments (which often say what a terse description omits)."""
+    """The text a tool row is embedded from: its name, what it does, the
+    names of its arguments (which often say what a terse description omits)
+    and the example requests kept for it.
+
+    The description comes first because it is the richer of the two: it
+    holds what augmentation wrote, where the docstring is the author's own
+    text. Usage notes learned since are left out: they tell the model how to
+    call the tool, and say nothing about which requests it is for.
+    """
     name = str(row.get("name") or "").strip()
-    about = " ".join(str(row.get("docstring") or row.get("description") or "").split())
+    described = str(row.get("description") or row.get("docstring") or "")
+    described = described.split(LEARNED_HEADING, 1)[0]
+    about = " ".join(described.split())
     text = f"{name}: {about}" if about else name
     arguments = argument_names(row.get("parameters"))
     if arguments:
         text = f"{text} Arguments: {', '.join(arguments)}."
+    queries = example_requests(row.get("queries"))
+    if queries:
+        text = f"{text} Example requests: {' | '.join(queries)}"
     return text[:MAX_SEARCH_TEXT]
+
+
+def example_requests(value: Any) -> List[str]:
+    """Example requests kept on a tool row, as a list. Older rows hold one
+    block of text, which is kept whole."""
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("["):
+            try:
+                import json
+
+                parsed = json.loads(text)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, list):
+                value = parsed
+        if isinstance(value, str):
+            return [" ".join(text.split())] if text else []
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [" ".join(str(item).split()) for item in value if str(item).strip()]
 
 
 def argument_names(parameters: Any) -> List[str]:
