@@ -53,17 +53,17 @@ raw workflows against skills at user and developer authority.
 
 ## Run them
 
-From the repository root:
+From this folder, in any Python 3.10+ environment with Jupyter:
 
 ```bash
-source .venv/bin/activate
-export OPENAI_API_KEY="..."      # or put it in a .env file at the repository root
-jupyter lab examples/continual_learning
+export OPENAI_API_KEY="..."      # or put it in a .env file in this folder or above it
+jupyter lab
 ```
 
-- **MemoRizz is imported from this repository's `src/` tree.** The notebooks
-  use features that are ahead of the published package. After the release,
-  the setup cell becomes `pip install -U memorizz`.
+- **MemoRizz is installed from PyPI.** Each notebook's first cell runs
+  `pip install --upgrade "memorizz[ui,filesystem]"`, so there is nothing to
+  set up first. The notebooks need MemoRizz 0.17.25 or later. Keep
+  `calderwood_world.py` beside them.
 - **One store for the whole series.** Every notebook writes to
   `calderwood_store/`, a folder beside the notebooks (gitignored). Delete it
   to start again. Your own MemoRizz home is left alone.
