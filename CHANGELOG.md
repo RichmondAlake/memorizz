@@ -1,5 +1,77 @@
 # Changelog
 
+## 0.17.26 — 2026-11-16
+
+### Added
+
+- **Voice for agents.** `MemAgent(voice=True)` gives an agent a voice through
+  LiveKit; `voice_config` picks ElevenLabs, Vapi or OpenAI instead, or names
+  the voice and models. An agent can speak a reply (`speak`), transcribe a
+  recording (`listen`), take a whole spoken turn (`run_voice`) and, with
+  LiveKit or Vapi, hold a live call (`start_voice_session`). Voice settings
+  are saved with the agent; keys never are, and are set in the environment or
+  under **Settings → Voice**. The agent form has a Voice section,
+  `memorizz agents create` and `update` take `--voice`, `--voice-provider` and
+  `--voice-name`, the MCP server's create and update agent tools take the
+  same three, and `pip install "memorizz[voice]"` adds LiveKit's packages.
+  Guide: [Voice](docs/guides/voice.md).
+- **Tools an environment lends.** `agent.enter_environment(name, tools)` adds
+  tools to an agent for as long as it is in an environment, and
+  `leave_environment(name)` takes them away. They are offered on every turn
+  and are never written to the saved agent or to toolbox memory, so a
+  simulation or a session can give an agent abilities without leaving
+  anything behind.
+- **A rejection the model hears about.** `agent.resume_rejection(proposal_id)`
+  answers the paused tool call with the refusal and the approver's reason, and
+  the model continues the run: it can say so or do something else. Before, a
+  rejected proposal left the run paused and the host had to write the next
+  message itself. Guide: [Tools and approvals](docs/guides/tools-and-approvals.md#durable-approval-lifecycle).
+- **MCP tools before the first turn.** `agent.discover_mcp_tools()` lists the
+  configured servers and registers each tool as `server__tool`, so the first
+  turn no longer spends steps on `mcp_list_tools`. `only_direct_tools=True`
+  also removes the general MCP tools. Calling `with_mcp_servers` again now
+  registers tools listed since the first call.
+
+### Changed
+
+- **A paused turn stores a waiting note, not the proposal.** The reply kept in
+  conversation memory for a turn that stopped for approval is one line with
+  the proposal id. When the proposal is resumed or rejected the line is
+  replaced by what happened: the model's reply, or that the call ran, failed
+  or was rejected.
+- **A call through `mcp_call_tool` is recorded under the tool's own name**
+  (`calendar__create_event`) in the approval proposal, the workflow step and
+  the tool log, when that tool is registered. A proposal for such a call now
+  has that `tool_name` and the tool's own arguments.
+- **A refine cycle counts what it stored for review as `proposed_`**
+  (`proposed_tool_revisions`, `proposed_standing_rules`,
+  `proposed_persona_additions`). `planned_` is kept for a dry run. The tool
+  review's note names MCP tools as such (they are not reviewed), and the
+  persona job's note is labelled "Persona addition", so it no longer reads as
+  a verdict on a standing rule proposed in the same review.
+- **Tool learning may name a constant the tool expects.** A usage note can
+  say "set source_thread to `owner`" when that plain word put a failed call
+  right and the tool's error names it, or it put two failed calls right. Ids,
+  names, amounts and anything with a digit or a space are still refused.
+
+### Fixed
+
+- **A decided approval was recalled as still waiting.** The pause payload
+  stayed in conversation memory as the turn's reply and the resumed reply was
+  never stored, so later turns, in the same thread or another, said a booked
+  event was "still waiting for your approval".
+- **Calls held back by an approval were never made.** When a model asked for
+  several guarded calls at once, the others were answered "waiting for human
+  approval" and that text was still what the model read after the resume, so
+  it reported them as held. They now say the earlier call is decided and
+  that they may be made.
+- **A request was stored as a fact, and one preference under several names.**
+  The stated-facts job no longer files "Add a task: ..." as `user.task`, and
+  a statement memory already holds under one attribute is not added again
+  under another name, in the same cycle or a later one.
+- `apply_persona_rule` says that no standing rule is waiting, or lists the
+  ids that are, instead of "No standing rule is waiting under that id".
+
 ## 0.17.25 — 2026-11-12
 
 ### Added
