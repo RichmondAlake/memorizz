@@ -107,3 +107,9 @@ apps/**/src-tauri/target/
 
 # Store written by the continual-learning notebooks
 examples/continual_learning/calderwood_store/
+
+# Simuground: an unreleased UI page kept out of the repository and the
+# published package for now (the UI loads it only when it is present; see
+# src/memorizz/ui/extensions.py).
+src/memorizz/simuground/
+tests/simuground/

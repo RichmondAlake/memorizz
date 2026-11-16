@@ -562,7 +562,7 @@ def test_tool_revisions_wait_for_a_person_unless_told_otherwise(work_dir):
     agent.review_tools = review_tools
     report = RefineCycle(agent).run()
     job = _job(report, "toolbox")
-    assert job["changes"] == {"planned_tool_revisions": 1, "usage_flags": 1}
+    assert job["changes"] == {"proposed_tool_revisions": 1, "usage_flags": 1}
     assert job["waiting"] == 1 and agent.tool_reviews[-1]["auto_apply"] is False
     revision, flag = job["items"]
     assert "1 usage note(s)" in revision["text"] and "“not for”" in revision["text"]
@@ -610,7 +610,9 @@ def test_a_standing_rule_is_reported_and_never_applied_by_the_cycle(work_dir):
     report = RefineCycle(agent).run()
     job = _job(report, "persona_learning")
     assert job["status"] == "done"
-    assert job["changes"] == {"planned_standing_rules": 1} and job["waiting"] == 1
+    assert job["changes"] == {"proposed_standing_rules": 1} and job["waiting"] == 1
+    # The note is about the persona, not the rule the same review proposed.
+    assert job["notes"] == ["Persona addition: no_change (no_pattern)"]
     (item,) = job["items"]
     assert item["kind"] == "standing_rule" and item["applied"] is False
     assert "priya.shah, ellie.burns" in item["detail"]

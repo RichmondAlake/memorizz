@@ -593,3 +593,112 @@ def test_context_policy_carries_the_stable_tool_budget():
     saved = ContextPolicy(stable_tool_list_tokens=0).to_dict()
     assert saved["stable_tool_list_tokens"] == 0
     assert ContextPolicy.from_value(saved).stable_tool_list_tokens == 0
+
+
+def test_discovery_registers_a_servers_tools_before_the_first_turn(
+    tmp_path, monkeypatch
+):
+    from memorizz import MemAgent
+
+    monkeypatch.setenv("MEMORIZZ_HOME", str(tmp_path))
+    servers = [
+        {
+            "name": name,
+            "transport": "streamable_http",
+            "url": f"https://{name}.example.com/mcp",
+            "auth": {"type": "none"},
+        }
+        for name in ("f1", "down")
+    ]
+    agent = MemAgent(
+        agent_id="agent-d",
+        memory_provider=False,
+        auto_register=False,
+        mcp_servers=servers,
+    )
+    try:
+        manager = agent.mcp_manager
+        assert not any("__" in name for name in agent.tool_manager.list_tools())
+
+        def list_tools(server_name):
+            if server_name == "down":
+                return {"ok": False, "error": "connection refused"}
+            manager._remember_tool_listing(manager.get_server(server_name), F1_TOOLS)
+            return {"ok": True, "tools": F1_TOOLS}
+
+        monkeypatch.setattr(manager, "list_tools", list_tools)
+
+        found = agent.discover_mcp_tools()
+
+        assert found["ok"] is False and found["errors"] == {
+            "down": "connection refused"
+        }
+        assert found["tools"] == {
+            "f1": ["f1__get_f1_next_event", "f1__get_f1_standings"]
+        }
+        names = set(agent.tool_manager.list_tools())
+        assert set(found["tools"]["f1"]) <= names
+        # A server that failed keeps the general tools as the way in.
+        assert "mcp_call_tool" in names
+
+        # Configuring the same servers again keeps what was listed.
+        agent.with_mcp_servers(servers)
+        assert set(found["tools"]["f1"]) <= set(agent.tool_manager.list_tools())
+
+        only = agent.discover_mcp_tools("f1", only_direct_tools=True)
+        assert only["ok"] and "mcp_call_tool" not in agent.tool_manager.list_tools()
+        assert "f1__get_f1_standings" in agent.tool_manager.list_tools()
+    finally:
+        agent.close()
+
+
+def test_a_call_through_the_general_tool_is_named_as_the_servers_own(
+    tmp_path, monkeypatch
+):
+    import json
+    from types import SimpleNamespace
+
+    from memorizz.approval import ApprovalRequired, SQLiteApprovalStore
+
+    agent = _notion_agent(tmp_path, monkeypatch)
+    try:
+        agent.approval_store = SQLiteApprovalStore(tmp_path / "approvals.sqlite3")
+        pages = {"pages": [{"properties": {"title": "Plan"}}]}
+        call = SimpleNamespace(
+            id="call_1",
+            function=SimpleNamespace(
+                name="mcp_call_tool",
+                arguments=json.dumps(
+                    {
+                        "server_name": "notion",
+                        "tool_name": "notion-create-pages",
+                        "arguments": pages,
+                    }
+                ),
+            ),
+        )
+        with pytest.raises(ApprovalRequired) as paused:
+            agent._execute_and_record_tool_call(call, [], None, None, query="plan")
+        proposal = paused.value.proposal
+        assert proposal.tool_name == "notion__notion-create-pages"
+        assert proposal.arguments == pages
+
+        sent = []
+        monkeypatch.setattr(
+            agent.mcp_manager,
+            "_call_tool_authorized",
+            lambda **kwargs: sent.append(kwargs) or {"ok": True},
+        )
+        agent.approve(proposal.proposal_id, approver_id="operator")
+        resumed = agent.resume_approval(proposal.proposal_id, continue_model=False)
+
+        assert resumed.ok and resumed.tool_result == {"ok": True}
+        assert sent == [
+            {
+                "server_name": "notion",
+                "tool_name": "notion-create-pages",
+                "arguments": pages,
+            }
+        ]
+    finally:
+        agent.close()

@@ -165,10 +165,20 @@ ORACLE_USER=
 ORACLE_PASSWORD=
 ORACLE_DSN=
 NOTION_TOKEN=
+LIVEKIT_URL=
+LIVEKIT_API_KEY=
+LIVEKIT_API_SECRET=
+ELEVENLABS_API_KEY=
+VAPI_API_KEY=
+VAPI_PUBLIC_KEY=
 ```
 
+The last six are for agents with a voice; see [Voice](../guides/voice.md).
+`MEMORIZZ_PUBLIC_URL` (not a secret) is the https address of the local UI
+that Vapi calls.
+
 Use a deployment secret manager for production. Do not put secrets in
-`llm_config`, `mcp_servers`, browser-control configuration, agent metadata,
+`llm_config`, `mcp_servers`, `voice_config`, browser-control configuration, agent metadata,
 benchmark results, or committed `.env` files.
 
 MCP client tokens and OAuth credentials use the encrypted credential store.

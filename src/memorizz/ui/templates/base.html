@@ -42,7 +42,7 @@
     {% block head %}{% endblock %}
     <link rel="stylesheet" href="/static/css/console.css?v=31">
     <link rel="stylesheet" href="/static/css/components/dialogs.css?v=4">
-    <link rel="stylesheet" href="/static/css/shell.css?v=9">
+    <link rel="stylesheet" href="/static/css/shell.css?v=10">
 </head>
 <body{% block body_attrs %}{% endblock %}{% if ui_conn.read_only %} data-read-only="true" data-read-only-tooltip="{{ ui_conn.read_only_tooltip }}" data-read-only-allow="{{ ui_conn.allowed_posts|join(' ') }}"{% endif %}>
     <script>if (document.documentElement.classList.contains('theme-light')) document.body.classList.add('theme-light');</script>
@@ -120,6 +120,18 @@
                 </button>
             </div>
 
+            {#- Optional pages (ui/extensions.py); empty in a normal install. -#}
+            {% macro extension_nav(group) -%}
+            {% for ext in ui_extensions|default([]) if ext.group == group %}
+                <a href="{{ ext.href }}" class="nav-item {% if active_page == ext.key %}active{% endif %}"{% if active_page == ext.key %} aria-current="page"{% endif %}>
+                    <span class="nav-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">{{ ext.icon|safe }}</svg>
+                    </span>
+                    <span>{{ ext.label }}</span>
+                    {% if ext.badge %}<span class="nav-badge">{{ ext.badge }}</span>{% endif %}
+                </a>
+            {% endfor %}
+            {%- endmacro %}
             <nav class="sidebar-nav">
                 {% set memory_pages = ['personas', 'toolbox', 'workflow-memory', 'skillbox', 'conversations', 'knowledge-base', 'short-term', 'entity', 'summaries', 'shared', 'cache', 'memory-transfer'] %}
                 {% set continual_learning_pages = ['workflows', 'skills', 'learning-control-plane', 'persona-evolution', 'fine-tuning', 'model-registry'] %}
@@ -200,6 +212,8 @@
                     </span>
                     <span>Playground</span>
                 </a>
+
+                {{ extension_nav('Build') }}
 
                 <a href="/automations" class="nav-item {% if active_page == 'automations' %}active{% endif %}">
                     <span class="nav-icon" aria-hidden="true">
@@ -533,7 +547,9 @@
                     'settings': ('Admin', 'Settings', '/settings'),
                     'activity': ('Admin', 'Activity', '/activity'),
                 } %}
-                {% if active_page in crumb_areas %}{% set crumb = crumb_areas[active_page] %}
+                {% set ext_crumb = (ui_extensions|default([])|selectattr('key', 'equalto', active_page)|list)|first %}
+                {% if ext_crumb %}{% set crumb = (ext_crumb.group, ext_crumb.label, ext_crumb.href) %}
+                {% elif active_page in crumb_areas %}{% set crumb = crumb_areas[active_page] %}
                 {% elif active_page in memory_pages %}{% set crumb = ('Memory', 'Memory types', '/memory/knowledge-base') %}
                 {% elif active_page in continual_learning_pages %}{% set crumb = ('Memory', 'Continual learning', '/memory/workflows') %}
                 {% else %}{% set crumb = None %}{% endif %}

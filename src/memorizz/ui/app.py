@@ -321,6 +321,57 @@ SETTINGS_SECTIONS = [
         ],
     },
     {
+        "title": "Voice",
+        "description": "Keys for agents created with voice=True. An agent's voice provider is chosen on the agent (LiveKit unless it names another); only the keys of the providers you use are needed.",
+        "fields": [
+            {
+                "env": "LIVEKIT_URL",
+                "label": "LiveKit server URL",
+                "field_type": "text",
+                "placeholder": "wss://your-project.livekit.cloud",
+                "hint": "LiveKit is the default voice provider. Speech models come from LiveKit Inference, a LiveKit Cloud service. Needs the voice extra.",
+            },
+            {
+                "env": "LIVEKIT_API_KEY",
+                "label": "LiveKit API key",
+                "placeholder": "API...",
+                "hint": "From the LiveKit Cloud project's settings.",
+            },
+            {
+                "env": "LIVEKIT_API_SECRET",
+                "label": "LiveKit API secret",
+                "placeholder": "Leave blank to keep the configured secret",
+                "hint": "Signs the tokens that let the browser and the agent join a call.",
+            },
+            {
+                "env": "ELEVENLABS_API_KEY",
+                "label": "ElevenLabs API key",
+                "placeholder": "sk_...",
+                "hint": "For agents whose voice provider is ElevenLabs (speech and transcription).",
+            },
+            {
+                "env": "VAPI_API_KEY",
+                "label": "Vapi private API key",
+                "placeholder": "Leave blank to keep the configured key",
+                "hint": "For agents whose voice provider is Vapi. Creates the assistant that calls this agent.",
+            },
+            {
+                "env": "VAPI_PUBLIC_KEY",
+                "label": "Vapi public key",
+                "field_type": "text",
+                "placeholder": "The key the browser starts a call with",
+                "hint": "Safe to show: Vapi's public key is meant for the browser.",
+            },
+            {
+                "env": "MEMORIZZ_PUBLIC_URL",
+                "label": "Public address of this UI",
+                "field_type": "text",
+                "placeholder": "https://your-tunnel.example.com",
+                "hint": "Vapi asks the agent for each reply from its own servers, so it needs an https address that reaches this UI (a tunnel or a deployment). LiveKit and ElevenLabs do not need it.",
+            },
+        ],
+    },
+    {
         "title": "Browser control",
         "description": (
             "Configure the isolated Browser Use provider. Browser tasks are "
@@ -708,6 +759,16 @@ SETTINGS_FIELDS = [
 # They stay reachable without a UI session, in read-only mode, and without a
 # browser Origin check, because no browser form ever reaches them.
 _SIGNATURE_AUTHENTICATED_PATHS = frozenset({"/webhook/whatsapp/incoming"})
+# The same, by prefix: a live voice call asks for each reply here, and the
+# path carries a token only the configured assistant knows (routers/voice.py).
+_SIGNATURE_AUTHENTICATED_PREFIXES = ("/webhook/voice/vapi/",)
+
+
+def _authenticates_itself(path: str) -> bool:
+    return path in _SIGNATURE_AUTHENTICATED_PATHS or path.startswith(
+        _SIGNATURE_AUTHENTICATED_PREFIXES
+    )
+
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
@@ -871,6 +932,9 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
 
+    from . import extensions as ui_extensions
+
+    ui_extensions.shutdown(app)
     # Cleanup: stop any active Evalground benchmark subprocesses
     stop_active_eval_run_processes()
     stop_comparison_workers()
@@ -962,7 +1026,7 @@ def create_app(
         public_path = (
             path == "/login"
             or path.startswith("/static/")
-            or path in _SIGNATURE_AUTHENTICATED_PATHS
+            or _authenticates_itself(path)
         )
         principal = access.principal_for_request(request)
 
@@ -1007,7 +1071,7 @@ def create_app(
         # stay same-site only.
         if (
             request.method.upper() not in _SAFE_METHODS
-            and path not in _SIGNATURE_AUTHENTICATED_PATHS
+            and not _authenticates_itself(path)
             and _request_is_cross_origin(request)
         ):
             if path.startswith("/traces") or path.startswith("/persona-evolution"):
@@ -1025,7 +1089,7 @@ def create_app(
             read_only_mode
             and request.method.upper() not in _SAFE_METHODS
             and path not in READ_ONLY_ALLOWED_POSTS
-            and path not in _SIGNATURE_AUTHENTICATED_PATHS
+            and not _authenticates_itself(path)
             and not (
                 path == "/persona-evolution/action"
                 and app.state.persona_evolution_actions
@@ -1150,6 +1214,14 @@ def create_app(
     app.include_router(comparisons_router)
     app.include_router(agents_crud_router)
     app.include_router(playground_router)
+    from .routers.voice import router as voice_router
+
+    app.include_router(voice_router)
+    # Optional pages that are not part of the published package (none in a
+    # normal install); see ui/extensions.py.
+    from . import extensions as ui_extensions
+
+    ui_extensions.install(app, templates)
 
     # Configure the shared template engine (imported from ui.state)
     templates.env.globals["llm_model_catalog"] = LLM_MODEL_CATALOG

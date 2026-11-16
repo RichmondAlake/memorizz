@@ -520,7 +520,120 @@ def test_guarded_sibling_gets_a_not_executed_result(work_dir):
     requested, answered = _continuation_tool_ids(request)
     assert requested == {"call_A", "call_C"} and requested <= answered
     sibling = [m for m in request if m.get("tool_call_id") == "call_C"][0]
-    assert json.loads(sibling["content"])["error_code"] == "sibling_awaiting_approval"
+    # The wait is over by the time the model reads this: it says so, and
+    # that the call may be made now.
+    result = json.loads(sibling["content"])
+    assert result["error_code"] == "sibling_approval_decided"
+    assert "approved and has run" in result["message"]
+    assert "waiting" not in result["message"]
+    agent.close()
+
+
+def _approval_agent(work_dir, model, executed):
+    @governed_tool(side_effects=True, requires_approval=True)
+    def create_item(name: str) -> dict:
+        """Create an item (needs approval)."""
+        executed.append(name)
+        return {"created": name}
+
+    provider = _fs_provider(work_dir)
+    agent = MemAgent(
+        model=model,
+        tools=[create_item],
+        approval_store=SQLiteApprovalStore(work_dir / "approvals.sqlite3"),
+        memory_provider=provider,
+        memory_ids=["memory-1"],
+        auto_register=False,
+    )
+    return agent, provider
+
+
+def _thread(provider, thread_id="t1"):
+    rows = provider.retrieve_conversation_history_ordered_by_timestamp(
+        "memory-1", MemoryType.CONVERSATION_MEMORY, thread_id=thread_id
+    )
+    return [(row["role"], row["content"]) for row in rows]
+
+
+def test_a_resumed_turn_leaves_its_reply_not_the_pause_in_the_thread(work_dir):
+    executed: List[str] = []
+    model = _StubModel(
+        responses=[
+            lambda: _tool_call_response([("call_A", "create_item", {"name": "x"})]),
+            "Created x.",
+        ]
+    )
+    agent, provider = _approval_agent(work_dir, model, executed)
+
+    paused = json.loads(agent.run("create x", memory_id="memory-1", thread_id="t1"))
+    proposal_id = paused["proposal"]["proposal_id"]
+    # While it waits the thread says so in a line, not with the proposal.
+    (asked, waiting) = _thread(provider)
+    assert asked == ("user", "create x")
+    assert waiting[1].startswith("[Waiting for approval]") and proposal_id in waiting[1]
+    assert "arguments" not in waiting[1]
+
+    agent.approve(proposal_id, approver_id="operator@example.com")
+    assert agent.resume_approval(proposal_id).assistant_response == "Created x."
+
+    assert _thread(provider) == [("user", "create x"), ("assistant", "Created x.")]
+    agent.close()
+
+
+def test_a_resume_without_the_model_still_closes_the_waiting_note(work_dir):
+    executed: List[str] = []
+    model = _StubModel(
+        responses=[
+            lambda: _tool_call_response([("call_A", "create_item", {"name": "x"})]),
+        ]
+    )
+    agent, provider = _approval_agent(work_dir, model, executed)
+    paused = json.loads(agent.run("create x", memory_id="memory-1", thread_id="t1"))
+    proposal_id = paused["proposal"]["proposal_id"]
+    agent.approve(proposal_id, approver_id="operator@example.com")
+
+    agent.resume_approval(proposal_id, continue_model=False)
+
+    (_, reply) = _thread(provider)
+    assert reply[1].startswith("[Approved]") and "it ran" in reply[1]
+    assert executed == ["x"]
+    agent.close()
+
+
+def test_a_rejection_is_handed_back_to_the_model_once(work_dir):
+    executed: List[str] = []
+    model = _StubModel(
+        responses=[
+            lambda: _tool_call_response([("call_A", "create_item", {"name": "x"})]),
+            "Understood, I left it alone.",
+        ]
+    )
+    agent, provider = _approval_agent(work_dir, model, executed)
+    paused = json.loads(agent.run("create x", memory_id="memory-1", thread_id="t1"))
+    proposal_id = paused["proposal"]["proposal_id"]
+
+    # An approval that was never given cannot be resumed, and says what can.
+    agent.reject(proposal_id, approver_id="owner", reason="I will do it myself.")
+    refused = agent.resume_approval(proposal_id)
+    assert refused.error_code == "invalid_approval_state"
+    assert "resume_rejection" in refused.error
+    # The rejection alone already replaced the waiting note.
+    (_, note) = _thread(provider)
+    assert note[1].startswith("[Rejected]") and "I will do it myself." in note[1]
+
+    handed = agent.resume_rejection(proposal_id)
+
+    assert handed.ok and not handed.consumed and executed == []
+    assert handed.assistant_response == "Understood, I left it alone."
+    assert handed.tool_result["error_code"] == "approval_rejected"
+    answer = [m for m in model.requests[-1] if m.get("tool_call_id") == "call_A"][0]
+    assert json.loads(answer["content"])["reason"] == "I will do it myself."
+    assert _thread(provider) == [
+        ("user", "create x"),
+        ("assistant", "Understood, I left it alone."),
+    ]
+    again = agent.resume_rejection(proposal_id)
+    assert not again.ok and again.error_code == "invalid_approval_state"
     agent.close()
 
 

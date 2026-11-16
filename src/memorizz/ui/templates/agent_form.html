@@ -536,6 +536,36 @@
                     </div>
                 </div>
             </details>
+            <details class="builder-subsection" id="voice-settings" {% if voice|default(false) %}open{% endif %}>
+                <summary>Voice<span class="builder-subsection-desc">Let this agent speak and listen</span></summary>
+                <div class="section-body">
+                    <div class="form-group checkbox-group">
+                        <label>
+                            <input type="checkbox" id="voice" name="voice" value="on" {% if voice|default(false) %}checked{% endif %}>
+                            Give this agent a voice
+                        </label>
+                        <p class="form-hint">The agent can speak its replies, hear a recording, and (with LiveKit or Vapi) take a live call. The provider's keys are set once in <a href="/settings#settings-voice">Settings</a>; they are never saved with the agent.</p>
+                    </div>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label for="voice_provider">Voice provider</label>
+                            <select id="voice_provider" name="voice_provider">
+                                {% set chosen_voice_provider = voice_provider|default('livekit') %}
+                                <option value="livekit" {% if chosen_voice_provider == 'livekit' %}selected{% endif %}>LiveKit (default)</option>
+                                <option value="elevenlabs" {% if chosen_voice_provider == 'elevenlabs' %}selected{% endif %}>ElevenLabs</option>
+                                <option value="vapi" {% if chosen_voice_provider == 'vapi' %}selected{% endif %}>Vapi</option>
+                                <option value="openai" {% if chosen_voice_provider == 'openai' %}selected{% endif %}>OpenAI</option>
+                            </select>
+                            <p class="form-hint">LiveKit and Vapi run live calls. LiveKit, ElevenLabs and OpenAI also speak and transcribe turn by turn.</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="voice_name">Voice</label>
+                            <input id="voice_name" type="text" name="voice_name" value="{{ voice_name|default('') }}" placeholder="Provider default" autocomplete="off">
+                            <p class="form-hint">A voice ID or name from the provider. Leave blank for its default.</p>
+                        </div>
+                    </div>
+                </div>
+            </details>
             <script>
                 (function() {
                     var presetSelect = document.getElementById('persona_preset_select');

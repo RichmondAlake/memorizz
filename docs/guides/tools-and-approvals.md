@@ -107,6 +107,32 @@ The host may instead call `reject()` or `cancel_approval()`. Proposals bind the
 tool name, exact arguments, argument hash, policy reason, owner, thread and
 checkpoint, expiry, approver identity, and audit time.
 
+A rejection by itself leaves the run paused. To let the model react in the same
+run, hand the rejection back as the result of the call it asked for:
+
+```python
+agent.reject(proposal_id, approver_id="owner", reason="I will go after all.")
+result = agent.resume_rejection(proposal_id)
+
+print(result.tool_result)         # {"status": "rejected", "reason": "I will go after all.", ...}
+print(result.assistant_response)  # the model's reply to the refusal
+print(result.consumed)            # False; nothing was executed
+```
+
+The model receives the approver's reason and is told not to make the call
+again unless asked. A rejection is handed back once.
+
+**What the conversation keeps.** A turn that pauses stores a one-line waiting
+note as its reply ("[Waiting for approval] ... (proposal ...)"), not the
+proposal. When the proposal is approved and resumed, or rejected, the note is
+replaced by what happened: the model's reply, or a line saying the call ran,
+failed or was rejected. Later turns, in this thread or another, therefore
+never read a decided proposal as still waiting.
+
+**Several guarded calls in one turn.** The first one pauses and the others are
+held back. After the resume the model is told the held calls did not run and
+may be made now; each then pauses for its own approval.
+
 ## Progressive disclosure
 
 Large toolboxes should not send every schema on every turn. Attach a

@@ -41,6 +41,23 @@ Tool lists are cached per agent in `~/.memorizz/mcp_tools/` after any
 successful **Test**, **Tools** or `mcp_list_tools` call, and reused only while
 the server's URL or command is unchanged.
 
+A server that has never been listed gives the model only the facade on its
+first turn. In a script, list the servers once after building the agent and
+the first turn already has every tool under its own name:
+
+```python
+found = agent.discover_mcp_tools()            # or discover_mcp_tools("calendar")
+print(found["tools"])                         # {"calendar": ["calendar__create_event", ...]}
+print(found["errors"])                        # servers that could not be listed
+
+agent.discover_mcp_tools(only_direct_tools=True)  # also remove the facade tools
+```
+
+A call the model makes through `mcp_call_tool` to a tool that has its own name
+is recorded under that name (`calendar__create_event`) in the approval
+proposal, the workflow step and the tool log, so a tool has one name however
+the model reached it.
+
 Each listed tool is also stored in the agent's toolbox memory, one record per
 tool with an embedding of its name, description and argument names. With
 progressive tool disclosure (the default), the tools shown to the model are
@@ -248,6 +265,13 @@ memorizz mcp add local-files \
 
 To let an agent operate the apps on a Mac, `memorizz desktop connect` adds a
 local server of this kind; see [Desktop Control](../desktop-control/index.md).
+
+MemoRizz needs version 2 of the MCP Python SDK (`mcp>=2.0.0,<3.0.0`). A server
+you write and run in the same Python environment must use it too: SDK 2 has
+no `mcp.server.fastmcp`, so a server written with `FastMCP` for SDK 1 fails
+there with `ModuleNotFoundError`. Write it with
+`mcp.server.mcpserver.MCPServer`, or run it in an environment of its own; a
+server in another process can use any SDK version.
 
 Add a custom remote server:
 

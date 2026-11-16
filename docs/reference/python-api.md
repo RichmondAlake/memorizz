@@ -26,6 +26,15 @@ This page covers the stable, high-value Python surface. Import public types from
         - describe_memory
         - with_memory_consolidation
         - with_persona_learning
+        - with_voice
+        - voice_status
+        - speak
+        - listen
+        - run_voice
+        - start_voice_session
+        - end_voice_session
+        - enter_environment
+        - leave_environment
         - review_persona
         - apply_persona_proposal
         - dismiss_persona_proposal
@@ -61,6 +70,8 @@ This page covers the stable, high-value Python surface. Import public types from
         - reject
         - cancel_approval
         - resume_approval
+        - resume_rejection
+        - discover_mcp_tools
         - close
         - lifecycle
       show_source: false

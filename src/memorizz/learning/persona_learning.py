@@ -1670,7 +1670,17 @@ class PersonaLearner:
             None,
         )
         if chosen is None:
-            raise ValueError("No standing rule is waiting under that id")
+            if not waiting:
+                raise ValueError(
+                    "No standing rule is waiting for review. A review proposes "
+                    "one once enough corrections agree; persona_rule_proposals() "
+                    "lists what waits."
+                )
+            ids = ", ".join(str(item.get("proposal_id")) for item in waiting)
+            raise ValueError(
+                f"No standing rule is waiting under the id {proposal_id!r}. "
+                f"Waiting: {ids}"
+            )
         state["pending_rules"] = [item for item in waiting if item is not chosen]
         return RuleProposal.from_dict(chosen)
 

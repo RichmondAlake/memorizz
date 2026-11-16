@@ -411,6 +411,68 @@ def test_what_the_user_says_never_replaces_a_value_the_host_wrote(work_dir):
     agent.close()
 
 
+def test_a_request_is_not_a_fact_and_one_statement_gets_one_attribute(work_dir):
+    ending = "end every brief with the one thing I should do first"
+    model = _Model(
+        facts=[
+            # Something to do now, not something true of the user.
+            {
+                "entity": "user",
+                "attribute": "task",
+                "value": "Order new business cards",
+                "evidence": "Add a task: order new business cards",
+            },
+            # One preference, named twice.
+            {
+                "entity": "user",
+                "attribute": "brief_format_preference",
+                "value": "End every brief with the one thing to do first",
+                "evidence": ending,
+            },
+            {
+                "entity": "user",
+                "attribute": "brief_ending_preference",
+                "value": "Briefs end with the one thing I should do first",
+                "evidence": ending,
+            },
+            # Short values are never judged alike by their words.
+            {
+                "entity": "user",
+                "attribute": "city",
+                "value": "Lisbon",
+                "evidence": "I live in Lisbon",
+            },
+        ]
+    )
+    agent = _agent(work_dir, model)
+    agent._record_interaction(
+        "Add a task: order new business cards.", "Added.", "memory-1", "t1"
+    )
+    agent._record_interaction(
+        f"I live in Lisbon. From now on, {ending}.", "Will do.", "memory-1", "t1"
+    )
+
+    plan = agent.plan_memory_consolidation(thread_ids=["t1"])
+    added = sorted(op.details["attribute"] for op in plan.ops if op.kind == ADD_FACT)
+    assert added == ["brief_format_preference", "city"]
+    agent.apply_memory_consolidation(plan.plan_id, approved_by="operator-7")
+
+    # The next review words it a third way: memory already says it.
+    model.facts = [
+        {
+            "entity": "user",
+            "attribute": "morning_brief_ending",
+            "value": "Every brief should end with the one thing to do first",
+            "evidence": ending,
+        }
+    ]
+    agent._record_interaction(
+        f"Same as before: {ending}.", "Understood.", "memory-1", "t2"
+    )
+    again = agent.plan_memory_consolidation(thread_ids=["t2"])
+    assert [op for op in again.ops if op.kind == ADD_FACT] == []
+
+
 def test_a_fact_added_to_a_record_does_not_rename_it(work_dir):
     model = _Model(
         facts=[

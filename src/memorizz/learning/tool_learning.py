@@ -33,8 +33,9 @@ The model only proposes. The code decides what is written:
   missed, and share a word with each;
 - an example that pushes another tool out of the tools offered for a request
   that tool served is withdrawn when the revision is applied;
-- neither may carry a literal argument value from the calls it rests on, or
-  text aimed at the model;
+- neither may carry a literal argument value from the calls it rests on
+  (except a constant the tool expects: a plain word the tool's error names,
+  or that put two failed calls right), or text aimed at the model;
 - every revision is stored with its evidence and the ranks it changed, waits
   for a person unless ``auto_apply`` is given, and can be undone.
 
@@ -467,6 +468,37 @@ def _literal_values(arguments: Any) -> List[str]:
     return found
 
 
+#: Why a review left a tool alone, when it is not one a Toolbox registered.
+NOT_IN_A_TOOLBOX = "not_registered_through_a_toolbox"
+MCP_TOOL = "mcp_tool"
+
+_CONSTANT_RE = re.compile(r"[a-z][a-z_\-]{1,31}")
+
+
+def _constant_values(calls: Iterable["ToolCall"]) -> set:
+    """Argument values a note may name: constants the tool itself expects.
+
+    A value counts when a failed call was put right with it and either the
+    tool's own error names it, or two failed calls were put right with the
+    same one. Only plain words qualify (no digits, spaces or punctuation), so
+    an id, an address or a sentence a user typed is never one.
+    """
+    named: set = set()
+    seen: Dict[str, set] = {}
+    for call in calls:
+        if call.ok or not call.recovered_with:
+            continue
+        own = set(_literal_values(call.arguments))
+        error = str(call.error or "").casefold()
+        for value in set(_literal_values(call.recovered_with)) - own:
+            if not _CONSTANT_RE.fullmatch(value):
+                continue
+            if re.search(rf"(?<![a-z0-9_]){re.escape(value)}(?![a-z0-9_])", error):
+                named.add(value)
+            seen.setdefault(value, set()).add(call.source_id or call.at or id(call))
+    return named | {value for value, where in seen.items() if len(where) >= 2}
+
+
 def _parse_reply(reply: Any) -> Optional[Dict[str, Any]]:
     text = str(reply or "").strip()
     start, end = text.find("{"), text.rfind("}")
@@ -680,6 +712,12 @@ class ToolLearner:
             if name:
                 rows.setdefault(name, []).append(row)
         return rows
+
+    def _is_mcp_tool(self, tool: str) -> bool:
+        """Whether ``tool`` reaches an MCP server (its own tool or a general one)."""
+        if tool in (getattr(self.agent, "_mcp_tool_targets", None) or ()):
+            return True
+        return tool in (getattr(self.agent, "_GENERAL_MCP_TOOLS", None) or ())
 
     @staticmethod
     def _row_id(row: Mapping[str, Any]) -> str:
@@ -1078,7 +1116,11 @@ class ToolLearner:
                 [items[-1].at if items else "", *(item["at"] for item in confused)]
             )
             if tool not in rows:
-                review.skipped[tool] = "not_registered_through_a_toolbox"
+                # An MCP tool's entry is its server's and is refreshed from
+                # it, so a learned note has nowhere of its own to live.
+                review.skipped[tool] = (
+                    MCP_TOOL if self._is_mcp_tool(tool) else NOT_IN_A_TOOLBOX
+                )
             elif tool in waiting:
                 review.skipped[tool] = "revision_waiting_for_review"
             elif (
@@ -1291,6 +1333,8 @@ class ToolLearner:
             literals.update(_literal_values(call.arguments))
             if call.recovered_with:
                 literals.update(_literal_values(call.recovered_with))
+        # A constant the tool expects ("owner") is the fix itself, not data.
+        literals -= _constant_values(calls)
         used_failures, used_misses, used_confusions = set(), set(), set()
 
         def refuse(kind: str, text: str, reason: str) -> None:

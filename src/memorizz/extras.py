@@ -49,6 +49,7 @@ EXTRA_LABELS = {
     "finetune": "Fine-tuning",
     "mlx": "Apple MLX",
     "ingest-pdf": "PDF ingestion",
+    "voice": "Voice (LiveKit)",
     "sandbox": "E2B sandbox",
     "sandbox-e2b": "E2B sandbox",
     "sandbox-daytona": "Daytona sandbox",
@@ -69,6 +70,8 @@ _IMPORT_NAMES = {
     "pymdown-extensions": "pymdownx",
     "python-dotenv": "dotenv",
     "pyyaml": "yaml",
+    "livekit-agents": "livekit.agents",
+    "livekit-api": "livekit.api",
 }
 
 # The extra to name when a module is missing, for modules several extras
@@ -96,6 +99,8 @@ _PREFERRED_EXTRA = {
     "e2b": "sandbox-e2b",
     "e2b_code_interpreter": "sandbox-e2b",
     "daytona": "sandbox-daytona",
+    "livekit": "voice",
+    "av": "voice",
 }
 
 # Used only when neither pyproject.toml nor package metadata is readable.

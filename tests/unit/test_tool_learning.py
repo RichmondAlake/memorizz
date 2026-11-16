@@ -122,7 +122,9 @@ _clock = iter(range(1, 10_000))
 
 def _run(provider, query: str, *steps: Any, thread: str = "t1") -> None:
     """Store one workflow: steps are (tool, arguments, error or None)."""
-    stamp = f"2026-11-12T10:{next(_clock):02d}:00+00:00"
+    tick = next(_clock)
+    # Past 59 runs the stamp moves into the next hour and still sorts.
+    stamp = f"2026-11-12T{10 + tick // 60:02d}:{tick % 60:02d}:00+00:00"
     stored: Dict[str, Any] = {}
     for number, (tool, arguments, error) in enumerate(steps, 1):
         step = {"_id": tool, "arguments": arguments, "timestamp": stamp}
@@ -367,6 +369,66 @@ def test_the_code_refuses_what_the_calls_do_not_support(provider):
     }
 
 
+def test_a_note_may_name_a_constant_the_tool_expects(provider):
+    # The fix for these calls is one word; a note that cannot say it is no fix.
+    for number in (48213, 48377):
+        _run(
+            provider,
+            f"send the usual letter for claim {number}",
+            (
+                "send_letter",
+                {"claim_id": f"CLM-{number}", "template": "the usual one"},
+                "unknown template",
+            ),
+            (
+                "send_letter",
+                {"claim_id": f"CLM-{number}", "template": "standard"},
+                None,
+            ),
+            thread=f"t-{number}",
+        )
+    note = "Set template to `standard` unless the request names another one."
+    copied = "Pass CLM-48213 as the claim id."
+    model = _Model(
+        {
+            "notes": [
+                {"text": note, "calls": [1, 2]},
+                {"text": copied, "calls": [1, 2]},
+            ],
+            "queries": [],
+        }
+    )
+    learner = ToolLearner(_agent(provider, model, top_k=3))
+
+    (revision,) = learner.review(["send_letter"]).revisions
+
+    assert revision.notes_added == [note]
+    # An id is still data, however often it was passed.
+    assert [(item["text"], item["reason"]) for item in revision.refused] == [
+        (copied, "copies_an_argument_value")
+    ]
+
+
+def test_a_constant_seen_in_one_call_is_named_only_when_the_error_names_it(provider):
+    from memorizz.learning.tool_learning import ToolCall, _constant_values
+
+    def failed(error: str, source: str = "wf-1") -> ToolCall:
+        return ToolCall(
+            tool="add_task",
+            ok=False,
+            arguments={"source_thread": "inbox"},
+            error=error,
+            recovered_with={"source_thread": "owner", "title": "Renew passport"},
+            source_id=source,
+        )
+
+    assert _constant_values([failed("bad source_thread")]) == set()
+    assert _constant_values([failed("use a thread id or 'owner'")]) == {"owner"}
+    assert _constant_values(
+        [failed("bad source_thread"), failed("bad source_thread", "wf-2")]
+    ) == {"owner"}
+
+
 def test_a_note_needs_enough_failed_calls(provider):
     _three_bad_lookups(provider)
     model = _Model(
@@ -401,6 +463,20 @@ def test_what_a_review_skips_and_why(provider):
     third = learner.review()
     assert third.skipped["lookup_claim"] == "no_new_calls"
     assert len(model.prompts) == 2
+
+
+def test_an_mcp_tool_is_left_alone_and_the_review_says_it_is_one(provider):
+    _run(provider, "book it", ("calendar__create_event", {"title": "x"}, None))
+    _run(provider, "list them", ("mcp_list_tools", {"server_name": "calendar"}, None))
+    _run(provider, "check it", ("mirror_only", {}, None))
+    agent = _agent(provider, _Model(), top_k=3)
+    agent._mcp_tool_targets = {"calendar__create_event": ("calendar", "create_event")}
+    agent._GENERAL_MCP_TOOLS = ("mcp_list_tools", "mcp_call_tool")
+
+    skipped = ToolLearner(agent).review().skipped
+
+    assert skipped["calendar__create_event"] == skipped["mcp_list_tools"] == "mcp_tool"
+    assert skipped["mirror_only"] == "not_registered_through_a_toolbox"
 
 
 def test_a_tool_that_works_and_is_found_costs_no_model_call(provider):

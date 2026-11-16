@@ -189,6 +189,8 @@ def save_agent(agent):
                 if agent.persona_learning.enabled
                 else None
             ),
+            voice=bool(getattr(agent, "voice", False)),
+            voice_config=getattr(agent, "voice_config", None),
             memory_routing=(
                 agent.memory_routing.to_dict()
                 if getattr(agent, "memory_routing", None) is not None
@@ -475,6 +477,11 @@ def _serialize_tools_for_save(agent):
         # saved copy would outlive the server as a tool with nothing to call.
         if isinstance(tool_meta, dict) and tool_meta.get("source") == "mcp":
             continue
+        # Tools lent by an environment (MemAgent.enter_environment) belong to
+        # the environment: saving the agent while it is there must not make
+        # them the agent's own, in its record or in toolbox memory.
+        if isinstance(tool_meta, dict) and tool_meta.get("source") == "environment":
+            continue
         if isinstance(tool_meta, dict):
             serializable_tool = {
                 "_id": tool_meta.get("_id") or tool_meta.get("name"),
@@ -663,6 +670,20 @@ _RESOLVED_ON_LOAD = frozenset(
 )
 
 
+def _saved_voice_config(value: Any) -> Optional[Dict[str, Any]]:
+    """A stored voice configuration, or None when it is absent or no longer
+    valid (an agent must still load when its voice settings are stale)."""
+    if not isinstance(value, dict) or not value:
+        return None
+    from ..voice import VoiceConfig
+
+    try:
+        return VoiceConfig.from_value(value).to_dict()
+    except ValueError as exc:
+        logger.warning("Ignoring a stored voice configuration: %s", exc)
+        return None
+
+
 def _saved_settings(saved_memagent: Any) -> Dict[str, Any]:
     """The settings a stored agent record restores, normalized.
 
@@ -795,6 +816,8 @@ def _saved_settings(saved_memagent: Any) -> Dict[str, Any]:
         "background_llm_config": _dict_or_none(field("background_llm_config")),
         "memory_consolidation": _dict_or_none(field("memory_consolidation")),
         "persona_learning": _dict_or_none(field("persona_learning")),
+        "voice": bool(field("voice")),
+        "voice_config": _saved_voice_config(field("voice_config")),
         "memory_routing": _dict_or_none(field("memory_routing")),
         "reranker": _dict_or_none(field("reranker")),
         "decision_model": _dict_or_none(field("decision_model")),
@@ -1172,6 +1195,12 @@ def _refresh_persona_learning(agent, persona_learning) -> None:
     agent.persona_learning = PersonaLearningConfig.from_value(persona_learning)
 
 
+def _refresh_voice(agent, voice, voice_config) -> None:
+    agent.voice_config = voice_config
+    agent.voice = bool(voice)
+    agent._close_voice_provider()
+
+
 def _refresh_application_id(agent, application_id) -> None:
     configured = application_id or os.getenv("MEMORIZZ_APPLICATION_ID", "")
     agent.application_id = (
@@ -1466,6 +1495,7 @@ _REFRESH_STEPS: Tuple[Tuple[Tuple[str, ...], Callable[..., None]], ...] = (
     (("tools",), _code_owned),
     (("persona",), _refresh_persona),
     (("persona_learning",), _refresh_persona_learning),
+    (("voice", "voice_config"), _refresh_voice),
     (
         ("name",),
         _set(

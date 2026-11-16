@@ -425,6 +425,33 @@ def _new_persona(fields: Dict[str, str]) -> Any:
         return Persona.from_dict(fields)
 
 
+def _voice_setting(
+    record: Any,
+    enabled: Optional[bool],
+    provider: Optional[str],
+    name: Optional[str],
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """An agent's ``(voice, voice_config)`` after an MCP create or update."""
+    from ..voice import voice_settings
+
+    for value in (provider, name):
+        if value is not None and len(str(value)) > 200:
+            raise MemorizzServerError(
+                "invalid_agent",
+                "voice_provider and voice_name are at most 200 characters",
+            )
+    try:
+        return voice_settings(
+            getattr(record, "voice", False),
+            getattr(record, "voice_config", None),
+            enabled=enabled,
+            provider=provider,
+            voice=name,
+        )
+    except ValueError as exc:
+        raise MemorizzServerError("invalid_agent", str(exc)) from exc
+
+
 def _persona_learning_setting(
     current: Any,
     enabled: Optional[bool],
@@ -677,6 +704,8 @@ class MemorizzRuntime:
                     "is_favorite",
                     "automations_enabled",
                     "default_timezone",
+                    "voice",
+                    "voice_config",
                 )
             }
         value["sandbox_provider_name"] = _provider_name(value.get("sandbox_provider"))
@@ -712,6 +741,8 @@ class MemorizzRuntime:
                 "memory_types",
                 "is_favorite",
                 "semantic_cache",
+                "voice",
+                "voice_config",
                 "continual_learning",
                 "learning_control_plane",
                 "skill_retrieval",
@@ -872,6 +903,9 @@ class MemorizzRuntime:
         persona_background: Optional[str] = None,
         persona_learning: Optional[bool] = None,
         persona_learning_auto_apply: Optional[bool] = None,
+        voice: Optional[bool] = None,
+        voice_provider: Optional[str] = None,
+        voice_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a validated local agent through the governed MCP write path.
 
@@ -1058,6 +1092,9 @@ class MemorizzRuntime:
             builder.with_persona(persona)
         if learning:
             builder.with_persona_learning(**learning)
+        voice_on, voice_config = _voice_setting(None, voice, voice_provider, voice_name)
+        if voice_on or voice_config:
+            builder.with_voice(voice_config, enabled=voice_on)
         if normalized_instruction:
             builder.with_instruction(normalized_instruction)
         if normalized_memory_ids:
@@ -1170,6 +1207,9 @@ class MemorizzRuntime:
         persona_learning: Optional[bool] = None,
         persona_learning_auto_apply: Optional[bool] = None,
         holdout_rate: Optional[float] = None,
+        voice: Optional[bool] = None,
+        voice_provider: Optional[str] = None,
+        voice_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Update the safe persisted-agent surface without accepting credentials."""
         normalized, existing = self._local_agent_record(
@@ -1204,6 +1244,9 @@ class MemorizzRuntime:
                 persona_learning,
                 persona_learning_auto_apply,
                 holdout_rate,
+                voice,
+                voice_provider,
+                voice_name,
             )
         ) or bool(clear_llm)
         if not supplied:
@@ -1472,6 +1515,10 @@ class MemorizzRuntime:
         persona = persona_of(updated)
         if persona is None and persona_fields:
             persona = _new_persona(persona_fields)
+        if voice is not None or voice_provider is not None or voice_name is not None:
+            updated.voice, updated.voice_config = _voice_setting(
+                updated, voice, voice_provider, voice_name
+            )
         updated.persona_learning = _persona_learning_setting(
             updated.persona_learning,
             persona_learning,

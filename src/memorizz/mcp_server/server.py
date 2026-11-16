@@ -327,12 +327,19 @@ def create_memorizz_mcp_server(
         persona_background: Optional[str] = None,
         persona_learning: Optional[bool] = None,
         persona_learning_auto_apply: Optional[bool] = None,
+        voice: Optional[bool] = None,
+        voice_provider: Optional[str] = None,
+        voice_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create and persist a local MemAgent after durable host approval.
 
         persona_learning lets the persona grow from conversations in the
         background and needs persona_name. With persona_learning_auto_apply
         false, each change waits for review in the CLI or the local UI.
+        voice gives the agent a voice: voice_provider is livekit (the
+        default), elevenlabs, vapi or openai, and voice_name a voice ID or
+        name from that provider. Provider keys are never passed here; they
+        are set in the environment or the local UI's Settings.
         """
         return await _tool_call(
             service.create_agent,
@@ -361,6 +368,9 @@ def create_memorizz_mcp_server(
             persona_background=persona_background,
             persona_learning=persona_learning,
             persona_learning_auto_apply=persona_learning_auto_apply,
+            voice=voice,
+            voice_provider=voice_provider,
+            voice_name=voice_name,
         )
 
     @server.tool(annotations=write)
@@ -393,8 +403,14 @@ def create_memorizz_mcp_server(
         persona_learning: Optional[bool] = None,
         persona_learning_auto_apply: Optional[bool] = None,
         holdout_rate: Optional[float] = None,
+        voice: Optional[bool] = None,
+        voice_provider: Optional[str] = None,
+        voice_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Update safe local agent configuration after host approval.
+
+        voice turns the agent's voice on or off; voice_provider (livekit,
+        elevenlabs, vapi, openai) and voice_name change it and turn it on.
 
         Persona fields change the persona in place, keeping its version and
         history. persona_learning needs a persona. Reviewing or undoing what it
@@ -434,6 +450,9 @@ def create_memorizz_mcp_server(
             persona_learning=persona_learning,
             persona_learning_auto_apply=persona_learning_auto_apply,
             holdout_rate=holdout_rate,
+            voice=voice,
+            voice_provider=voice_provider,
+            voice_name=voice_name,
         )
 
     @server.tool(annotations=destructive)

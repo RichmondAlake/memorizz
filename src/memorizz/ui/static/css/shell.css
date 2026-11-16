@@ -194,6 +194,22 @@ html.theme-light {
     display: none;
 }
 
+/* A small tag beside an optional page's name (ui/extensions.py). */
+.nav-badge {
+    margin-left: auto;
+    padding: 1px 6px;
+    color: var(--accent-primary);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    background: var(--nav-active-bg);
+    border-radius: 999px;
+}
+
+body.sidebar-collapsed .nav-badge {
+    display: none;
+}
+
 .sidebar-footer {
     flex: none;
     padding: 10px 10px 12px;

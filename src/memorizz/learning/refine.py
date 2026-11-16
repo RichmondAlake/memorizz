@@ -601,6 +601,12 @@ class RefineCycle:
             )
 
     @staticmethod
+    def _waiting_key(run: RefineRun, what: str) -> str:
+        """The count for a change that waits for a person: ``planned_`` in a
+        dry run, where nothing is stored, ``proposed_`` once it is."""
+        return f"{'planned' if run.dry_run else 'proposed'}_{what}"
+
+    @staticmethod
     def _describe_flag(flag: Mapping[str, Any]) -> Tuple[str, str]:
         return (
             f"{str(flag.get('target_type') or 'record').capitalize()} "
@@ -641,7 +647,12 @@ class RefineCycle:
                 )
                 if lines
             ]
-            self._add(job, "tool_revisions" if applied else "planned_tool_revisions")
+            self._add(
+                job,
+                "tool_revisions"
+                if applied
+                else self._waiting_key(run, "tool_revisions"),
+            )
             self._item(
                 job,
                 "tool_revision",
@@ -680,10 +691,17 @@ class RefineCycle:
         for reason in review.skipped.values():
             reasons[reason] = reasons.get(reason, 0) + 1
         if reasons:
+            labels = {
+                "mcp_tool": "MCP tool(s), described by their server and not reviewed",
+                "not_registered_through_a_toolbox": (
+                    "built-in or directly added tool(s), not registered "
+                    "through a toolbox"
+                ),
+            }
             job.notes.append(
                 "Not revised: "
                 + ", ".join(
-                    f"{count} {reason.replace('_', ' ')}"
+                    f"{count} {labels.get(reason, reason.replace('_', ' '))}"
                     for reason, count in sorted(reasons.items())
                 )
             )
@@ -963,7 +981,7 @@ class RefineCycle:
         # Standing rules the same review proposed. A rule is never applied
         # by the cycle, whatever auto_apply says: it waits for its owner.
         for rule in getattr(review, "rule_proposals", None) or ():
-            self._add(job, "planned_standing_rules")
+            self._add(job, self._waiting_key(run, "standing_rules"))
             people = ", ".join(str(user) for user in getattr(rule, "users", ()) or ())
             self._item(
                 job,
@@ -993,9 +1011,10 @@ class RefineCycle:
                 }
             )
         if review.proposal is None:
-            # Why nothing was proposed; a proposal speaks for itself below.
-            job.notes.append(f"{review.outcome}: {review.code}")
-        if review.proposal is None:
+            # Why no persona addition was proposed (a proposal speaks for
+            # itself below). Said of the persona, so it does not read as a
+            # verdict on a standing rule the same review proposed.
+            job.notes.append(f"Persona addition: {review.outcome} ({review.code})")
             return
         proposal = review.proposal
         described = (
@@ -1017,7 +1036,7 @@ class RefineCycle:
             self._add(job, "persona_additions")
             self._item(job, "persona", *described)
             return
-        self._add(job, "planned_persona_additions")
+        self._add(job, "proposed_persona_additions")
         self._item(job, "persona", *described, applied=False)
         job.waiting += 1
         run.pending.append(

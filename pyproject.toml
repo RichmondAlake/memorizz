@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.17.25"
+version = "0.17.26"
 description = "A memory management library and local agent CLI for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -160,6 +160,13 @@ ui = [
     "python-multipart>=0.0.6",
 ]
 ingest-pdf = ["pypdf>=4.0.0"]
+# Voice through LiveKit, the default voice provider (MemAgent(voice=True)).
+# ElevenLabs, Vapi and OpenAI voices need no extra packages.
+voice = [
+    "livekit-agents>=1.8,<2",
+    "livekit-api>=1.2",
+    "av>=12.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
@@ -225,6 +232,10 @@ allow-direct-references = true
 # supported 2.4 format until the upload toolchain has end-to-end 2.5 support.
 core-metadata-version = "2.4"
 
+# Unreleased pages stay out of the wheel even when built from a checkout
+# that has them (they are git ignored, which Hatch also honours).
+exclude = ["src/memorizz/simuground/**"]
+
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
 
@@ -267,6 +278,8 @@ exclude = [
     "**/*.p12",
     "**/*.pfx",
     "**/*.secret",
+    "src/memorizz/simuground/**",
+    "tests/simuground/**",
     ".claude/**",
     ".venv/**",
     "apps/**/dist/**",

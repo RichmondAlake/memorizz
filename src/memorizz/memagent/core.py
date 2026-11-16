@@ -602,6 +602,8 @@ class MemAgent:
         decision_model: Any = None,
         refine_cycle: Optional[bool] = None,
         refine_interval_hours: Optional[float] = None,
+        voice: bool = False,
+        voice_config: Optional[Union[str, Dict[str, Any], Any]] = None,
     ):
         """Initialize the MemAgent with configuration.
 
@@ -609,6 +611,12 @@ class MemAgent:
         persona learning, retention) as one ordered cycle (:meth:`refine`) in
         place of the separate per-turn counters, every
         ``refine_interval_hours`` (24) when an automation worker schedules it.
+
+        ``voice=True`` gives the agent a voice (:meth:`speak`, :meth:`listen`,
+        :meth:`run_voice`, :meth:`start_voice_session`) through LiveKit;
+        ``voice_config`` names another provider (``"elevenlabs"``, ``"vapi"``,
+        ``"openai"``) or tunes it, e.g. ``{"provider": "elevenlabs", "voice":
+        "Rachel"}``. Credentials come from the environment, never from here.
         """
         # Eager creation: no first-use race between concurrent runs.
         _ContextLocal.initialize(self)
@@ -617,6 +625,20 @@ class MemAgent:
         # user's memory is registered on the agent. See _default_memory_id.
         self.multi_tenant = bool(multi_tenant)
         self.streaming = streaming
+        # Voice: off unless asked for. The configuration is kept (and saved)
+        # while voice is off, so switching it back on restores the same voice.
+        from ..voice import VoiceConfig
+
+        self.voice = bool(voice)
+        self.voice_config: Optional[Dict[str, Any]] = (
+            VoiceConfig.from_value(voice_config).to_dict()
+            if voice_config is not None
+            else None
+        )
+        self._voice_provider: Optional[Any] = None
+        # Tools lent by an environment the agent is in (name -> tool names);
+        # see enter_environment. Never saved.
+        self._environment_tools: Dict[str, List[str]] = {}
         self.capture_context_snapshots = capture_context_snapshots
         self.capture_memory_history = capture_memory_history
         self.environment_reports: Dict[str, Any] = {}
@@ -735,6 +757,8 @@ class MemAgent:
         self.delegates = list(delegates or [])
         self.semantic_layer = semantic_layer
         self._approval_execution_active = False
+        # Rejected proposals already handed to the model (resume_rejection).
+        self._rejections_delivered: Set[str] = set()
         self._turn_had_side_effects = False
         self._turn_had_nondeterministic_tools = False
         self._turn_cache_domains: Set[str] = set()
@@ -3523,7 +3547,11 @@ class MemAgent:
     def _register_mcp_tools(self):
         """Register production MCP discovery and invocation tools."""
         self._keep_mcp_runs_as_workflows()
-        if self._mcp_tools_registered or not self.tool_manager:
+        if not self.tool_manager:
+            return
+        if self._mcp_tools_registered:
+            # Configured again: tools listed since the first time count too.
+            self._register_cached_mcp_tools()
             return
 
         def list_mcp_servers() -> Dict[str, Any]:
@@ -3596,9 +3624,12 @@ class MemAgent:
         self.tool_manager.add_tool(mcp_list_prompts)
         self.tool_manager.add_tool(mcp_get_prompt)
         self._mcp_tools_registered = True
-        # Each tool a server listed before becomes its own tool, with the
-        # server's schema, so a model need not pair mcp_list_tools with
-        # mcp_call_tool (small models often confuse the two steps).
+        self._register_cached_mcp_tools()
+
+    def _register_cached_mcp_tools(self) -> None:
+        """Each tool a server listed before becomes its own tool, with the
+        server's schema, so a model need not pair mcp_list_tools with
+        mcp_call_tool (small models often confuse the two steps)."""
         for server in self.mcp_manager.server_dicts():
             name = str(server.get("name") or "")
             if name and server.get("enabled", True):
@@ -3608,6 +3639,77 @@ class MemAgent:
                     )
                 except Exception as exc:
                     logger.debug("Skipping cached MCP tools for %s: %s", name, exc)
+
+    def discover_mcp_tools(
+        self,
+        server_name: Optional[str] = None,
+        *,
+        only_direct_tools: bool = False,
+    ) -> Dict[str, Any]:
+        """List MCP servers now and register each tool as ``server__tool``.
+
+        A server that has never been listed gives the model only the general
+        tools (``mcp_list_tools``, ``mcp_call_tool``) on its first turn, and
+        the model spends steps finding out what the server offers. Call this
+        once after building the agent and the first turn already has every
+        allowed tool under its own name and schema.
+
+        Args:
+            server_name: One configured server; every enabled one when omitted.
+            only_direct_tools: Also remove the general MCP tools, so each MCP
+                tool has exactly one name. Leave it off when the model should
+                still read resources or prompts, or list a server again.
+
+        Returns:
+            ``{"ok": bool, "tools": {server: [names]}, "errors": {server: text}}``.
+            ``ok`` is False when any server could not be listed.
+        """
+        tools: Dict[str, List[str]] = {}
+        errors: Dict[str, str] = {}
+        if not self.tool_manager or getattr(self, "mcp_manager", None) is None:
+            return {"ok": False, "tools": tools, "errors": {"": "MCP is not set up"}}
+        self._register_mcp_tools()
+        if server_name:
+            wanted = [str(server_name)]
+        else:
+            wanted = [
+                str(server.get("name"))
+                for server in self.mcp_manager.server_dicts()
+                if server.get("name") and server.get("enabled", True)
+            ]
+        for name in wanted:
+            try:
+                listing = self.mcp_manager.list_tools(name)
+            except Exception as exc:
+                listing = {"ok": False, "error": str(exc)}
+            if not (isinstance(listing, dict) and listing.get("ok")):
+                detail = listing if isinstance(listing, dict) else {}
+                errors[name] = str(
+                    detail.get("error")
+                    or detail.get("message")
+                    or detail.get("error_code")
+                    or "The server could not be listed"
+                )
+                continue
+            tools[name] = self._register_mcp_server_tools(
+                name, self.mcp_manager.cached_tools(name)
+            )
+        if only_direct_tools and tools and not errors:
+            for general in self._GENERAL_MCP_TOOLS:
+                self.tool_manager.remove_tool(general)
+        return {"ok": not errors, "tools": tools, "errors": errors}
+
+    #: The tools that reach any MCP server by name (see discover_mcp_tools).
+    _GENERAL_MCP_TOOLS = (
+        "list_mcp_servers",
+        "mcp_list_tools",
+        "mcp_call_tool",
+        "mcp_list_resources",
+        "mcp_list_resource_templates",
+        "mcp_read_resource",
+        "mcp_list_prompts",
+        "mcp_get_prompt",
+    )
 
     def _capability_state(self) -> List[Dict[str, Any]]:
         """What this agent can and can't do right now (see capability_gaps)."""
@@ -6775,6 +6877,9 @@ class MemAgent:
         declared during the turn are merged into it before the write.
         """
         self._emit_memory_reference_trace(response)
+        # A turn that stopped for approval stores a short waiting note, not
+        # the proposal payload: resume_approval puts the outcome in its place.
+        recorded = self._approval_pause_note(response) or response
         if self.cache_manager.enabled:
             if session:
                 session.persistence["cache"] = "unknown"
@@ -6788,7 +6893,7 @@ class MemAgent:
                 read_only=not self._turn_had_side_effects,
                 bypass_reason=self._cache_bypass_reason,
             )
-        self._record_interaction(query, response, memory_id, thread_id, user_id=user_id)
+        self._record_interaction(query, recorded, memory_id, thread_id, user_id=user_id)
         self._schedule_background_compaction(response)
         self._note_turn_for_consolidation(memory_id, user_id, thread_id)
         self._note_turn_for_persona_learning(memory_id, user_id)
@@ -7588,13 +7693,41 @@ class MemAgent:
         approver_id: str,
         reason: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Record a host-side rejection decision."""
+        """Record a host-side rejection decision.
+
+        The paused turn's thread is told the call was rejected. To let the
+        model react in the same run, follow with :meth:`resume_rejection`.
+        """
         proposal = self._get_approval_store().reject(
             proposal_id,
             approver_id=approver_id,
             decision_reason=reason,
         )
+        if proposal.owner_id == self.agent_id:
+            self._settle_approval_turn(
+                dict(proposal.checkpoint or {}),
+                proposal.proposal_id,
+                self._approval_decided_note(proposal, "rejected"),
+            )
         return proposal.to_dict(include_arguments=True)
+
+    @staticmethod
+    def _approval_decided_note(
+        proposal: Any, decision: str, detail: Optional[str] = None
+    ) -> str:
+        """The line a decided proposal leaves in its thread when no reply does."""
+        tool = (proposal.checkpoint or {}).get("logical_tool_name") or (
+            proposal.tool_name
+        )
+        if decision == "rejected":
+            reason = str(proposal.decision_reason or "").strip()
+            text = f"[Rejected] A person rejected my request to run {tool}"
+            text += f": {reason}" if reason else "."
+            text += " It did not run."
+        else:
+            text = f"[Approved] A person approved my request to run {tool}"
+            text += f", and it failed: {detail}" if detail else ", and it ran."
+        return f"{text} (proposal {proposal.proposal_id})"
 
     def cancel_approval(
         self,
@@ -7649,6 +7782,12 @@ class MemAgent:
                 error=(
                     "Only an approved proposal can be resumed "
                     f"(current state: {proposal.status.value})"
+                    + (
+                        ". Call resume_rejection() to hand the rejection "
+                        "to the model."
+                        if proposal.status == ApprovalStatus.REJECTED
+                        else ""
+                    )
                 ),
             )
 
@@ -7682,6 +7821,18 @@ class MemAgent:
                 "tool_name": logical_tool_name,
                 "arguments": logical_arguments,
             }
+        elif model_tool_name == "mcp_call_tool" != logical_tool_name:
+            # The model used the general tool; the proposal names the
+            # server's own (see _direct_mcp_call). Replay what the model sent.
+            target = self._mcp_tool_targets.get(logical_tool_name)
+            if target is None:
+                model_tool_name = logical_tool_name
+            else:
+                model_arguments = {
+                    "server_name": target[0],
+                    "tool_name": target[1],
+                    "arguments": logical_arguments,
+                }
         tool_call = SimpleNamespace(
             id=str(checkpoint.get("tool_call_id") or f"approval-{proposal_id}"),
             function=SimpleNamespace(
@@ -7704,6 +7855,13 @@ class MemAgent:
                 )
             except Exception as exc:
                 self._persist_workflow_run(workflow)
+                self._settle_approval_turn(
+                    checkpoint,
+                    proposal_id,
+                    self._approval_decided_note(
+                        consumed_proposal, "approved", str(exc)
+                    ),
+                )
                 return ApprovalResumeResult(
                     proposal=consumed_proposal,
                     consumed=True,
@@ -7728,16 +7886,155 @@ class MemAgent:
             messages,
             checkpoint.get("deferred_tool_calls"),
             paused_tool_name=logical_tool_name,
+            decision="approved",
+        )
+        return self._continue_after_decision(
+            consumed_proposal,
+            checkpoint,
+            messages,
+            workflow,
+            raw_tool_result,
+            decision="approved",
+            continue_model=continue_model,
         )
 
-        if not continue_model or not self.model:
-            self._persist_workflow_run(workflow)
+    def resume_rejection(
+        self,
+        proposal_id: str,
+        *,
+        continue_model: bool = True,
+    ) -> ApprovalResumeResult:
+        """Hand a rejected proposal back to the model as the call's result.
+
+        The paused tool call is answered with a refusal that carries the
+        approver's reason, and the model continues the run from there: it can
+        say so, or do something else, without the host writing a message for
+        it. Nothing is executed. One rejection is handed back once; with
+        ``continue_model=False`` the refusal is only stored in the thread.
+        """
+        store = self._get_approval_store()
+        proposal = store.get(proposal_id)
+        if proposal is None:
             return ApprovalResumeResult(
-                proposal=consumed_proposal,
-                tool_result=raw_tool_result,
-                assistant_response=None,
-                consumed=True,
+                proposal=None,
+                consumed=False,
+                ok=False,
+                error_code="approval_not_found",
+                error=f"Unknown approval proposal '{proposal_id}'",
+                requested_proposal_id=proposal_id,
             )
+        if proposal.owner_id != self.agent_id:
+            return ApprovalResumeResult(
+                proposal=proposal,
+                consumed=False,
+                ok=False,
+                error_code="approval_owner_mismatch",
+                error="This proposal belongs to another agent",
+            )
+        delivered = self._rejections_delivered
+        if proposal.status != ApprovalStatus.REJECTED or proposal_id in delivered:
+            return ApprovalResumeResult(
+                proposal=proposal,
+                consumed=proposal.status == ApprovalStatus.CONSUMED,
+                ok=False,
+                error_code="invalid_approval_state",
+                error=(
+                    "This rejection was already handed to the model"
+                    if proposal.status == ApprovalStatus.REJECTED
+                    else "Only a rejected proposal can be handed back "
+                    f"(current state: {proposal.status.value})"
+                ),
+            )
+        delivered.add(proposal_id)
+
+        checkpoint = dict(proposal.checkpoint or {})
+        logical_tool_name = str(
+            checkpoint.get("logical_tool_name") or proposal.tool_name
+        )
+        self._current_memory_id = checkpoint.get("memory_id")
+        self._current_thread_id = checkpoint.get("thread_id")
+        user_id = checkpoint.get("user_id")
+        self._current_user_id = user_id
+        query = str(checkpoint.get("query") or "")
+        messages = list(checkpoint.get("messages") or [])
+        router = getattr(self, "semantic_tool_router", None)
+        if router is not None:
+            router.restore_state(checkpoint.get("router_state"))
+
+        refusal: Dict[str, Any] = {
+            "ok": False,
+            "status": "rejected",
+            "error_code": "approval_rejected",
+            "message": (
+                "Not executed: a person rejected this call. Do not make it "
+                "again unless they ask for it."
+            ),
+        }
+        if proposal.decision_reason:
+            refusal["reason"] = proposal.decision_reason
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": str(
+                    checkpoint.get("tool_call_id") or f"approval-{proposal_id}"
+                ),
+                "name": str(checkpoint.get("model_tool_name") or logical_tool_name),
+                "content": json.dumps(refusal, ensure_ascii=False, sort_keys=True),
+            }
+        )
+        self._ensure_tool_call_results(
+            messages,
+            checkpoint.get("deferred_tool_calls"),
+            paused_tool_name=logical_tool_name,
+            decision="rejected",
+        )
+        return self._continue_after_decision(
+            proposal,
+            checkpoint,
+            messages,
+            self._resume_workflow_capture(checkpoint, query, user_id),
+            refusal,
+            decision="rejected",
+            continue_model=continue_model,
+        )
+
+    def _continue_after_decision(
+        self,
+        proposal: Any,
+        checkpoint: Dict[str, Any],
+        messages: List[Dict[str, Any]],
+        workflow: Any,
+        tool_result: Any,
+        *,
+        decision: str,
+        continue_model: bool,
+    ) -> ApprovalResumeResult:
+        """Let the model carry on once a paused call has its result.
+
+        Shared by :meth:`resume_approval` and :meth:`resume_rejection`. Every
+        way out stores the outcome in the paused turn's thread.
+        """
+        proposal_id = proposal.proposal_id
+        consumed = decision == "approved"
+        query = str(checkpoint.get("query") or "")
+        user_id = checkpoint.get("user_id")
+
+        def done(response: Optional[str], stored: Optional[str] = None):
+            self._persist_workflow_run(workflow)
+            self._settle_approval_turn(
+                checkpoint,
+                proposal_id,
+                stored or response or self._approval_decided_note(proposal, decision),
+            )
+            return ApprovalResumeResult(
+                proposal=proposal,
+                tool_result=tool_result,
+                assistant_response=response,
+                consumed=consumed,
+            )
+
+        if not continue_model or not self.model:
+            return done(None)
 
         # A streamed run told the model to finish with memorizz_finalize_answer,
         # which this continuation does not offer; without this the model
@@ -7765,24 +8062,15 @@ class MemAgent:
                     stage=f"approval_resume_{iteration + 1}"
                 )
                 if isinstance(response, str):
-                    self._persist_workflow_run(workflow)
-                    return ApprovalResumeResult(
-                        proposal=consumed_proposal,
-                        tool_result=raw_tool_result,
-                        assistant_response=response,
-                        consumed=True,
-                    )
+                    return done(response)
                 if hasattr(response, "choices") and response.choices:
                     message = response.choices[0].message
                     if not message.tool_calls:
-                        self._persist_workflow_run(workflow)
-                        return ApprovalResumeResult(
-                            proposal=consumed_proposal,
-                            tool_result=raw_tool_result,
-                            assistant_response=(
-                                message.content or "I couldn't generate a response."
-                            ),
-                            consumed=True,
+                        if message.content:
+                            return done(message.content)
+                        return done(
+                            "I couldn't generate a response.",
+                            self._approval_decided_note(proposal, decision),
                         )
                     self._append_assistant_tool_calls(messages, message)
                     self._execute_turn_tool_calls(
@@ -7796,21 +8084,12 @@ class MemAgent:
                     continue
                 break
         except ApprovalRequired as approval:
-            self._persist_workflow_run(workflow)
-            return ApprovalResumeResult(
-                proposal=consumed_proposal,
-                tool_result=raw_tool_result,
-                assistant_response=self._approval_required_payload(approval.proposal),
-                consumed=True,
-            )
-        self._persist_workflow_run(workflow)
-        return ApprovalResumeResult(
-            proposal=consumed_proposal,
-            tool_result=raw_tool_result,
-            assistant_response=(
-                "I reached the maximum number of tool-call iterations while resuming."
-            ),
-            consumed=True,
+            # The run reached another guarded call: its waiting note takes
+            # the place of this one.
+            return done(self._approval_required_payload(approval.proposal))
+        return done(
+            "I reached the maximum number of tool-call iterations while resuming.",
+            self._approval_decided_note(proposal, decision),
         )
 
     def run_stream_events(
@@ -8610,6 +8889,18 @@ class MemAgent:
             memory=self._current_memory_id or "default",
         )
 
+    def _used_only_environment_tools(self, workflow) -> bool:
+        """True when every step of ``workflow`` called a tool lent by an
+        environment the agent is in (see :meth:`enter_environment`)."""
+        lent = {name for names in self._environment_tools.values() for name in names}
+        if not lent:
+            return False
+        steps = workflow.steps
+        values = list(steps.values()) if isinstance(steps, dict) else list(steps)
+        return bool(values) and all(
+            isinstance(step, dict) and step.get("_id") in lent for step in values
+        )
+
     def _persist_workflow_run(self, workflow) -> bool:
         """Store a captured workflow and feed the continual-learning loop.
 
@@ -8623,6 +8914,11 @@ class MemAgent:
             return False
         if getattr(workflow, "awaiting_approval", False):
             return False  # stored when the approved resume finishes the run
+        if self._used_only_environment_tools(workflow):
+            # Nothing to learn from: every tool it used leaves with the
+            # environment, so the workflow could never be run again (and a
+            # skill promoted from it would name tools the agent lacks).
+            return False
         self._apply_workflow_outcome_evaluator(workflow)
         try:
             record_id = workflow.store_workflow(self.memory_provider)
@@ -8874,8 +9170,37 @@ class MemAgent:
         }
 
     @staticmethod
-    def _deferred_tool_result(paused_tool_name: str) -> str:
-        """Tool message for a call skipped because a sibling awaits approval."""
+    def _deferred_tool_result(
+        paused_tool_name: str, decision: Optional[str] = None
+    ) -> str:
+        """Tool message for a call skipped because a sibling awaits approval.
+
+        ``decision`` is given on a resume ("approved" or "rejected"): the
+        wait is over by then, and a result that still said "waiting" made
+        the model report the call as held instead of making it.
+        """
+        if decision:
+            outcome = (
+                "has now been approved and has run"
+                if decision == "approved"
+                else "has now been rejected and did not run"
+            )
+            return json.dumps(
+                {
+                    "ok": False,
+                    "status": "not_executed",
+                    "error_code": "sibling_approval_decided",
+                    "message": (
+                        "Not executed: this call was held back while another "
+                        f"tool call in the same turn ({paused_tool_name}) "
+                        f"waited for a person's decision. That call {outcome}. "
+                        "Nothing is holding this call any more: make it "
+                        "again now if it is still needed."
+                    ),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
         return json.dumps(
             {
                 "ok": False,
@@ -8967,6 +9292,7 @@ class MemAgent:
         deferred: Optional[List[Dict[str, Any]]] = None,
         *,
         paused_tool_name: str = "tool",
+        decision: Optional[str] = None,
     ) -> None:
         """Give every tool_call of the last assistant turn a tool result.
 
@@ -9011,7 +9337,7 @@ class MemAgent:
                     "role": "tool",
                     "tool_call_id": call_id,
                     "name": name or "tool",
-                    "content": self._deferred_tool_result(paused_tool_name),
+                    "content": self._deferred_tool_result(paused_tool_name, decision),
                 }
             )
             answered.add(call_id)
@@ -9136,6 +9462,21 @@ class MemAgent:
         target = getattr(self, "_mcp_tool_targets", {}).get(tool_name)
         return (target[0], target[1], dict(arguments)) if target else None
 
+    def _direct_mcp_call(
+        self, arguments: Dict[str, Any]
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """``(server__tool, arguments)`` for an ``mcp_call_tool`` call whose
+        tool is registered under its own name, else None."""
+        server = str(arguments.get("server_name") or "")
+        tool = str(arguments.get("tool_name") or "")
+        if not server or not tool:
+            return None
+        public = self._mcp_tool_name(server, tool)
+        if getattr(self, "_mcp_tool_targets", {}).get(public) != (server, tool):
+            return None
+        values = arguments.get("arguments")
+        return public, dict(values) if isinstance(values, dict) else {}
+
     def _prepare_mcp_call(
         self, tool_name: str, arguments: Dict[str, Any]
     ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], List[str]]:
@@ -9176,6 +9517,95 @@ class MemAgent:
             },
             notes,
         )
+
+    @staticmethod
+    def _approval_pause_note(payload: Any) -> Optional[str]:
+        """The line stored as the reply of a turn that stopped for approval.
+
+        ``payload`` is what ``run`` returned. None when it is not an approval
+        pause. The note carries the proposal id: that is how the decision
+        finds it again (:meth:`_settle_approval_turn`).
+        """
+        if not isinstance(payload, str) or '"approval_required"' not in payload:
+            return None
+        try:
+            value = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(value, dict) or value.get("status") != "approval_required":
+            return None
+        proposal = value.get("proposal")
+        if not isinstance(proposal, dict) or not proposal.get("proposal_id"):
+            return None
+        return (
+            f"[Waiting for approval] I asked to run {proposal.get('tool_name')} "
+            "and stopped until a person approves or rejects it "
+            f"(proposal {proposal['proposal_id']}). It has not run. This note "
+            "is replaced by the outcome once the decision is made."
+        )
+
+    def _settle_approval_turn(
+        self, checkpoint: Dict[str, Any], proposal_id: str, text: Optional[str]
+    ) -> None:
+        """Store what became of a paused turn in place of its waiting note.
+
+        Without this the thread kept "waiting for approval" as the turn's
+        reply and never got the resumed one, so later turns (and other
+        threads, through recall) read a decided proposal as still pending.
+        A turn that stored nothing when it paused (a streamed one) gets its
+        whole exchange here.
+        """
+        manager, provider = self.memory_manager, self.memory_provider
+        memory_id = checkpoint.get("memory_id")
+        thread_id = checkpoint.get("thread_id")
+        text = str(text or "").strip()
+        if not (manager and provider and memory_id and thread_id and text):
+            return
+        text = self._approval_pause_note(text) or text
+        user_id = checkpoint.get("user_id")
+        try:
+            rows = provider.retrieve_conversation_history_ordered_by_timestamp(
+                memory_id,
+                MemoryType.CONVERSATION_MEMORY,
+                user_id=user_id,
+                thread_id=thread_id,
+            )
+            waiting = [
+                row
+                for row in rows or []
+                if isinstance(row, dict)
+                and row.get("role") == Role.ASSISTANT.value
+                and str(proposal_id) in str(row.get("content") or "")
+            ]
+            if not waiting:
+                query = str(checkpoint.get("query") or "").strip()
+                if query:
+                    self._record_interaction(
+                        query, text, memory_id, thread_id, user_id=user_id
+                    )
+                    return
+            for row in waiting:
+                row_id = row.get("_id") or row.get("id")
+                if row_id:
+                    provider.delete_by_id(str(row_id), MemoryType.CONVERSATION_MEMORY)
+            manager.clear_conversation_cache(memory_id)
+            unit = manager.create_conversation_memory_unit(
+                role=Role.ASSISTANT,
+                content=text,
+                thread_id=thread_id,
+                memory_id=memory_id,
+                agent_id=self.agent_id,
+                user_id=user_id,
+            )
+            unit_id = manager.save_memory_unit(unit, memory_id)
+            if self._active_retrieval_policy().is_sealed:
+                self._mark_sealed(MemoryType.CONVERSATION_MEMORY, [unit_id])
+        except Exception as exc:
+            logger.warning(
+                "Could not store the outcome of approval %s in its thread: %s",
+                proposal_id,
+                exc,
+            )
 
     @staticmethod
     def _approval_required_payload(proposal: Any) -> str:
@@ -9333,6 +9763,14 @@ class MemAgent:
                         "error": str(exc),
                     }
                     error_message = str(exc)
+
+            if result is None and logical_tool_name == "mcp_call_tool":
+                # The same call as the server's own tool: proposals, workflow
+                # steps and the tool log name it one way, whichever the
+                # model used.
+                direct = self._direct_mcp_call(logical_arguments)
+                if direct is not None:
+                    logical_tool_name, logical_arguments = direct
 
             if result is None:
                 policy = self._effective_tool_policy(
@@ -16297,6 +16735,175 @@ class MemAgent:
         """Add a tool (delegated to tool manager)."""
         return self.tool_manager.add_tool(tool, persist)
 
+    # ---- environments ----------------------------------------------------
+
+    def enter_environment(
+        self, name: str, tools: List[Callable[..., Any]]
+    ) -> List[str]:
+        """Lend the agent an environment's tools for as long as it is there.
+
+        The tools join the agent's current tool list and are offered on every
+        turn, but they belong to the environment: they are never written to
+        the saved agent or to toolbox memory, and :meth:`leave_environment`
+        takes them away again. Entering the same environment twice replaces
+        its tools. Raises ValueError when a tool's name is already one of the
+        agent's own tools.
+        """
+        environment = str(name or "").strip()
+        if not environment:
+            raise ValueError("An environment needs a name")
+        if not self.tool_manager:
+            raise RuntimeError("This agent has no tool manager")
+        self.leave_environment(environment)
+        taken = set(self.tool_manager.list_tools())
+        prepared = []
+        for tool in tools or []:
+            if not callable(tool):
+                raise TypeError("Environment tools must be callables")
+            metadata = dict(self.tool_manager._generate_tool_metadata(tool))
+            tool_name = metadata["name"]
+            if tool_name in taken:
+                raise ValueError(
+                    f"The agent already has a tool named {tool_name!r}; "
+                    f"the {environment} environment cannot lend another"
+                )
+            taken.add(tool_name)
+            metadata.update(source="environment", environment=environment)
+            prepared.append((tool_name, metadata, tool))
+        added: List[str] = []
+        for tool_name, metadata, tool in prepared:
+            self.tool_manager.add_tool(
+                {
+                    "name": tool_name,
+                    "metadata": metadata,
+                    "function": tool,
+                    "type": "function",
+                }
+            )
+            added.append(tool_name)
+        self._environment_tools[environment] = added
+        router = getattr(self, "semantic_tool_router", None)
+        if router is not None:
+            # Offered every turn: they have no toolbox row to be found by.
+            router.always_visible.update(added)
+        return list(added)
+
+    def leave_environment(self, name: str) -> List[str]:
+        """Take back the tools :meth:`enter_environment` lent; return their names."""
+        environment = str(name or "").strip()
+        removed = self._environment_tools.pop(environment, [])
+        if not removed:
+            return []
+        router = getattr(self, "semantic_tool_router", None)
+        for tool_name in removed:
+            metadata = self.tool_manager.get_tool_metadata(tool_name)
+            # Only what the environment lent: never a tool the agent has since
+            # been given under the same name.
+            if isinstance(metadata, dict) and metadata.get("source") == "environment":
+                self.tool_manager.remove_tool(tool_name)
+            if router is not None:
+                router.always_visible.discard(tool_name)
+        return list(removed)
+
+    @property
+    def environments(self) -> Dict[str, List[str]]:
+        """The environments the agent is in, each with the tools it lent."""
+        return {name: list(tools) for name, tools in self._environment_tools.items()}
+
+    # ---- voice -----------------------------------------------------------
+
+    def with_voice(self, enabled: bool = True, config: Any = None) -> "MemAgent":
+        """Turn the agent's voice on or off, optionally changing its settings."""
+        from ..voice import VoiceConfig
+
+        if config is not None:
+            self.voice_config = VoiceConfig.from_value(config).to_dict()
+        self.voice = bool(enabled)
+        self._close_voice_provider()
+        return self
+
+    @property
+    def voice_provider(self) -> Any:
+        """The agent's voice provider. Raises VoiceError when voice is off."""
+        from ..voice import VoiceError, create_voice_provider
+
+        if not self.voice:
+            raise VoiceError(
+                "This agent has no voice; create it with voice=True",
+                code="voice_disabled",
+            )
+        if self._voice_provider is None:
+            self._voice_provider = create_voice_provider(self.voice_config)
+        return self._voice_provider
+
+    def _close_voice_provider(self) -> None:
+        provider, self._voice_provider = self._voice_provider, None
+        if provider is not None:
+            try:
+                provider.close()
+            except Exception:
+                logger.debug("Closing the voice provider failed", exc_info=True)
+
+    def voice_status(self) -> Dict[str, Any]:
+        """Whether the agent can speak now: provider, readiness, what is missing."""
+        from ..voice import create_voice_provider
+
+        status = create_voice_provider(self.voice_config).status()
+        status["enabled"] = bool(self.voice)
+        return status
+
+    def speak(self, text: str) -> Any:
+        """Say ``text`` aloud: returns a ``VoiceAudio`` (bytes and MIME type)."""
+        return self.voice_provider.synthesize(text)
+
+    def listen(self, audio: bytes, mime_type: str = "audio/webm") -> str:
+        """Transcribe a recording of someone speaking to the agent."""
+        return self.voice_provider.transcribe(audio, mime_type)
+
+    def run_voice(
+        self, audio: bytes, mime_type: str = "audio/webm", **run_kwargs: Any
+    ) -> Dict[str, Any]:
+        """One spoken turn: transcribe, answer with :meth:`run`, speak the answer.
+
+        Returns ``{"heard", "text", "audio"}``; ``audio`` is None when nothing
+        was heard or the answer is empty. ``run_kwargs`` go to :meth:`run`.
+        """
+        heard = self.listen(audio, mime_type)
+        if not heard:
+            return {"heard": "", "text": "", "audio": None}
+        text = self.run(heard, **run_kwargs)
+        return {
+            "heard": heard,
+            "text": text,
+            "audio": self.speak(text) if str(text or "").strip() else None,
+        }
+
+    def start_voice_session(
+        self, greeting: Optional[str] = None, **run_kwargs: Any
+    ) -> Dict[str, Any]:
+        """Start a live call with the agent (LiveKit or Vapi).
+
+        Returns what a browser needs to join: for LiveKit ``server_url`` and
+        ``participant_token``, for Vapi ``public_key`` and ``assistant_id``.
+        Each thing the caller says is answered with :meth:`run`
+        (``run_kwargs`` are passed to it). End it with
+        :meth:`end_voice_session`.
+        """
+
+        def reply(said: str) -> str:
+            return self.run(said, **run_kwargs)
+
+        return self.voice_provider.realtime_session(
+            agent_id=self.agent_id,
+            agent_name=self.name or "the agent",
+            reply=reply,
+            greeting=greeting,
+        )
+
+    def end_voice_session(self, session_id: str) -> None:
+        """End a live call started by :meth:`start_voice_session`."""
+        self.voice_provider.end_realtime_session(session_id)
+
     def set_holdout(
         self,
         rate: Optional[float] = None,
@@ -16500,6 +17107,7 @@ class MemAgent:
         ``keep_traces=True`` to keep the scope's trace records; providers
         retain their own fail-closed validation.
         """
+        self._close_voice_provider()
         report: Dict[str, Any] = {
             "ok": True,
             "cleanup": None,

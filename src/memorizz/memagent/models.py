@@ -48,6 +48,10 @@ class MemAgentModel(BaseModel):
     memory_consolidation: Optional[Dict[str, Any]] = None
     # Persona learning settings (PersonaLearningConfig); None = off.
     persona_learning: Optional[Dict[str, Any]] = None
+    # Voice: whether the agent speaks, and its VoiceConfig (provider, voice,
+    # models). Never credentials: those come from the environment.
+    voice: Optional[bool] = False
+    voice_config: Optional[Dict[str, Any]] = None
     # What persona learning has done: last review, a change waiting for review.
     persona_learning_state: Optional[Dict[str, Any]] = None
     # Memory routing of the agent's own writes (MemoryRoutingConfig); None = off.

@@ -47,6 +47,19 @@ _SKIP = re.compile(
     r"|/api/finetune/evaluate$|/api/finetune/runs/[^/]+/(rank|speed)$"
 )
 
+# Extra quiet paths added by optional pages (see ui/extensions.py).
+_EXTRA_SKIP: List["re.Pattern[str]"] = []
+
+
+def add_quiet_posts(patterns: List[str]) -> None:
+    """Leave posts matching these patterns out of the activity log."""
+    known = {pattern.pattern for pattern in _EXTRA_SKIP}
+    for pattern in patterns:
+        if pattern and pattern not in known:
+            _EXTRA_SKIP.append(re.compile(pattern))
+            known.add(pattern)
+
+
 # (method, path pattern, area, what happened). ``{id}`` is the record named.
 _RULES: List[Tuple[str, str, str, str]] = [
     ("POST", r"/connect", "Store", "Connected to a store"),
@@ -267,6 +280,8 @@ def describe(method: str, path: str) -> Optional[Dict[str, str]]:
     is not one (or is too frequent to be worth a line)."""
     method = method.upper()
     if method not in {"POST", "PUT", "PATCH", "DELETE"} or _SKIP.search(path):
+        return None
+    if any(pattern.search(path) for pattern in _EXTRA_SKIP):
         return None
     for wanted, pattern, area, label in _COMPILED:
         if wanted not in ("*", method):

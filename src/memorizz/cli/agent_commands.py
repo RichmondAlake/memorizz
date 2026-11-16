@@ -66,6 +66,27 @@ def _llm_config(
     return config
 
 
+def _voice_change(
+    record: Any,
+    enabled: Optional[bool],
+    provider: Optional[str],
+    name: Optional[str],
+) -> "tuple[bool, Optional[Dict[str, Any]]]":
+    """The agent's voice settings after the --voice options are applied."""
+    from ..voice import voice_settings
+
+    try:
+        return voice_settings(
+            getattr(record, "voice", False),
+            getattr(record, "voice_config", None),
+            enabled=enabled,
+            provider=provider,
+            voice=name,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--voice-provider") from exc
+
+
 def _agent_summary(agent: Any) -> Dict[str, Any]:
     application_mode = getattr(agent, "application_mode", None)
     if hasattr(application_mode, "value"):
@@ -84,6 +105,12 @@ def _agent_summary(agent: Any) -> Dict[str, Any]:
         "application_mode": application_mode,
         "max_steps": getattr(agent, "max_steps", None),
         "semantic_cache": semantic_cache,
+        "voice": bool(getattr(agent, "voice", False)),
+        "voice_provider": (
+            (getattr(agent, "voice_config", None) or {}).get("provider")
+            or ("livekit" if getattr(agent, "voice", False) else None)
+        ),
+        "voice_name": (getattr(agent, "voice_config", None) or {}).get("voice"),
         "tool_cache": bool(
             getattr(agent, "tool_cache", None)
             or getattr(agent, "tool_cache_config", None)
@@ -277,6 +304,19 @@ def create_agent(
         None, "--memory-id", help="Attach a memory ID; repeat for multiple IDs."
     ),
     semantic_cache: bool = typer.Option(False, "--semantic-cache/--no-semantic-cache"),
+    voice: Optional[bool] = typer.Option(
+        None,
+        "--voice/--no-voice",
+        help="Give the agent a voice (LiveKit unless --voice-provider names another).",
+    ),
+    voice_provider: Optional[str] = typer.Option(
+        None,
+        "--voice-provider",
+        help="livekit, elevenlabs, vapi or openai. Turns voice on.",
+    ),
+    voice_name: Optional[str] = typer.Option(
+        None, "--voice-name", help="A voice ID or name from the voice provider."
+    ),
     tool_cache: bool = typer.Option(
         False,
         "--tool-cache/--no-tool-cache",
@@ -353,6 +393,9 @@ def create_agent(
         )
         if instruction and instruction.strip():
             builder.with_instruction(instruction.strip())
+        voice_on, voice_config = _voice_change(None, voice, voice_provider, voice_name)
+        if voice_on or voice_config:
+            builder.with_voice(voice_config, enabled=voice_on)
         if memory_id:
             builder.with_memory_ids(
                 [value.strip() for value in memory_id if value.strip()]
@@ -483,6 +526,19 @@ def update_agent(
     max_steps: Optional[int] = typer.Option(None, "--max-steps", min=1, max=1000),
     llm_provider: Optional[str] = typer.Option(None, "--llm-provider"),
     model: Optional[str] = typer.Option(None, "--model", help="With --llm-provider."),
+    voice: Optional[bool] = typer.Option(
+        None, "--voice/--no-voice", help="Turn the agent's voice on or off."
+    ),
+    voice_provider: Optional[str] = typer.Option(
+        None,
+        "--voice-provider",
+        help="livekit, elevenlabs, vapi or openai. Turns voice on.",
+    ),
+    voice_name: Optional[str] = typer.Option(
+        None,
+        "--voice-name",
+        help='A voice ID or name from the voice provider; "" for its default.',
+    ),
     harness_mode: Optional[str] = typer.Option(
         None,
         "--harness-mode",
@@ -514,7 +570,7 @@ def update_agent(
     ),
     raw_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ):
-    """Change a saved MemAgent's name, instruction, model, harness or delegates.
+    """Change a saved MemAgent's name, instruction, model, voice, harness or delegates.
 
     Options left out keep their current values.
     """
@@ -535,6 +591,11 @@ def update_agent(
             changes["max_steps"] = max_steps
         if llm_provider or model:
             changes["llm_config"] = _llm_config(llm_provider, model, disabled=False)
+        if voice is not None or voice_provider is not None or voice_name is not None:
+            voice_on, voice_config = _voice_change(
+                record, voice, voice_provider, voice_name
+            )
+            changes.update(voice=voice_on, voice_config=voice_config)
         if harness_mode is not None and harness_mode.strip().lower() == "off":
             changes.update(meta_harness=False, meta_harness_mode=None)
         elif (

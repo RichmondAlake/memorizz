@@ -69,6 +69,8 @@ class MemAgentBuilder:
         self._background_model: Any = None
         self._memory_consolidation: Any = None
         self._persona_learning: Any = None
+        self._voice: bool = False
+        self._voice_config: Any = None
         self._memory_routing: Any = None
         self._reranker: Any = None
         self._decision_model: Any = None
@@ -533,6 +535,22 @@ class MemAgentBuilder:
         self._persona_learning = {**settings, "enabled": enabled}
         return self
 
+    def with_voice(
+        self, provider: Any = None, enabled: bool = True, **settings: Any
+    ) -> "MemAgentBuilder":
+        """Give the agent a voice. ``provider`` is a name ("livekit", the
+        default, "elevenlabs", "vapi", "openai") or a config dict; ``settings``
+        are ``VoiceConfig`` fields such as ``voice`` or ``tts_model``."""
+        config: Any = provider
+        if settings:
+            base = dict(provider) if isinstance(provider, dict) else {}
+            if isinstance(provider, str):
+                base["provider"] = provider
+            config = {**base, **settings}
+        self._voice = bool(enabled)
+        self._voice_config = config
+        return self
+
     def with_memory_routing(
         self, router: Any = "auto", **settings: Any
     ) -> "MemAgentBuilder":
@@ -726,6 +744,8 @@ class MemAgentBuilder:
                 ),
                 memory_consolidation=self._memory_consolidation,
                 persona_learning=self._persona_learning,
+                voice=self._voice,
+                voice_config=self._voice_config,
                 memory_routing=self._memory_routing,
                 reranker=self._reranker,
                 decision_model=self._decision_model,

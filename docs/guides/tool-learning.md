@@ -128,7 +128,11 @@ The model proposes. The code decides what is written:
 - A note cites the failed calls it rests on, and an example cites the missed
   requests it rests on and shares a word with each.
 - Neither may contain an argument value from the calls (an id, a name, an
-  amount), or text aimed at the model.
+  amount), or text aimed at the model. One kind of value is allowed: a
+  constant the tool expects. That is a plain word (letters, `_` or `-`; no
+  digits or spaces) that put a failed call right, and that either the tool's
+  own error names or that put two failed calls right. "Set source_thread to
+  `owner` for a task the owner dictated" can be written; a claim number never.
 - A "Not for" line starts with those words, names a registered tool other
   than its own, cites requests that tool served, and shares a word with each.
 - A note or "Not for" line is one line of at most 220 characters. A tool

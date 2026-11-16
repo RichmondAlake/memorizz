@@ -616,6 +616,7 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
         else DEFAULT_MAX_STEPS,
         "tool_access": getattr(agent, "tool_access", None) or "private",
         "semantic_cache": bool(getattr(agent, "semantic_cache", False)),
+        **_voice_form_values(agent),
         "tool_cache": bool(getattr(agent, "tool_cache_config", None)),
         "continual_learning": bool(getattr(agent, "continual_learning", False)),
         "learning_control_plane": bool(getattr(agent, "learning_control_plane", False)),
@@ -1362,6 +1363,51 @@ def _retrieval_policy_with_privacy(
     return current or None
 
 
+def _voice_form_values(agent: Any = None) -> Dict[str, Any]:
+    """The agent form's voice fields, from a stored agent (or the defaults)."""
+    from ...voice import DEFAULT_VOICE_PROVIDER
+
+    config = _as_dict(getattr(agent, "voice_config", None)) if agent else {}
+    return {
+        "voice": bool(getattr(agent, "voice", False)) if agent else False,
+        "voice_provider": config.get("provider") or DEFAULT_VOICE_PROVIDER,
+        "voice_name": config.get("voice") or "",
+    }
+
+
+def _voice_value(
+    enabled: Optional[str],
+    provider: Optional[str],
+    name: Optional[str],
+    existing: Any = None,
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """``(voice, voice_config)`` from the form. Settings the form does not
+    show (models, provider options) are kept from the stored configuration
+    when the provider is unchanged."""
+    from ...voice import DEFAULT_VOICE_PROVIDER, VOICE_PROVIDERS, VoiceConfig
+
+    chosen = str(provider or "").strip().lower()
+    if chosen not in VOICE_PROVIDERS:
+        chosen = DEFAULT_VOICE_PROVIDER
+    kept = _as_dict(existing)
+    config: Dict[str, Any] = dict(kept) if kept.get("provider") == chosen else {}
+    config["provider"] = chosen
+    voice_name = str(name or "").strip()
+    if voice_name:
+        config["voice"] = voice_name
+    else:
+        config.pop("voice", None)
+    is_on = _parse_bool(enabled)
+    try:
+        normalised = VoiceConfig.from_value(config).to_dict()
+    except ValueError:
+        normalised = {"provider": chosen}
+    # Nothing chosen and voice off: store no configuration at all.
+    if not is_on and normalised == {"provider": DEFAULT_VOICE_PROVIDER} and not kept:
+        return False, None
+    return is_on, normalised
+
+
 def _persona_learning_value(
     enabled: Optional[str],
     every_n_turns: Optional[str],
@@ -1687,6 +1733,7 @@ async def agent_create_page(
             "max_steps": DEFAULT_MAX_STEPS,
             "tool_access": "private",
             "semantic_cache": False,
+            **_voice_form_values(),
             "tool_cache": False,
             "continual_learning": False,
             "learning_control_plane": False,
@@ -2004,6 +2051,9 @@ async def agent_create_submit(
     persona_learning: Optional[str] = Form(None),
     persona_learning_every_n_turns: Optional[str] = Form(None),
     persona_learning_auto_apply: Optional[str] = Form(None),
+    voice: Optional[str] = Form(None),
+    voice_provider: Optional[str] = Form(None),
+    voice_name: Optional[str] = Form(None),
     skill_injection_role: str = Form("user"),
     continual_learning_require_shadow: Optional[str] = Form(None),
     continual_learning_shadow_evaluation: Optional[str] = Form(None),
@@ -2095,6 +2145,7 @@ async def agent_create_submit(
     persona_learning_value = _persona_learning_value(
         persona_learning, persona_learning_every_n_turns, persona_learning_auto_apply
     )
+    voice_enabled, voice_config_value = _voice_value(voice, voice_provider, voice_name)
     if memory_models_form:  # an empty select posts nothing: it means none
         reranker, memory_routing = reranker or "", memory_routing or ""
         decision_model = decision_model or ""
@@ -2211,6 +2262,9 @@ async def agent_create_submit(
         "max_steps": max_steps,
         "tool_access": tool_access,
         "semantic_cache": semantic_cache_enabled,
+        "voice": voice_enabled,
+        "voice_provider": (voice_config_value or {}).get("provider") or "livekit",
+        "voice_name": (voice_config_value or {}).get("voice") or "",
         "tool_cache": tool_cache_enabled,
         "continual_learning": continual_learning_enabled,
         "learning_control_plane": learning_control_plane_enabled,
@@ -2342,6 +2396,8 @@ async def agent_create_submit(
         background_llm_config=background_llm_config_value,
         memory_consolidation=memory_consolidation_value,
         persona_learning=persona_learning_value,
+        voice=voice_enabled,
+        voice_config=voice_config_value,
         memory_routing=memory_routing_value,
         reranker=reranker_value,
         decision_model=decision_model_value,
@@ -2432,6 +2488,9 @@ async def agent_edit_submit(
     persona_learning: Optional[str] = Form(None),
     persona_learning_every_n_turns: Optional[str] = Form(None),
     persona_learning_auto_apply: Optional[str] = Form(None),
+    voice: Optional[str] = Form(None),
+    voice_provider: Optional[str] = Form(None),
+    voice_name: Optional[str] = Form(None),
     skill_injection_role: str = Form("user"),
     continual_learning_require_shadow: Optional[str] = Form(None),
     continual_learning_shadow_evaluation: Optional[str] = Form(None),
@@ -2535,6 +2594,9 @@ async def agent_edit_submit(
         persona_learning_every_n_turns,
         persona_learning_auto_apply,
         getattr(existing, "persona_learning", None),
+    )
+    voice_enabled, voice_config_value = _voice_value(
+        voice, voice_provider, voice_name, getattr(existing, "voice_config", None)
     )
     if memory_models_form:  # an empty select posts nothing: it means none
         reranker, memory_routing = reranker or "", memory_routing or ""
@@ -2689,6 +2751,9 @@ async def agent_edit_submit(
         "max_steps": max_steps,
         "tool_access": tool_access,
         "semantic_cache": semantic_cache_enabled,
+        "voice": voice_enabled,
+        "voice_provider": (voice_config_value or {}).get("provider") or "livekit",
+        "voice_name": (voice_config_value or {}).get("voice") or "",
         "tool_cache": tool_cache_enabled,
         "continual_learning": continual_learning_enabled,
         "learning_control_plane": learning_control_plane_enabled,
@@ -2866,6 +2931,8 @@ async def agent_edit_submit(
             "background_llm_config": background_llm_config_value,
             "memory_consolidation": memory_consolidation_value,
             "persona_learning": persona_learning_value,
+            "voice": voice_enabled,
+            "voice_config": voice_config_value,
             "memory_routing": memory_routing_value,
             "reranker": reranker_value,
             "decision_model": decision_model_value,

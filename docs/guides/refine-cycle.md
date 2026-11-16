@@ -112,7 +112,9 @@ the job. Each revision is listed with what it would add and is left
 `proposed`; it appears in the cycle's waiting list as `tool_revision`, and
 `agent.apply_tool_revision(revision_id, approved_by=...)` applies it.
 Usage flags (offered and never called, or never offered) are listed for a
-person and propose nothing.
+person and propose nothing. The job's note says what it left alone and why:
+MCP tools are described by their server and are not reviewed, and neither
+are built-in tools or tools added without a `Toolbox`.
 
 ## Compact and re-embed
 
@@ -178,7 +180,14 @@ Every cycle stores one `RefineRun`:
 A dry run reports the same jobs with `would_` and `planned_` counts
 (`would_flag_source_missing`, `would_flag_note`, `planned_tool_revisions`,
 `would_re_embed_entities`), stores no flag, revision or vector, and leaves
-nothing waiting. A run stored before these jobs existed lists the seven it
+nothing waiting. A real cycle counts what it stored for a person to review as
+`proposed_tool_revisions`, `proposed_standing_rules` and
+`proposed_persona_additions`.
+
+A dry run is a rehearsal, not a forecast. The jobs that ask the background
+model (stated facts, persona learning, tool review) ask it again in the real
+cycle, and a model does not answer the same way twice: the cycle that follows
+a dry run can propose something else, under other names, or nothing. A run stored before these jobs existed lists the seven it
 ran and still opens.
 
 Each job also carries `items`: one line per change with what it did, why,

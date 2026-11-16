@@ -577,6 +577,43 @@ def _names_agree(left: Any, right: Any) -> bool:
     return False
 
 
+#: Attribute names a model gives a request it mistook for a fact
+#: ("Add a task: renew my passport" filed as user.task).
+_REQUEST_ATTRIBUTES = frozenset(
+    {
+        "task",
+        "tasks",
+        "todo",
+        "to_do",
+        "todo_item",
+        "request",
+        "requested_task",
+        "action",
+        "action_item",
+        "instruction",
+        "command",
+    }
+)
+
+
+def _statement_words(text: Any) -> set:
+    return {
+        word[:-1] if len(word) > 3 and word.endswith("s") else word
+        for word in re.findall(r"[a-z0-9]{3,}", str(text or "").casefold())
+    }
+
+
+def _same_statement(left: Any, right: Any) -> bool:
+    """Two values that say one thing in nearly the same words.
+
+    Only for values of several words (a preference, a habit): a city or a
+    name shares too few words with anything to be judged this way.
+    """
+    a, b = _statement_words(left), _statement_words(right)
+    shared = a & b
+    return len(shared) >= 3 and len(shared) / len(a | b) >= 0.6
+
+
 def _held_by_host(record: Any, attribute: str) -> bool:
     """True when the entity's current value for ``attribute`` came from the
     host application (source level 3).
@@ -723,7 +760,10 @@ _EXTRACT_PROMPT = """You maintain an assistant's long-term memory about the user
 Below are the messages the user wrote in one conversation, one per line.
 List durable facts they state about themselves or about people, projects and things in
 their life: names, roles, preferences, plans, relationships. Skip anything temporary,
-guesses, and facts already known.
+guesses, and facts already known. Something the user asks the assistant to do now
+("add a task", "book a room", "send this") is a request, not a fact: skip it.
+State each fact once, under one attribute. When a fact restates or changes one under
+"Already known", use that entity and attribute name exactly; never a second name for it.
 
 For each fact, "evidence" is a short phrase (at most 12 words) copied exactly from one
 of the user's lines. Use "user" as the entity for facts about the user. Attribute names
@@ -1558,7 +1598,34 @@ class MemoryConsolidator:
                 earlier = newest.get(key)
                 if earlier is None or said_at > earlier[0]:
                     newest[key] = (said_at, op)
-        return [op for _, op in newest.values()]
+        # One statement, one attribute: a model names the same preference
+        # differently each time it reads it ("brief_format_preference",
+        # "brief_ending_preference"). A new attribute whose value says what
+        # another one of that entity already says is not added again.
+        kept: List[Tuple[str, ConsolidationOp]] = []
+        for (name, attribute), (_, op) in newest.items():
+            fresh = (
+                op.kind == ADD_FACT
+                and op.details.get("replaces") is None
+                and op.details.get("beside") is None
+            )
+            if fresh and (
+                any(
+                    held_name == name
+                    and held_attribute != attribute
+                    and _same_statement(op.details["value"], held[0])
+                    for (held_name, held_attribute), held in known.items()
+                )
+                or any(
+                    other_name == name
+                    and other.kind == ADD_FACT
+                    and _same_statement(op.details["value"], other.details["value"])
+                    for other_name, other in kept
+                )
+            ):
+                continue
+            kept.append((name, op))
+        return [op for _, op in kept]
 
     @staticmethod
     def _stored_name(
@@ -1594,6 +1661,9 @@ class MemoryConsolidator:
             r"^(?:-\s*)?(?:user\s*:\s*)?", "", _normalized(item.get("evidence"))
         ).strip(" \"'.")
         if not entity or not attribute or not value or len(evidence) < 3:
+            return None
+        # A request to do something is not a fact about anyone.
+        if attribute in _REQUEST_ATTRIBUTES:
             return None
         # The fact has to rest on words the user actually wrote, and those
         # words have to say it.
