@@ -260,11 +260,9 @@ def test_a_run_is_given_its_memory_or_a_private_one(tmp_path):
         HarnessPermissions(mcp_read_memory_ids=[f"m{i}" for i in range(9)])
 
 
-# Words the notes below hold, so a run is handed them with no embedding model
-# too: the file store then matches by keyword (as on a CI runner).
-DEPLOY_QUESTION = (
-    "Which day do deploys happen, and what does the deploy handbook require?"
-)
+# Short, and in the notes' own words: with no embedding model (a CI runner)
+# the file store matches by keyword and wants two of a query's words in a note.
+DEPLOY_QUESTION = "When do deploys happen? Deploy handbook?"
 
 
 @pytest.mark.unit
