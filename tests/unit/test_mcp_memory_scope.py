@@ -260,6 +260,13 @@ def test_a_run_is_given_its_memory_or_a_private_one(tmp_path):
         HarnessPermissions(mcp_read_memory_ids=[f"m{i}" for i in range(9)])
 
 
+# Words the notes below hold, so a run is handed them with no embedding model
+# too: the file store then matches by keyword (as on a CI runner).
+DEPLOY_QUESTION = (
+    "Which day do deploys happen, and what does the deploy handbook require?"
+)
+
+
 @pytest.mark.unit
 def test_read_only_memories_join_a_runs_context(tmp_path):
     from memorizz.metaharness import MetaHarness
@@ -290,7 +297,7 @@ def test_read_only_memories_join_a_runs_context(tmp_path):
 
     def pack(**permissions):
         task = HarnessTask(
-            task="When and how do we deploy?", workspace=str(tmp_path), harness="codex",
+            task=DEPLOY_QUESTION, workspace=str(tmp_path), harness="codex",
             memory_id="mine", permissions=HarnessPermissions(**permissions),
         )  # fmt: skip
         return meta._build_context_pack(task, task.task, strategy="retrieval")
@@ -307,7 +314,7 @@ def test_read_only_memories_join_a_runs_context(tmp_path):
     # A run given no memory starts with nothing from anyone else's.
     def no_memory(**permissions):
         task = HarnessTask(
-            task="When and how do we deploy?", workspace=str(tmp_path), harness="codex",
+            task=DEPLOY_QUESTION, workspace=str(tmp_path), harness="codex",
             permissions=HarnessPermissions(**permissions),
         )  # fmt: skip
         return meta._build_context_pack(task, task.task, strategy="retrieval")

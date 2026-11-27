@@ -169,7 +169,9 @@ voice = [
 ]
 # Sentry as an agent's observability provider
 # (MemAgent(observability_provider="sentry")).
-sentry = ["sentry-sdk>=2.0"]
+# Held below 3: SDK 3 drops options the provider passes (send_default_pii)
+# and changes how transactions are made.
+sentry = ["sentry-sdk>=2.0,<3"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
@@ -181,7 +183,7 @@ dev = [
     "pre-commit>=3.0",
     "httpx>=0.24",
     "mongomock>=4.1",
-    "sentry-sdk>=2.0",
+    "sentry-sdk>=2.0,<3",
     # Lightweight optional-provider SDKs used by the deterministic unit suite.
     # Keeping them in dev prevents CI from silently skipping provider coverage.
     "anthropic>=0.26.0",
