@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memorizz"
-version = "0.17.26"
+version = "0.17.27"
 description = "A memory management library and local agent CLI for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -167,6 +167,9 @@ voice = [
     "livekit-api>=1.2",
     "av>=12.0",
 ]
+# Sentry as an agent's observability provider
+# (MemAgent(observability_provider="sentry")).
+sentry = ["sentry-sdk>=2.0"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
@@ -178,6 +181,7 @@ dev = [
     "pre-commit>=3.0",
     "httpx>=0.24",
     "mongomock>=4.1",
+    "sentry-sdk>=2.0",
     # Lightweight optional-provider SDKs used by the deterministic unit suite.
     # Keeping them in dev prevents CI from silently skipping provider coverage.
     "anthropic>=0.26.0",

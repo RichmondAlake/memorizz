@@ -1,5 +1,525 @@
 # Changelog
 
+## 0.17.27 — 2026-11-27
+
+### Changed behaviour
+
+- **Recall places the most relevant memories first.** A memory at least half
+  as relevant as the most relevant one found is now chosen before a less
+  relevant one, whatever its recency. Recall refreshes a memory's last
+  access, so a few records recalled every turn (the chunks of a small
+  handbook) kept full recency and filled every slot again on the next turn,
+  whatever was asked: an agent with a four-paragraph handbook recalled those
+  four paragraphs and nothing from its conversations. Less relevant memories
+  still fill the room that is left, and one left out this way is marked
+  `less_relevant` in the trace's selection ledger.
+
+- **The console opens on the playground.** `/` and the logo go to the
+  playground's chat home: a composer where you pick the agent and the model,
+  with every agent listed below. Playground is the first item in the sidebar, above the
+  groups. The Overview is now the **Dashboard**, first under Operate; its
+  address is still `/dashboard`, and `g` `d` opens it (`g` `o` still works).
+- **A first-run view for a store with no agents.** The playground no longer
+  shows a bare "No agents yet": type a message and MemoRizz makes an agent
+  named Assistant on the default model and opens the conversation with the
+  message sent. The page also offers templates and the five first steps, and
+  names the key to set when the default model has none.
+- **The playground home picks the model too.** Beside the agent picker, the
+  model is now a picker: the agent's own, another its provider offers, or one
+  typed in. It applies to the conversation that opens and is not saved on the
+  agent. **Create agent** moved to the top right of that page.
+- **A selected section is a fill, not a stripe.** The section list of the
+  agent form and the index of Settings marked the current item with a stripe
+  down its rounded edge; it is now a tinted fill with stronger text.
+- **A harness run with no `memory_id` is private.** It used to start with
+  records retrieved from every memory of the user, and its MemoRizz tools
+  could read any of them. It now starts with nothing from memory and its
+  tools are kept to a memory of its own. If you relied on the old behaviour,
+  give the run a `memory_id`, name the memories it should read with
+  `permissions.mcp_read_memory_ids` (`--read-memory` on the CLI), or open it
+  with `permissions.mcp_memory_scope="all"` (`--memory-scope all`).
+- **A run's MemoRizz tools reach only its own memory.** A harness that
+  searched another memory through the MCP server is now refused
+  (`memory_out_of_scope`).
+- **A failed run saves nothing to memory.** A run that fails, is cancelled or
+  is interrupted without changing a file no longer leaves its error text in
+  the shared memory.
+- **Agents and Memory types in the sidebar open their page.** Selecting the
+  group's name opens the list of agents (or memory) and unfolds the list
+  under it; the "All agents" item is gone. The arrow at the right still only
+  folds and unfolds the list.
+
+### Added
+
+- **Publish an agent to a hosted Simuground (`memorizz.cloud`).** Call
+  `cloud.connect(url, key=...)` (or set `MEMORIZZ_CLOUD_URL` and
+  `MEMORIZZ_CLOUD_KEY`) and `agent.publish()` to upload an agent's name,
+  instruction and persona with a scoped workshop key; publishing again updates
+  the same agent in place while keeping local tools, keys and memory on the
+  caller's machine.
+- **Three notebooks on shared memory**, in `examples/shared_memory`. One
+  plant shop, one memory ID, three kinds of agent: MemAgents that share a
+  decision (and a reader that cannot rewrite it), Codex, Claude Code and pi
+  putting that decision into code through the meta-harness, and a personal
+  assistant reading and adding to the same memory over MCP, with the steps
+  for Muse, Grok Bot and ChatGPT dots. Each has Mermaid diagrams on black and
+  prints the command that opens its store in the console.
+- **Readers of entity memory.** `with_entity_memory(True, policy={"writes":
+  False})` (or `EntityPolicy(writes=False)`) gives an agent the records and
+  takes away the pen: no `entity_memory_upsert` tool, no capture, no routing
+  to entity memory, and a prompt that says the records are the current
+  values. For a memory several agents share, where one role owns each
+  decision.
+- **Who shares a memory, in the console.** *Memory types → Shared* now lists
+  every memory ID with the agents that run in it, the harnesses that ran in
+  it and the connected apps that saved to it. A memory's page shows which
+  agents write its records and which read them, each record with who last
+  changed it, the handbooks its agents carry, the tasks a coordinator split
+  across its delegates with each result, and who wrote what. The stored
+  coordination-board rows moved to `/memory/shared-records`.
+- **Keep connected apps to one memory.** `memorizz mcp apps serve --memory-id
+  NAME` limits Muse, Grok Bot, ChatGPT and Claude to that memory: they read
+  only it (their `search` and `fetch` included) and save to it, so the
+  agents that run there find what an app saved.
+  `MEMORIZZ_MCP_SERVER_APP_MEMORY_ID` changes only where an app's saves go.
+- **Muse.** Meta's assistant connects as a custom connector like the others.
+  It registers itself and sends no `resource` with its sign-in, both of which
+  the server accepts; the approval page and the apps list call it Muse.
+- **A refine cycle takes a model config.** `meta.refine_memory(memory_id,
+  model={"provider": "openai", "model": "…"})`, as an agent's `llm_config`.
+
+- **Google Gemini as a model provider.** `Gemini("gemini-4-hydrogen")`, or
+  `{"provider": "gemini", "model": ...}` in a saved config, runs an agent on
+  the Gemini API with tools, streaming and `reasoning_effort`. The key is
+  `GEMINI_API_KEY` (`GOOGLE_API_KEY` is read too): **Settings → Google Gemini
+  API key** in the local UI, `/login gemini` in the CLI. The Gemini 4
+  and Gemini 3 models are in every model picker, with newer ones added from
+  your key's model list, and Gemini can be the default agent model, a
+  background model, a coding model and the model that refines harness
+  memory. The thought signature Gemini 3 and 4 require on a tool-calling
+  step is kept and sent back, and tool calls Gemini makes side by side in a
+  streamed answer stay separate calls. When Google refuses a request (a
+  model outside the key's free tier, a rate limit), the run says why. Runs
+  are priced from Google's list rates.
+
+- **An observability switch and provider on every agent.**
+  `MemAgent(observability=True)` traces the agent in MemoRizz, as before;
+  `observability=False` records no traces at all.
+  `observability_provider="sentry"` also sends each turn to Sentry as one
+  trace (`invoke_agent <name>`, with `gen_ai.chat` and `gen_ai.execute_tool`
+  spans in Sentry's agent conventions), and reports a failed turn as an error
+  on that trace. The MemoRizz copy stays. The DSN comes from `SENTRY_DSN` and
+  is never saved with the agent; MemoRizz sends through a Sentry client of its
+  own, so an application's Sentry setup is left alone. Only names, timings,
+  token counts and statuses are sent unless `include_content` is set. Needs
+  the new `sentry` extra. `agent.observability_status()`,
+  `agent.observability_url()`, `agent.with_observability(...)` and
+  `MemAgentBuilder.with_observability(...)` go with it, and
+  `ObservabilityProvider` can be subclassed for another service. See
+  `docs/guides/observability-providers.md`.
+- **Observability in the console.** The agent form has an Observability
+  section (trace on or off, MemoRizz or Sentry, Sentry's organisation and
+  whether content is sent), Settings has the Sentry DSN, and an agent whose
+  traces go to Sentry links there from the Agents page, its detail panel and
+  its playground. On the Traces page, each turn in the waterfall that was sent
+  to Sentry has an **Open in Sentry** link to that turn's trace; MemoRizz
+  marks a turn when it is sent, so turns that never reached Sentry have none.
+- **Sentry's local server, with no account.** Under
+  `sentry local run -- <command>` (or with `SENTRY_SPOTLIGHT` set) an agent
+  whose provider is Sentry sends its turns to Sentry's local development
+  server. No DSN or Sentry account is needed, and without a DSN nothing
+  reaches sentry.io.
+- **Observability on the CLI and over MCP.** `memorizz agents create` and
+  `update` take `--observability/--no-observability`,
+  `--observability-provider` and `--observability-org`, and the MCP server's
+  create and update agent tools take the same three settings.
+- **Agent status in the sidebar.** Each agent under Agents now shows what it
+  is doing: its current step while a reply streams in the console (thinking,
+  the tool it is running, writing), a flag when a call is waiting for
+  approval, and otherwise its last message with how long ago it was. A run
+  made outside the console (the CLI, a connected app) shows up as a last
+  message once its turn is stored, not as a live step.
+- **⌘B (Ctrl B) shows or hides the sidebar.**
+- **A self-aware agent can have its own source.** With
+  `self_aware_config={"own_source": True}` an agent gets a private, versioned
+  copy of the MemoRizz code it runs on, under
+  `<MEMORIZZ_HOME>/self_aware/<agent>/source`. It keeps a local log of its own
+  errors with the file and line inside MemoRizz, and can read its own traces.
+  `agent.recommend_self_fix()` has a coding model read those errors and the
+  source and say what is wrong; `agent.fix_self()` makes the fix in the copy,
+  checks that the copy still compiles and imports, and keeps it as a version.
+  A fix that fails the check is dropped. The installed package is never
+  edited: a version leaves the copy only as a patch you download and apply.
+- **A separate coding model.** `self_aware_config["coding_model"]`
+  (`{"provider": "ollama", "model": "flint", "host": "http://…:11434"}`) picks
+  the model that reads and edits the source, apart from the model the agent
+  talks with. Keys are never part of it. For a model served elsewhere
+  (OpenRouter, vLLM, LM Studio) use `{"provider": "openai", "model": "…",
+  "base_url": "https://…/v1", "api_key_env": "OPENROUTER_API_KEY"}`:
+  `api_key_env` names the variable the key is read from, and an endpoint that
+  is not OpenAI's is never sent `OPENAI_API_KEY`.
+- **`/agents/<id>/source` in the console** shows the versions with their
+  diffs, the recent errors, and Find the cause / Fix it, with the coding
+  model's steps as it works. In chat the same is offered as tools;
+  `self_apply_fix` needs approval.
+- **OpenRouter and model gateways.** `OpenRouter("anthropic/claude-sonnet-5.5",
+  routing=ModelRouting(fallback_models=[...], sort="throughput",
+  data_collection="deny"))` runs an agent on any model OpenRouter serves, with
+  the key from `OPENROUTER_API_KEY`. `ModelRouting` chooses providers,
+  fallback models, price and data rules; `agent.with_model_routing(...)`
+  changes them on a live agent and they are saved with it. `ModelGateway`
+  does the same for any OpenAI-protocol service with its own address and key
+  variable. As a config: `{"provider": "openrouter", "model": "…", "routing":
+  {…}}`. Also in `/provider`, `/login openrouter`, the console's provider
+  menus and Settings, and as a coding model for an agent's own source. The
+  CLI picks OpenRouter when its key is the only cloud key set.
+- **Routing in the console.** With OpenRouter chosen, the agent form and the
+  playground's Settings tab show a Routing group: fallback models, providers
+  to prefer, allow or avoid, a price cap and data rules.
+- **What an OpenRouter call cost.** OpenRouter reports the charge for each
+  call; MemoRizz records it as the call's cost (`cost_status:
+  provider_reported`), so usage and traces show spend for any model it serves
+  without a rate card. Streamed answers ask for their usage too.
+- **How a fix came about.** A version the agent makes keeps an account: the
+  errors the coding model read, its diagnosis, the prompt it was sent, each
+  step it took and the check. The diff page shows it as five steps above the
+  change and marks the line the error named.
+  `agent.self_source().story(version_id)` returns it.
+- **A Self-aware mark** on an agent in the playground header, the Overview's
+  Agent card and the agent list, linking to its source.
+- **Playground settings you can read at a glance.** The Settings tab is six
+  groups (Model, Web and tools, Memory, Instruction and persona,
+  Self-awareness, Automations); each header shows what is set, such as
+  *Web search: Exa · Code: off*, and a group that cannot work as chosen is
+  marked. The Overview's Agent card shows web search and the code sandbox,
+  and each opens its setting. The column no longer scrolls sideways.
+- **"None" for the code sandbox is now a real choice.** With a default
+  sandbox set for the console, choosing None used to fall back to the
+  default. The menu now offers *Default (from Settings)* and *None
+  (disabled)* separately, and None is saved on the agent.
+- **A clearer coding model form** on an agent's source page: a provider menu
+  with a line on each choice, only that provider's fields, model name
+  suggestions, and whether the key it needs is set.
+- **Menus drawn by the console** in the playground's Settings tab, in place of
+  the browser's own: the chosen value is ticked, arrow keys, Home, End and
+  typing a name work, and the menu opens upward when there is no room below.
+- **Fix: an agent could not read its own traces.** The trace lookup behind
+  `self_recent_errors`, `self_read_trace` and the coding model's
+  `recent_errors` asked for them with a filter the store does not take, and
+  the failure was swallowed, so only the error log was ever read. Failed
+  trace steps are now included.
+- **Memory across conversations in the playground.** Each playground
+  conversation keeps a memory of its own; a chat now recalls the agent's
+  other conversations and is given a short list of them (how each opened,
+  when, and how it last stood), so "what have we been talking about?" has an
+  answer. On by default; **Settings → Memory → Across conversations** turns
+  it off for an agent, and a sealed agent never crosses. For your own chat
+  surface, `RetrievalPolicy(also_recall_from=[...])` names the other
+  memories a run may read; it only reads, and is ignored by a sealed or
+  thread-scoped policy.
+- **Preview a version of an agent's own source.** **Preview this version**
+  on an agent's source and diff pages starts a second console from that
+  version's code on a free local port and opens it. It reads the same store
+  but refuses every change, is marked as a preview, and stops by itself after
+  45 minutes or when you select Stop. `memorizz.memagent.self_preview` does
+  the same from Python.
+- **The check now covers the console.** A fix that changes a page or a
+  script is checked too: changed templates must compile and changed scripts
+  must parse (when Node is installed), so a page that cannot be drawn is not
+  kept as a version.
+- **Fixed: a harness run could read memories other than its own.** A run's
+  starting context was limited to its `memory_id`, but the MemoRizz MCP
+  server it was given was not, so a harness could search another memory and
+  its answer was then saved into its own. The server is now limited to the
+  run's memory. A run given no `memory_id` used to get records from every
+  memory at the start; it is now private, with an empty start and a memory
+  of its own.
+- **Read-only memories for a run.** `permissions.mcp_read_memory_ids` names
+  up to 5 other memories a run may read and never write; their records join
+  its starting context. `permissions.mcp_memory_scope="all"` opens a run to
+  every memory. Any MemoRizz MCP server takes the same limits
+  (`MEMORIZZ_MCP_SERVER_MEMORY_IDS`, `MEMORIZZ_MCP_SERVER_READ_MEMORY_IDS`).
+- **Changed:** a harness run that fails, is cancelled or is interrupted
+  without changing a file no longer saves its error text to memory as an
+  answer.
+- **A playground conversation can be answered by a harness.** The composer's
+  **Answered by** control picks the agent's own model or a ready harness and
+  its model, per conversation, without saving it on the agent. A harness turn
+  is shown as a job with its steps, elapsed time, **Open run** and **Stop**;
+  it carries on through a reload and is found again still working; a stored
+  answer links to its run and the memory it used. Folder, edits and web
+  access are allowed in the inspector with an approver's name. A turn in
+  runtime mode now takes the folder or grant its caller holds
+  (`tool_context["harness_parent"]`).
+- **Changed:** a workflow's stages on Agent harnesses are a vertical sequence
+  on a numbered rail; a stage opens to its full answer, its trace and the
+  memory it used. The quick-ask box sits under Availability.
+- **Fixed:** the Model control on Agent harnesses left an extra dropdown
+  behind each time the harness changed, and a model picked for one harness
+  carried over to the next.
+- **A refine cycle for memory that harnesses share.** Raw answers are kept
+  for good; `meta.refine_memory(memory_id)` distils them into findings, each
+  quoted from the answer it came from. A fact several runs state is one
+  finding with the runs that agree, and a corrected one is replaced, not
+  deleted. Later runs start with the findings instead of the raw answers.
+  It can start by itself after a set number of new answers once a model is
+  chosen, has a dry run, and reports in the shape of an agent's refine run.
+  The memory's page shows what it knows, Preview and Refine now.
+- **The harness memory options on every surface.** `memorizz harness run`,
+  `plan` and `compare` take `--read-memory` and `--memory-scope`, and a
+  continued conversation keeps the memory reach of the turn before it.
+  `memorizz harness refine`, `findings` and `refine-settings` run and read
+  the refine cycle from the terminal. The MCP tools that start a run, a plan
+  or a comparison take `mcp_read_memory_ids`. `HarnessMemoryRefine` and
+  `RefineSettings` are exported from `memorizz.metaharness`.
+- **See what a harness did with memory.** A run's page has a **Memory** tab:
+  the memory it was limited to, each record it was given at the start and
+  which harness wrote it, each MemoRizz tool it called itself, and any
+  lookup refused for reaching outside its memory (also marked in the
+  trajectory). `/harnesses/memory/<id>` shows one memory as harnesses share
+  it. The launch form picks a memory in use, a new one or none, and takes
+  read-only memories.
+- **A fix explains itself.** After a self-aware agent's coding model fixes
+  its source, it is asked why: the root cause, why this fix and not a larger
+  one, the risk, how to confirm it, and the reason for each edit. The diff
+  page shows this as a step of the fix's account and above each changed
+  file; `fix_self` returns it as `explanation`.
+- **The coding model's work is traced.** Its diagnosis and fix run under the
+  agent in a thread of their own, tagged `work=self_repair`, and the account
+  links to them in Traces. Those turns are never read back as the agent's
+  own failures.
+- **Exa Websets and Monitors.** An agent whose internet provider is Exa
+  also gets `exa_create_webset`, `exa_get_webset`,
+  `exa_save_webset_to_memory`, `exa_create_monitor`, `exa_list_monitors`,
+  `exa_monitor_results`, `exa_stop_monitor` and `exa_resume_monitor`. A webset is a dataset Exa
+  builds and checks row by row; saving it puts the rows in the agent's
+  knowledge base, attached to the agent, so any conversation recalls them.
+  `ExaProvider` has the matching calls, and `webset_table` and
+  `monitor_view` return one structure for the SDK, the CLI and the console.
+  Creating a monitor needs approval. It reports to `EXA_MONITOR_WEBHOOK_URL`,
+  or to a temporary webhook.site address made for it when none is set, as
+  Exa's dashboard does (`temporary_webhooks=False` turns that off).
+- **Tool results people can see.** `ToolResult.display` carries a small
+  mapping to the `tool.completed` event and the stored trace, never to the
+  model. The playground draws a web search as its pages, a webset as a table
+  that fills in (Save to memory, CSV, Open in Exa) and a monitor with its
+  latest run; the CLI prints the same as tables under the answer. A provider
+  can add its own tools with `InternetAccessProvider.agent_tools`.
+- **Changed:** setting an agent's internet provider now re-registers its
+  internet tools, so a provider's own tools follow the provider.
+- **Changed:** the "Waiting for you" menu has no outlines: a dot for the
+  kind, the title, one quiet line and a button.
+- **From a reply straight to its trace.** In the playground each finished
+  step of a reply ("Used internet_search") is a link to that step's own row
+  in Traces, each row of a stored turn's activity has **Open in Traces**, and
+  the line under a reply has a **Trace** link for the whole turn.
+  `/traces?...&step=<span or tool call id>` selects the row.
+- **Faster pages on a FileSystem store.** Listing a store read and parsed
+  every document file again each time, and a console page lists a store
+  several times: one page load parsed 40,000 to 116,000 files on a store of
+  7,000 documents. A document is now parsed once and reused while its file is
+  unchanged (same write time, size and inode); every reader still gets its
+  own copy. Page loads on that store are about twice as fast.
+  `MEMORIZZ_FS_DOCUMENT_CACHE_MB` sizes the cache (256 by default; 0 turns it
+  off).
+- **Factory's Droid for an agent's own source.** `self_aware_config
+  ["coding_agent"] = "droid"` (or **Factory Droid** in the coding model menu)
+  hands diagnosis and fixes to `droid exec` in the agent's copy: read-only to
+  find the cause, `--auto low` to make the fix, and in both cases only
+  Droid's file tools (`--only-tools`), so it cannot run commands, search the
+  web or message anyone. MemoRizz still checks the copy and keeps the
+  version. Needs Factory's CLI and `FACTORY_API_KEY`;
+  Droid's process is given that key and no other.
+- **Droid as a harness.** `droid` joins Codex, Claude Code, OpenHands, pi and
+  Hermes. It is left only its file tools: Read, LS, Grep and Glob, plus Edit,
+  ApplyPatch and Create for an edit run, which also needs an isolated wrapper
+  (`MEMORIZZ_DROID_EXTERNAL_ISOLATION=true`) and uses `--auto low`. It has no
+  command or web tools, so it is not offered to runs that ask for the web.
+  Its steps are followed live; it reports tokens and Factory credits, with no
+  dollar cost.
+- **Live conversation in the playground.** The waveform button in the
+  composer starts a spoken conversation on LiveKit: it hears you, decides
+  when you have finished, and plays the answer; speaking again cuts the
+  answer short. What is said shows as you talk and becomes turns of the open
+  conversation. It works for an agent without a voice of its own, on
+  LiveKit's default voice. `POST /api/agents/{id}/voice/session` takes
+  `{"memory_id": ...}` for this.
+- **A live call with several agents.** `LiveKitVoice.group_session(speakers=,
+  round=)` runs one call for many agents: one listener and one turn-taker,
+  and the answers are spoken one after another, each in its own voice, so
+  two agents never talk at once. An agent with no LiveKit voice is lent one.
+- **Fix: a live call answered before you had finished.** LiveKit starts on an
+  answer early and discards it if you go on; with a MemAgent each of those
+  was a real turn, remembered and shown. Calls now wait for the end of the
+  turn.
+- **Newer models in the pickers.** OpenAI adds GPT-6.2 Sol, GPT-6.2 Astra and
+  GPT-6.1 Terra; Anthropic adds Claude Fable 5.2; OpenRouter lists the newest
+  models that take tools from OpenAI, Anthropic, Google, xAI, DeepSeek,
+  Mistral, Qwen, Moonshot, Z.ai, MiniMax, Meta, Cohere, NVIDIA and Recursive.
+  The default models are unchanged.
+- **The console's own menus on every page.** Every dropdown in the console
+  now uses the menu introduced in the playground's settings. A select marked
+  `data-native` keeps the browser's.
+- **Exa as an internet provider**, alongside Tavily and Firecrawl. Set
+  `EXA_API_KEY` and pick it with `/web exa`, `/login exa`, the internet
+  provider menu in the console, or `MEMORIZZ_DEFAULT_INTERNET_PROVIDER=exa`.
+  Search results carry Exa's highlights as the snippet; `include_text` adds
+  each page's text. With several keys set, Tavily and Firecrawl still come
+  first.
+- **`/agents/<id>/source/diff` in the console** shows what an agent changed,
+  file by file, drawn the way a code editor draws a diff: side by side or in
+  one column, Python coloured by token, the changed characters marked, and
+  unchanged lines folded. It shows one version, everything since the install,
+  or edits not yet kept. A line number, a fold or **Open file** opens the
+  whole file at that line (`/agents/<id>/source/file`), before or after the
+  change, with the changed lines marked and next/previous change buttons.
+- **A project management assistant template.** **Start from a template**
+  has a project manager that works in your Notion over MCP: it keeps a tasks
+  database with a kanban board, a timeline and a view per person, runs
+  sprints, keeps a RAID log and writes status reports. Its instructions name
+  the Notion tools to use for each job, every change waits for approval, and
+  continual learning and workflow memory are on. Saving it opens MCP
+  Connections to sign in to Notion.
+- **Page snapshots in the playground.** An agent with an MCP connection can
+  show a page it created or changed with `send_page_snapshot`. A Notion page
+  is read as it is at that moment (through the agent's Notion connection, or
+  with `NOTION_TOKEN`) and shown in the reply as a card with its title,
+  properties and first blocks and **Open in Notion**; the model is told only
+  that it was shown. Other pages, and Notion pages that cannot be read, show
+  as a link with the agent's title and summary. Guide:
+  [Page snapshots](docs/guides/mcp-connectivity.md#page-snapshots).
+- **Sign in to a connected app from the conversation.** When an agent's
+  connected app (Notion, Gmail, Calendar) is not signed in, the playground
+  shows a bar above the message box with its **Sign in** button, there as
+  soon as the page opens and after a reload. The sign-in opens in its own
+  window and the conversation stays where it is; when it finishes, the bar
+  goes and the reply's card offers **Ask again**. Where a window cannot be
+  opened, the page goes to the sign-in and comes back as before. The agent
+  is told the button is in the conversation, so it no longer sends people
+  to MCP Connections.
+- **The Notion badge opens the memory database in Notion.** With a Notion
+  memory provider, the connection badge in the header opens the database the
+  memories are stored in, in a new tab. The sidebar's store switch still
+  changes stores.
+
+### Fixed
+
+- **A harness run is not an agent turn that never finishes.** The evidence a
+  harness run keeps was counted as a run of an agent named `metaharness` (or
+  of the agent that asked for it) with no result, so the Dashboard and the
+  Agents page showed it as running and then as incomplete for good. The run
+  is on the Agent harnesses page, where its status is.
+- **An agent's latest conversation on the Agents page is its own.** In a
+  memory several agents and harnesses share, the preview showed the newest
+  messages of the memory, whoever wrote them.
+
+- **A coordinator's turn is a run.** An agent with delegates handed its
+  request over before its own trace began, so the turn that started the work
+  was missing from the Agents page and Observability (the coordinator showed
+  0 runs), and the model calls that planned the work and combined the results
+  were traced nowhere. Its turn is now one run holding both calls, with their
+  tokens and time.
+- **A refine cycle's report says what it spent.** A cycle of a shared
+  harness memory reported 0 tokens, and named no model when one was passed
+  to it. It now counts the call and names the model it ran on. A model whose
+  text call goes through its chat call was also counted twice by an agent's
+  refine cycle; it is counted once.
+- **An agent knows a harness's work before any refine cycle.** When a run
+  that changed files or had a check ends, what MemoRizz saw itself (which
+  files, and whether the check passed) is kept as a finding at once.
+
+- **A harness run with a thread of its own is handed the memory's records.**
+  A run given a `thread_id` asked every memory type for that thread, so the
+  entity records and knowledge the whole memory shares were left out and the
+  harness started with almost nothing.
+- **Agents find what a harness saved.** A run's saved answer had no vector,
+  so an agent sharing the memory could find it only by its exact words. It is
+  now embedded when the store has an embedding model.
+- **Findings keep what was changed and whether it passed.** The refine cycle
+  treated "what the run did" as noise and often dropped the one fact other
+  agents most need: that a file was changed and its check passed.
+- **An agent's line in the sidebar is its own.** In a memory several agents
+  share, every agent showed the newest message of the memory, whoever wrote
+  it.
+- **Entity records are shown as the current values.** Where a recalled
+  message disagreed with a record, the model sometimes repeated the message.
+  The records are now introduced as current, and a reader is told it cannot
+  change them.
+- **`search` and `fetch` work on a server limited to some memories.** A
+  connected app's two connector tools were refused there; they now look only
+  in the memories the server is limited to.
+
+- **Switching provider picks that provider's model.** In the agent form and
+  the playground's Settings tab, choosing another provider kept the last
+  provider's model as a custom one (Anthropic with `gpt-6.2-sol`). It now
+  selects the new provider's default.
+- **A run that cannot start says why.** When an agent's model could not be
+  built (most often a missing key), the playground showed "Run error". The
+  final stream event now carries `error_message`, and the page shows it, for
+  example "set GEMINI_API_KEY". A streamed run a provider refused also ended
+  with no `error_code`; it now ends with `provider_error`.
+- **A sign-in that has lapsed is reported and offered again.** A connected
+  app (Notion, Gmail, Calendar) whose saved sign-in the server no longer
+  accepts was still shown as **Ready**, and an agent that hit the refusal
+  tried the server's other tools (ten model calls in one test). The
+  connection now shows **Needs sign-in** from the first refused call until
+  new tokens arrive or a call succeeds, the model is told to stop and ask,
+  and the playground shows **Sign in to notion** in that same turn.
+- **A recall is no longer recorded as a change to the memory.** On the
+  filesystem, MongoDB and Notion providers, recalling a memory (which bumps
+  its access count) added an "updated" entry to that memory's history.
+- **A Notion memory provider makes about half the requests.** Notion allows
+  about three requests a second, so a turn takes as long as its requests.
+  One playground turn went from about 190 requests (82 seconds) to about 100
+  (48 seconds, with the answer on screen after about 21):
+  - Usage, traces and the dashboard read trace records a page at a time.
+    They read one record per request, so a usage read of a small store took
+    34 requests (11 seconds); it now takes 2 or 3 (about a second) and no
+    longer grows with every turn.
+  - The Memory tab asks for every memory type in one query per scope (38
+    requests became 4).
+  - A trace, setting or journal row that is not there is looked up once by
+    ID, with no second lookup by name and no scan of every shared record.
+  - Traces are stored without being read before and after.
+  - The sidebar reuses its agent list for 30 seconds instead of listing
+    agents on every poll (one query less per poll on every provider).
+  - The playground's prompt cache card covers the last 7 days, not every
+    call the agent ever made.
+- **"Answered by" names the harness an agent runs on.** For an agent set to
+  run on a harness, the playground's picker said "<agent>'s model" while
+  the harness answered every turn. It now reads, for example, "Codex · this
+  agent runs on it".
+- **The newest models have prices.** `gpt-6.2-sol` (the default),
+  `gpt-6.2-astra`, `gpt-6.1-terra` and `claude-fable-5-2` had no rate card,
+  so their runs showed tokens and no cost. They are priced from the
+  providers' lists read on 2026-11-26, with OpenAI's fast and batch tiers
+  (Flex is not sold on GPT-6.2 and stays unpriced). Gemini is priced the
+  same way; where Google has announced a new rate from a set date (Gemini 4
+  Carbon and Argon on 2026-12-01, 3.8 and 3.6 Flash on 2027-01-01), the date
+  picks the rate. Gemini 3.5 Flash and 3.7 Flash are not on Google's price
+  page and stay unpriced.
+- **A console started with the wrong embedding model leaves the MCP tool
+  index alone.** The local UI warns when its embedding model does not match
+  the store's vectors, but an agent opened in it still re-embedded its MCP
+  tool index with that model, which stops the tools being found by meaning
+  from the store's own apps. The index is now kept as it is, and a server
+  first indexed in that state gets its vectors once the model matches.
+- **A new agent's form can be saved as it loads.** With a default sandbox
+  that is not set up (GraalPy with no executable), the form preselected it
+  and refused the save. It now starts on no sandbox and says why.
+- **A harness job no longer starts with two "not found" requests** in the
+  playground: the page waits a second before its first look at a run that
+  is announced before it is saved.
+- **The whole agent row opens the agent on the playground home**, and says
+  "Opening…" while its page loads (seconds on a Notion store, where a click
+  looked like it had done nothing). A new-tab click opens a tab, and
+  dragging across a row to copy text opens nothing.
+- **A selected table row is filled, with no stripe down its side** (agent
+  lists, MCP connections and the trace navigator).
+- **An OpenRouter background model is saved on OpenRouter.** The agent form
+  offered OpenRouter for the background model but saved the choice as a model
+  of the chat provider.
+
 ## 0.17.26 — 2026-11-16
 
 ### Added

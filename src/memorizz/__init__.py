@@ -15,7 +15,7 @@ import at that point, exactly as before).
 import importlib
 
 # Kept in lockstep with pyproject.toml and asserted by release tests.
-__version__ = "0.17.26"
+__version__ = "0.17.27"
 
 # ``capabilities`` intentionally uses an eager, tiny import.  A lazy export
 # with the same name as its submodule is not stable under Python's from-list
@@ -120,6 +120,10 @@ _LAZY = {
     "NotionConfig": (".memory_provider.notion", "NotionConfig"),
     # LLM providers
     "OpenAI": (".llms", "OpenAI"),
+    "OpenRouter": (".llms", "OpenRouter"),
+    "Gemini": (".llms", "Gemini"),
+    "ModelGateway": (".llms", "ModelGateway"),
+    "ModelRouting": (".llms", "ModelRouting"),
     "AzureOpenAI": (".llms", "AzureOpenAI"),
     "Anthropic": (".llms", "Anthropic"),
     "OllamaLLM": (".llms", "OllamaLLM"),
@@ -133,6 +137,7 @@ _LAZY = {
     "SharedMemory": (".coordination", "SharedMemory"),
     # Internet access
     "InternetAccessProvider": (".internet_access", "InternetAccessProvider"),
+    "ExaProvider": (".internet_access", "ExaProvider"),
     "FirecrawlProvider": (".internet_access", "FirecrawlProvider"),
     "TavilyProvider": (".internet_access", "TavilyProvider"),
     "create_internet_access_provider": (
@@ -176,6 +181,9 @@ def __getattr__(name):
             ) from exc
         return MongoDBConfig
 
+    if name == "cloud":
+        return importlib.import_module(".cloud", __name__)
+
     spec = _LAZY.get(name)
     if spec is None:
         raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
@@ -189,6 +197,7 @@ def __dir__():
 
 __all__ = [
     "__version__",
+    "cloud",
     "MemoryArchive",
     "MemoryArchiveError",
     "MemoryHistory",
@@ -273,6 +282,10 @@ __all__ = [
     "NotionConfig",
     # LLM providers
     "OpenAI",
+    "OpenRouter",
+    "Gemini",
+    "ModelGateway",
+    "ModelRouting",
     "AzureOpenAI",
     "Anthropic",
     "OllamaLLM",
@@ -286,6 +299,7 @@ __all__ = [
     "SharedMemory",
     # Internet access
     "InternetAccessProvider",
+    "ExaProvider",
     "FirecrawlProvider",
     "TavilyProvider",
     "create_internet_access_provider",
