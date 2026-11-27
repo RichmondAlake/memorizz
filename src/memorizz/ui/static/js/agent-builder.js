@@ -9,8 +9,8 @@
     const context = window.AGENT_BUILDER || {};
     const SECRET = /api[_-]?key|secret|token|password|passphrase|authorization|credential/i;
     const PROVIDERS = {
-        openai: 'OpenAI', anthropic: 'Anthropic', azure: 'Azure OpenAI', ollama: 'Ollama',
-        huggingface: 'HuggingFace', mlx: 'MLX', 'local-openai': 'Local OpenAI-compatible',
+        openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Google Gemini', azure: 'Azure OpenAI', ollama: 'Ollama',
+        huggingface: 'HuggingFace', mlx: 'MLX', openrouter: 'OpenRouter', 'local-openai': 'Local OpenAI-compatible',
     };
 
     function field(name) { return form.querySelector('[name="' + name + '"]'); }
@@ -76,6 +76,11 @@
             automations: checked('automations_enabled'),
             timezone: value('default_timezone'),
             whatsapp: checked('whatsapp_enabled'),
+            observability: field('observability') ? checked('observability') : true,
+            observabilityProvider: value('observability_provider') || 'memorizz',
+            observabilityOrg: value('observability_org'),
+            observabilityProject: value('observability_project'),
+            observabilityContent: checked('observability_include_content'),
             reranker: value('reranker'),
             rerankerLabel: optionLabel('reranker'),
             routing: value('memory_routing'),
@@ -150,6 +155,7 @@
             tools: tools.join(' · ') || 'None',
             runtime: runtime.join(' · '),
             channels: [config.automations && 'Automations on', config.whatsapp && 'WhatsApp'].filter(Boolean).join(' · ') || 'Off',
+            observability: config.observability ? (optionLabel('observability_provider') || 'MemoRizz') : 'Off',
         };
     }
 
@@ -183,6 +189,7 @@
             ['Harness', config.harnessMode ? optionLabel('meta_harness_mode') + ' · ' + optionLabel('default_harness') : 'Off'],
             ['Delegates', config.delegates.length ? String(config.delegates.length) : 'None'],
             ['Automations', config.automations ? 'On' + (config.timezone ? ' · ' + config.timezone : '') : 'Off'],
+            ['Traces', config.observability ? (config.observabilityProvider === 'memorizz' ? 'Kept in MemoRizz' : 'MemoRizz and ' + optionLabel('observability_provider')) : 'Off'],
         ];
         summary.innerHTML = rows.map(function (row) {
             if (row[0] === 'group') return '<dt class="builder-summary-group">' + escapeHtml(row[1]) + '</dt>';
@@ -297,6 +304,14 @@
         }
         if (!config.automations) arg('automations_enabled', 'False');
         if (config.timezone) arg('default_timezone', py(config.timezone));
+        if (!config.observability) arg('observability', 'False');
+        if (config.observabilityProvider !== 'memorizz') {
+            const observability = {provider: config.observabilityProvider};
+            if (config.observabilityOrg) observability.org = config.observabilityOrg;
+            if (config.observabilityProject) observability.project = config.observabilityProject;
+            if (config.observabilityContent) observability.include_content = true;
+            arg('observability_provider', Object.keys(observability).length === 1 ? py(config.observabilityProvider) : py(observability));
+        }
 
         const store = storeCode(context.store || {}, imports);
         const lines = [];
@@ -406,6 +421,9 @@
             // "After each turn" only means something with a router chosen.
             const capture = document.getElementById('memory-routing-capture');
             if (capture) capture.hidden = !config.routing;
+            // Sentry's own settings show only while Sentry is the provider.
+            const sentry = document.getElementById('observability-sentry');
+            if (sentry) sentry.hidden = config.observabilityProvider !== 'sentry';
             renderSummary(config);
             renderCode(config);
         });

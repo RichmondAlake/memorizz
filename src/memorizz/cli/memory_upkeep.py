@@ -9,7 +9,16 @@ from rich.markup import escape
 from . import agent_factory
 from .commands import _con
 
-LLM_PROVIDERS = ("openai", "anthropic", "ollama", "azure", "huggingface", "mlx")
+LLM_PROVIDERS = (
+    "openai",
+    "anthropic",
+    "gemini",
+    "ollama",
+    "azure",
+    "huggingface",
+    "mlx",
+    "openrouter",
+)
 
 _OP_LABELS = {
     "merge_entities": "merge",

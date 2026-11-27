@@ -77,6 +77,21 @@ def _clean(params: Mapping[str, Any]) -> Dict[str, Optional[str]]:
     return values
 
 
+def _oracle_env_int(
+    name: str, default: Optional[int], *, minimum: int = 1, maximum: int = 200
+) -> Optional[int]:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < minimum or value > maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
 def build_provider(
     provider_type: str, params: Mapping[str, Any], *, read_only: bool
 ) -> Tuple[Any, Dict[str, Any], Dict[str, Any]]:
@@ -96,23 +111,54 @@ def build_provider(
 
         schema = values["oracle_schema"] or user
         in_database = resolve_oracle_in_database_embedding_from_env()
-        config = OracleConfig(
-            user=user,
-            password=password,
-            dsn=dsn,
-            schema=schema,
-            lazy_vector_indexes=True,
-            in_database_embedding=in_database,
+        pool_min = _oracle_env_int("ORACLE_POOL_MIN", 1, minimum=1, maximum=100)
+        pool_max = _oracle_env_int("ORACLE_POOL_MAX", 5, minimum=1, maximum=200)
+        if pool_min is not None and pool_max is not None and pool_min > pool_max:
+            pool_min = pool_max
+        config_dir = (
+            os.environ.get("ORACLE_CONFIG_DIR", "").strip()
+            or os.environ.get("TNS_ADMIN", "").strip()
+            or None
+        )
+        wallet_location = os.environ.get("ORACLE_WALLET_LOCATION", "").strip() or None
+        wallet_password = os.environ.get("ORACLE_WALLET_PASSWORD", "").strip() or None
+        pool_ping_interval = _oracle_env_int(
+            "ORACLE_POOL_PING_INTERVAL", None, minimum=1, maximum=3600
+        )
+        pool_timeout = _oracle_env_int(
+            "ORACLE_POOL_TIMEOUT", None, minimum=1, maximum=86400
+        )
+        config_kwargs: Dict[str, Any] = {
+            "user": user,
+            "password": password,
+            "dsn": dsn,
+            "schema": schema,
+            "lazy_vector_indexes": True,
+            "in_database_embedding": in_database,
             # Read-only makes no schema changes: no tables, indexes or ONNX
             # model are created.
-            read_only=read_only,
-        )
+            "read_only": read_only,
+            "pool_min": pool_min,
+            "pool_max": pool_max,
+        }
+        if config_dir:
+            config_kwargs["config_dir"] = config_dir
+        if wallet_location:
+            config_kwargs["wallet_location"] = wallet_location
+        if wallet_password:
+            config_kwargs["wallet_password"] = wallet_password
+        if pool_ping_interval is not None:
+            config_kwargs["pool_ping_interval"] = pool_ping_interval
+        if pool_timeout is not None:
+            config_kwargs["pool_timeout"] = pool_timeout
+        config = OracleConfig(**config_kwargs)
         provider = OracleProvider(config)
         info = {
             "user": user,
             "dsn": dsn,
             "schema": schema,
             "embedding": _oracle_embedding_description(config),
+            "pool_max": pool_max,
         }
         secrets = {
             "oracle_user": user,
@@ -162,6 +208,8 @@ def build_provider(
             "data_source_id": provider.config.data_source_id,
             "semantic_backend": backend
             or os.getenv("MEMORIZZ_NOTION_SEMANTIC_BACKEND", "filesystem"),
+            # The header's badge opens the memory database there.
+            "notion_url": getattr(provider, "notion_url", None),
         }
         return provider, info, {}
 
@@ -196,6 +244,12 @@ def connect_provider(
     check = check_store_embeddings(provider, provider_type)
     if check.get("status") == "adopted" and "embedding" in info:
         info["embedding"] = embedder_label(check.get("adopted") or {})
+    try:
+        # Read where an index would otherwise be rebuilt with the wrong
+        # model (the MCP tool index re-embeds when the model changes).
+        provider.embedding_mismatch = check.get("status") == "mismatch"
+    except Exception:
+        pass
     if read_only:
         provider = ReadOnlyProviderProxy(provider)
         info["access"] = "read-only"
@@ -209,6 +263,7 @@ def connect_provider(
 
     _state["provider"] = provider
     _state["provider_type"] = provider_type
+    _forget_agent_status()
     _state["connection_info"] = info
     _state["provider_secrets"] = secrets
     _state["read_only"] = read_only
@@ -241,6 +296,13 @@ def schema_note(provider: Any) -> Optional[str]:
     )
 
 
+def _forget_agent_status() -> None:
+    """The sidebar's agent statuses belong to one store; drop them with it."""
+    from . import agent_status
+
+    agent_status.reset()
+
+
 def disconnect_provider() -> None:
     close_meta_harness()
     if _state["provider"]:
@@ -251,6 +313,7 @@ def disconnect_provider() -> None:
     _state["provider"] = None
     _state["provider_type"] = None
     _state["connection_info"] = {}
+    _forget_agent_status()
     _state["provider_secrets"] = {}
     _state["read_only"] = False
     _state["embedding_check"] = None
@@ -586,6 +649,13 @@ def connection_header() -> Dict[str, Any]:
         else ("", label)
     )
     check = _state.get("embedding_check") or {}
+    # Notion's memory is a database a person can open: the badge goes there.
+    # The sidebar's store switch still changes stores.
+    opens = (
+        (_state.get("connection_info") or {}).get("notion_url")
+        if connected and provider_type == "notion" and not restricted
+        else None
+    )
     return {
         "connected": connected,
         "provider_type": provider_type,
@@ -593,6 +663,9 @@ def connection_header() -> Dict[str, Any]:
         "target": target,
         "title": title,
         "href": None if restricted else "/connect",
+        "opens": opens
+        if isinstance(opens, str) and opens.startswith("https://")
+        else None,
         "restricted": restricted,
         "read_only": ui_is_read_only(),
         "read_only_tooltip": READ_ONLY_TOOLTIP,

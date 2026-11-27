@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}{{ memory.memory_id }} · Shared memory - Memorizz{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/shared-memory.css?v=3">{% endblock %}
+{% block content %}
+{% from '_ui.html' import page_header %}
+{% macro agent_card(agent) %}
+<a class="sm-agent sm-agent--{{ agent.access }}" href="/agents/{{ agent.agent_id }}/playground">
+    <span class="sm-agent-name">{{ agent.name }}</span>
+    {% if agent.role %}<span class="sm-agent-role">{{ agent.role }}</span>{% endif %}
+    <span class="sm-agent-facts">
+        {% if agent.access == 'writes' %}<span class="sm-tag sm-tag--writes">Writes records</span>{% elif agent.access == 'reads' %}<span class="sm-tag">Reads records</span>{% else %}<span class="sm-tag">Conversation only</span>{% endif %}
+        {% if agent.coordinates %}<span class="sm-tag sm-tag--lead">Coordinates {{ agent.coordinates|join(', ') }}</span>{% endif %}
+    </span>
+    <span class="sm-agent-count">{{ agent.turns }} turn{{ '' if agent.turns == 1 else 's' }}{% if agent.model %} · <span class="mono">{{ agent.model }}</span>{% endif %}</span>
+</a>
+{% endmacro %}
+
+<div class="sm">
+    {% call page_header(memory.memory_id, None, back=('/memory/shared', '← Shared memory'), title_id='sm-memory-id') %}
+        {% if memory.harness_runs %}<a class="btn" href="/harnesses/memory/{{ memory.memory_id|urlencode }}">Harness runs in this memory</a>{% endif %}
+        <a class="btn" href="/memory/entity">Entity memory</a>
+    {% endcall %}
+    <p class="sm-lead">
+        {% if memory.shared %}Shared by {{ memory.agents|length }} agent{{ '' if memory.agents|length == 1 else 's' }}{% if memory.harness_runs %}, {{ memory.harnesses|length }} harness{{ '' if memory.harnesses|length == 1 else 'es' }}{% endif %}{% if memory.apps %}, {{ memory.apps|length }} connected app{{ '' if memory.apps|length == 1 else 's' }}{% endif %}.{% else %}Used by one agent, so nothing here is shared.{% endif %}
+        Every turn that runs with this memory ID reads and writes the same records.
+    </p>
+
+    {#- Who shares it: the agents that may change its records on the left, the
+        memory in the middle, the agents that read it on the right. -#}
+    <section class="sm-flow" aria-label="Who shares this memory">
+        <div class="sm-flow-side">
+            <h2 class="sm-flow-title">Write its records <span>{{ memory.writers|length }}</span></h2>
+            {% for agent in memory.writers %}{{ agent_card(agent) }}{% else %}<p class="sm-empty">No agent may change this memory's records.</p>{% endfor %}
+        </div>
+        <div class="sm-flow-arrow" aria-hidden="true"><span>write</span></div>
+        <div class="sm-core">
+            <span class="sm-core-label">Memory ID</span>
+            <strong class="sm-core-id mono">{{ memory.memory_id }}</strong>
+            <dl class="sm-core-facts">
+                <div><dt>Records</dt><dd>{{ memory.records|length }}</dd></div>
+                <div><dt>Turns</dt><dd>{{ memory.turn_count }}</dd></div>
+                <div><dt>Handbooks</dt><dd>{{ memory.handbooks|length }}</dd></div>
+                <div><dt>Tasks</dt><dd>{{ memory.boards|length }}</dd></div>
+                {% if memory.harness_runs %}<div><dt>Harness runs</dt><dd>{{ memory.harness_runs }}</dd></div>{% endif %}
+            </dl>
+            {% if memory.harnesses or memory.apps %}
+            <ul class="sm-chips">{% for harness, count in memory.harnesses.items() %}<li class="sm-chip sm-chip--harness" title="{{ count }} harness run{{ '' if count == 1 else 's' }}">{{ harness }} · {{ count }}</li>{% endfor %}{% for app, count in memory.apps.items() %}<li class="sm-chip sm-chip--app" title="A connected app that saved {{ count }} record{{ '' if count == 1 else 's' }} here">{{ app }} · {{ count }}</li>{% endfor %}</ul>
+            {% endif %}
+        </div>
+        <div class="sm-flow-arrow" aria-hidden="true"><span>read</span></div>
+        <div class="sm-flow-side">
+            <h2 class="sm-flow-title">Read them <span>{{ memory.readers|length }}</span></h2>
+            {% for agent in memory.readers %}{{ agent_card(agent) }}{% else %}<p class="sm-empty">Every agent here may write.</p>{% endfor %}
+        </div>
+    </section>
+
+    <div class="sm-columns">
+        <section class="sm-panel" aria-labelledby="sm-records-title">
+            <h2 class="sm-title" id="sm-records-title">What the memory holds <span>{{ memory.records|length }}</span></h2>
+            <p class="sm-note">Records in entity memory: the current value of each decision, whatever older messages say.</p>
+            {% for record in memory.records %}
+            <article class="sm-record">
+                <header>
+                    <h3>{{ record.name }}</h3>
+                    <span class="sm-record-by">{% if record.changed_by %}last changed by <strong>{{ record.changed_by }}</strong>{% endif %}{% if record.changed_at %} <span class="mono">{{ record.changed_at[:16]|replace('T', ' ') }}</span>{% endif %}</span>
+                </header>
+                <dl class="sm-attributes">
+                    {% for attribute in record.attributes %}<div><dt>{{ attribute.name }}</dt><dd>{{ attribute.value }}</dd></div>{% endfor %}
+                </dl>
+            </article>
+            {% else %}
+            <p class="sm-empty">No records yet. An agent with entity memory writes one when it is told a fact to keep.</p>
+            {% endfor %}
+
+            {% if memory.handbooks %}
+            <h2 class="sm-title sm-title--spaced">Handbooks its agents carry <span>{{ memory.handbooks|length }}</span></h2>
+            <ul class="sm-list">
+                {% for handbook in memory.handbooks %}
+                <li><strong>{{ handbook.name }}</strong><span>{{ handbook.chunks }} chunk{{ '' if handbook.chunks == 1 else 's' }} · {% if handbook.everyone %}every agent here{% else %}{{ handbook.agents|join(', ') }}{% endif %}</span></li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+        </section>
+
+        <section class="sm-panel" aria-labelledby="sm-authors-title">
+            <h2 class="sm-title" id="sm-authors-title">Who wrote what</h2>
+            {% if memory.authors %}
+            <table class="sm-table">
+                <thead><tr><th scope="col">Agent or harness</th><th scope="col" class="num">Turns</th><th scope="col" class="num">Records made</th><th scope="col" class="num">Records changed</th></tr></thead>
+                <tbody>
+                    {% for row in memory.authors %}
+                    <tr><th scope="row">{% if row.harness %}<span class="sm-chip sm-chip--harness">{{ row.agent }}</span>{% else %}{{ row.agent }}{% endif %}</th><td class="num">{{ row.turns }}</td><td class="num">{{ row.records_created or '—' }}</td><td class="num">{{ row.records_updated or '—' }}</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="sm-empty">{% if memory.history_kept %}No agent of this store has written here.{% else %}No change history is kept for this memory. Turn it on with <code>MemoryHistory(provider, record_changes=True)</code>; the console keeps it for turns run here.{% endif %}</p>
+            {% endif %}
+
+            <h2 class="sm-title sm-title--spaced">Newest turns <span>{{ memory.turn_count }}</span></h2>
+            <ol class="sm-turns">
+                {% for turn in memory.turns %}
+                <li class="sm-turn sm-turn--{{ turn.role }}{% if turn.harness %} sm-turn--harness{% endif %}">
+                    <span class="sm-turn-who">{% if turn.role == 'user' %}to {% endif %}{{ turn.agent }}</span>
+                    <span class="sm-turn-text">{{ turn.text }}</span>
+                    <span class="sm-turn-meta mono">{{ turn.thread_id }}</span>
+                </li>
+                {% else %}
+                <li class="sm-empty">No turns yet.</li>
+                {% endfor %}
+            </ol>
+        </section>
+    </div>
+
+    {% if memory.boards %}
+    <section class="sm-panel" aria-labelledby="sm-boards-title">
+        <h2 class="sm-title" id="sm-boards-title">Tasks coordinated here <span>{{ memory.boards|length }}</span></h2>
+        <p class="sm-note">A coordinator splits one request across its delegates and keeps the plan and each result on a coordination board.</p>
+        {% for board in memory.boards %}
+        <article class="sm-board">
+            <header>
+                <strong>{{ board.coordinator }}</strong>
+                <span class="sm-badge{% if board.outcome == 'succeeded' %} sm-badge--shared{% endif %}">{{ board.outcome or board.status }}</span>
+                <span class="mono sm-board-at">{{ board.started_at[:16]|replace('T', ' ') }}</span>
+            </header>
+            <p class="sm-board-request">{{ board.request }}</p>
+            <ol class="sm-tasks">
+                {% for task in board.tasks %}
+                <li class="sm-task">
+                    <span class="sm-task-who">{{ task.agent }}</span>
+                    <div class="sm-task-body">
+                        <p class="sm-task-what">{{ task.description }}</p>
+                        {% if task.result %}<p class="sm-task-result">{{ task.result }}</p>{% endif %}
+                    </div>
+                    <span class="sm-task-state sm-task-state--{{ task.status }}">{{ task.status }}{% if task.seconds is not none %} · {{ task.seconds }}s{% endif %}</span>
+                </li>
+                {% endfor %}
+            </ol>
+        </article>
+        {% endfor %}
+    </section>
+    {% endif %}
+</div>
+{% endblock %}

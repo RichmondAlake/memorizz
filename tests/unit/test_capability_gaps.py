@@ -55,12 +55,12 @@ def test_state_reflects_configuration_and_environment():
     assert _row(configured, "notes")["status"] == "enabled"
     assert _row(configured, "code_execution")["via"] == "e2b"
     email = _row(configured, "email")
-    assert email["status"] == "needs_sign_in"
+    assert email["status"] == "needs_sign_in" and email["service"] == "Gmail"
     assert email["offers"] == [
         {
             "kind": "mcp_sign_in",
             "server": "gmail",
-            "title": "Sign in to gmail",
+            "title": "Sign in to Gmail",
             "needs_client": True,
         }
     ]

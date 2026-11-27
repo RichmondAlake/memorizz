@@ -34,7 +34,9 @@ from fastapi.responses import (
     StreamingResponse,
 )
 
+from .. import agent_status
 from ..helpers import (
+    SANDBOX_OFF,
     _agent_entity_memory_enabled,
     _agent_workflow_memory_enabled,
     _build_agent_nav_items,
@@ -57,10 +59,12 @@ from ..helpers import (
     _normalize_llm_provider,
     _normalize_skills_marketplace_provider_name,
     _parse_bool,
+    _parse_routing,
     _parse_self_aware_root_paths,
     _persist_mcp_configs_to_toolbox,
     _provider_supports_entity_memory,
     _resolve_sandbox_provider_config,
+    _sandbox_is_off,
     _to_text,
     _validate_browser_control_choice,
     _validate_internet_provider_choice,
@@ -787,6 +791,9 @@ def _parse_trace_bundle_payload(raw_content: Any) -> Optional[List[Dict[str, str
             value = _to_text(event.get(key)).strip()
             if value:
                 serialized_event[key] = value
+        # What the step found, for the reply to show (pages, a table).
+        if isinstance(event.get("display"), dict) and event["display"].get("kind"):
+            serialized_event["display"] = event["display"]
         events.append(serialized_event)
 
     return events
@@ -1034,6 +1041,178 @@ def _harness_service():
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _mark_harness_turns(
+    messages: List[Dict[str, Any]], agent_id: str, memory_id: Optional[str]
+) -> None:
+    """Say which stored answers a harness gave, so the page can link each to
+    its run. An answer is matched to the harness run of this agent and
+    conversation that was asked the question before it."""
+    if not memory_id or not messages:
+        return
+    try:
+        runs = _harness_service().list_runs(limit=300)
+    except Exception:
+        return
+    asked: Dict[str, Dict[str, Any]] = {}
+    for run in runs:  # newest first: the first seen for a question is kept
+        task = run.get("task") or {}
+        if (
+            task.get("memory_id") != memory_id
+            or task.get("agent_id") != agent_id
+            or task.get("mode") != "runtime"
+        ):
+            continue
+        asked.setdefault(_to_text(task.get("task")).strip(), run)
+    if not asked:
+        return
+    question = None
+    for message in messages:
+        role = _to_text(message.get("role")).lower()
+        if role == "user":
+            question = _to_text(message.get("content")).strip()
+        elif role == "assistant" and question in asked:
+            run = asked.pop(question)
+            result = run.get("result") or {}
+            message["harness_run"] = {
+                "run_id": run.get("run_id"),
+                "harness": run.get("harness"),
+                "status": run.get("status"),
+                "latency_ms": result.get("latency_ms"),
+                "cost_usd": result.get("cost_usd"),
+            }
+            question = None
+
+
+# The agent's own runtime is "memagent"; it cannot answer for itself.
+_NOT_ANSWERING = frozenset({"memagent"})
+
+
+# Probing every harness runs its CLI; the list is kept for a short while.
+_ANSWER_HARNESSES: Dict[str, Any] = {"at": 0.0, "rows": None}
+ANSWER_HARNESSES_SECONDS = 30.0
+
+
+def _answer_harnesses() -> List[Dict[str, Any]]:
+    """The harnesses a playground conversation can be answered by, ready
+    ones first, each with the models it offers and why it is not ready."""
+    import time
+
+    from ...metaharness.catalog import HARNESS_LABELS
+
+    kept = _ANSWER_HARNESSES
+    if (
+        kept["rows"] is not None
+        and time.monotonic() - kept["at"] < ANSWER_HARNESSES_SECONDS
+    ):
+        return [dict(row) for row in kept["rows"]]
+    try:
+        rows = _harness_service().list_harnesses()
+    except Exception:
+        return []
+    found = []
+    for row in rows:
+        name = str(row.get("name") or "")
+        if not name or name in _NOT_ANSWERING:
+            continue
+        ready = bool(row.get("ready"))
+        found.append(
+            {
+                "name": name,
+                "label": HARNESS_LABELS.get(name, name),
+                "ready": ready,
+                "models": [str(model) for model in row.get("models") or []][:40],
+                "why": ""
+                if ready
+                else str(row.get("remediation") or row.get("error") or "Not ready"),
+            }
+        )
+    found.sort(key=lambda item: (not item["ready"], item["label"].lower()))
+    kept.update(at=time.monotonic(), rows=[dict(row) for row in found])
+    return found
+
+
+def _check_answer_harness(harness: str) -> None:
+    """Refuse a harness that is unknown or not ready, before the turn starts."""
+    from ...metaharness.catalog import HARNESS_LABELS
+
+    adapter = (
+        None
+        if harness in _NOT_ANSWERING
+        else getattr(_harness_service(), "adapters", {}).get(harness)
+    )
+    if adapter is None:
+        raise HTTPException(status_code=400, detail=f"Unknown harness: {harness}")
+    state = adapter.probe().to_dict()
+    if not state.get("ready"):
+        why = state.get("remediation") or state.get("error") or "it is not ready"
+        raise HTTPException(
+            status_code=409,
+            detail=f"{HARNESS_LABELS.get(harness, harness)} cannot answer: {why}",
+        )
+
+
+def _answer_on_harness(agent: Any, harness: str, model: Optional[str]) -> None:
+    """Make this loaded agent answer its next turn through ``harness``.
+
+    Only the instance for this request changes. MemoRizz still supplies the
+    conversation's memory, the trace and approvals."""
+    config = dict(getattr(agent, "harness_config", None) or {})
+    if model:
+        config["model"] = model
+    else:
+        # The agent's own model name means nothing to a harness.
+        config.pop("model", None)
+    agent.with_meta_harness(
+        _harness_service(), mode="runtime", default_harness=harness, config=config
+    )
+
+
+# How long a harness turn is followed after its page left.
+DETACHED_TURN_SECONDS = 45 * 60
+
+
+def _follow_detached(
+    stream: Any, agent_id: str, query: str, started: Any, progress: Any, run_ids: set
+) -> None:
+    """Keep a harness turn going after its page left, and publish it as a
+    live turn so the page (or another one) shows it again and gets the
+    answer. The turn is recorded in the conversation as usual when it ends."""
+    import threading
+    import time
+
+    from ...live_turns import LiveTurn
+
+    def follow() -> None:
+        live = LiveTurn(agent_id, query, source="playground")
+        deadline = time.monotonic() + DETACHED_TURN_SECONDS
+        try:
+            live.event(dict(started))
+            if progress is not None:
+                live.event(dict(progress))
+            while time.monotonic() < deadline:
+                try:
+                    event = stream.poll(timeout=0.5)
+                except StopIteration:
+                    break
+                if event is None:
+                    live.tick()
+                    continue
+                run_ids.add(event["run_id"])
+                agent_status.note_event(agent_id, event)
+                live.event(dict(event))
+        except Exception:
+            logger.debug(
+                "A detached harness turn stopped being followed", exc_info=True
+            )
+        finally:
+            live.close()
+            stream.close()
+            for run_id in run_ids:
+                agent_status.end_run(agent_id, run_id)
+
+    threading.Thread(target=follow, name="playground-harness-turn", daemon=True).start()
+
+
 def _harness_parent(
     service: Any, agent_id: str, grant_id: str, workspace: str
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -1046,7 +1225,7 @@ def _harness_parent(
         if grant is not None:
             return grant, None
         warning = (
-            "The access you allowed for harness delegates has expired; "
+            "The access you allowed for harness work has expired; "
             "allow it again in the inspector."
         )
     if workspace:
@@ -1061,8 +1240,66 @@ def _harness_parent(
                 )
             return {"workspace": folder}, warning
         except Exception as exc:
-            warning = warning or f"Harness delegates can't use that folder: {exc}"
+            warning = warning or f"That folder can't be used for harness work: {exc}"
     return None, warning
+
+
+def _recall_scope(agent: Any) -> str:
+    """How far an agent's conversations reach each other: "across",
+    "separate" (each on its own) or "sealed" (nothing crosses, either way)."""
+    policy = getattr(agent, "retrieval_policy", None) if agent else None
+    if not isinstance(policy, dict):
+        policy = policy.to_dict() if hasattr(policy, "to_dict") else {}
+    if policy.get("conversation_scope") in ("thread", "disabled"):
+        return "sealed" if policy.get("entity_scope") == "thread" else "separate"
+    return "across"
+
+
+def _playground_recall_policy(agent_instance: Any, memory_id: Optional[str]) -> Any:
+    """The agent's recall policy with its other conversations to read from,
+    or None to leave the policy as it is (sealed, thread-scoped, or no
+    other conversation yet)."""
+    from dataclasses import replace
+
+    policy = getattr(agent_instance, "retrieval_policy", None)
+    if getattr(policy, "conversation_scope", None) != "memory":
+        return None
+    current = _to_text(memory_id).strip()
+    # Newest conversations first; the policy caps how many it will read.
+    others = [
+        _to_text(item).strip()
+        for item in reversed(getattr(agent_instance, "memory_ids", None) or [])
+    ]
+    others = [item for item in dict.fromkeys(others) if item and item != current]
+    if not others:
+        return None
+    return replace(policy, also_recall_from=tuple(others))
+
+
+# The templates offered on a first run, in this order when they exist.
+FIRST_RUN_TEMPLATES = ("research", "writing", "support", "productivity")
+
+
+def _first_run() -> Dict[str, Any]:
+    """What the playground shows a store with no agent: the model a first
+    agent gets, a few templates and the steps that follow."""
+    from .. import dashboard as dash
+    from ..helpers import first_agent_model
+
+    try:
+        from ..agent_templates import template_cards
+
+        cards = {card["key"]: card for card in template_cards() if card["builtin"]}
+    except Exception:
+        logger.debug("Agent templates unavailable for the first run", exc_info=True)
+        cards = {}
+    return {
+        "model": first_agent_model(),
+        "templates": [cards[key] for key in FIRST_RUN_TEMPLATES if key in cards],
+        # The same five steps the Dashboard lists; none is done yet.
+        "steps": dash.getting_started({}),
+        "read_only": bool(_state.get("read_only")),
+    }
 
 
 @router.get("/playground", response_class=HTMLResponse)
@@ -1103,6 +1340,8 @@ async def playground_index(request: Request):
             "connection_info": _state["connection_info"],
             "agents": agents,
             "launcher": launcher,
+            # A store with no agent yet: a first message makes the first one.
+            "first_run": None if agents else _first_run(),
             "generated_at": now,
             **dash.template_helpers(),
             "active_page": "playground",
@@ -1236,9 +1475,17 @@ async def agent_playground(
     sandbox_provider = getattr(agent, "sandbox_provider", None) if agent else None
     if isinstance(sandbox_provider, dict):
         sandbox_provider = sandbox_provider.get("provider", "")
-    if not sandbox_provider:
-        sandbox_provider = os.environ.get("MEMORIZZ_DEFAULT_SANDBOX_PROVIDER", "")
-    sandbox_status_error = _validate_sandbox_provider_choice(sandbox_provider)
+    # With nothing saved the agent follows the console's default; "none"
+    # turns code execution off for this agent whatever the default is.
+    sandbox_default = os.environ.get("MEMORIZZ_DEFAULT_SANDBOX_PROVIDER", "").strip()
+    sandbox_choice = _to_text(sandbox_provider or "").strip().lower()
+    if not sandbox_choice and not sandbox_default:
+        sandbox_choice = SANDBOX_OFF
+    sandbox_effective = (
+        "" if sandbox_choice == SANDBOX_OFF else sandbox_choice or sandbox_default
+    )
+    sandbox_provider = sandbox_choice
+    sandbox_status_error = _validate_sandbox_provider_choice(sandbox_effective)
 
     browser_control_config = getattr(agent, "browser_control", None) if agent else None
     browser_control_provider = (
@@ -1304,6 +1551,18 @@ async def agent_playground(
     self_aware_config = getattr(agent, "self_aware_config", None) if agent else None
     if not isinstance(self_aware_config, dict):
         self_aware_config = {}
+    # The label of the header chip: its own source and how far it has moved.
+    self_aware_label = "Self-aware" if self_aware_enabled else ""
+    if self_aware_enabled and self_aware_config.get("own_source"):
+        self_aware_label = "Self-aware · own source"
+        try:
+            from ...memagent.self_source import SelfSource
+
+            own = SelfSource(str(agent.agent_id))
+            if own.exists():
+                self_aware_label = f"Self-aware · v{own.versions()[0]['number']}"
+        except Exception:
+            pass
     self_aware_root_paths = self_aware_config.get("root_paths")
     if not isinstance(self_aware_root_paths, list):
         self_aware_root_paths = []
@@ -1346,10 +1605,14 @@ async def agent_playground(
             # Config fields
             "llm_provider": llm_provider,
             "llm_model": llm_model,
+            "llm_routing": llm_config.get("routing") or {},
             "llm_context_window": llm_context_window,
             "instruction": instruction,
             "max_steps": max_steps,
+            "recall_scope": _recall_scope(agent),
             "sandbox_provider": sandbox_provider,
+            "sandbox_default": sandbox_default,
+            "sandbox_effective": sandbox_effective,
             "sandbox_status_error": sandbox_status_error,
             "browser_control_provider": browser_control_provider,
             "browser_control_status_error": browser_control_status_error,
@@ -1367,7 +1630,9 @@ async def agent_playground(
             "entity_memory_status_error": entity_memory_status_error,
             "skill_paths": skill_paths,
             "mcp_servers": mcp_servers,
+            "sign_ins_needed": _sign_ins_needed(agent_id, agent, mcp_servers),
             "self_aware": self_aware_enabled,
+            "self_aware_label": self_aware_label,
             "self_aware_root_paths": self_aware_root_paths_text,
             "self_aware_allow_writes": bool(
                 self_aware_config.get("allow_writes", False)
@@ -1389,6 +1654,48 @@ async def agent_playground(
     )
 
 
+def _sign_ins_needed(agent_id: str, agent: Any, mcp_servers: Any) -> List[Dict]:
+    """The agent's connected apps that are not signed in, for the bar above
+    the message box. Sent with the page: the bar is there at once, with no
+    second read of the agent."""
+    if not agent or not mcp_servers:
+        return []
+    try:
+        from .capabilities import _agent_state
+
+        return [
+            row
+            for row in _agent_state(agent_id, agent)
+            if row.get("status") == "needs_sign_in"
+        ]
+    except Exception as exc:
+        logger.debug("Sign-in state for %s was not read: %s", agent_id, exc)
+        return []
+
+
+@router.get("/api/nav/agent-status")
+async def nav_agent_status(ids: str = ""):
+    """What the sidebar's agents are doing: a current step or a last message."""
+    if not _state["provider"]:
+        return {"agents": {}}
+    wanted = [value.strip() for value in ids.split(",") if value.strip()]
+    if not wanted:
+        return {"agents": {}}
+    from ..helpers import _list_agents
+
+    def load():
+        return agent_status.nav_status(
+            wanted, agent_status.known_agents(_list_agents, wanted)
+        )
+
+    try:
+        statuses = await run_in_threadpool(load)
+    except Exception as exc:
+        logger.debug("Agent status for the sidebar failed: %s", exc)
+        statuses = {}
+    return {"agents": statuses}
+
+
 @router.post("/agents/{agent_id}/playground/stream")
 async def agent_playground_stream(request: Request, agent_id: str):
     """SSE endpoint: stream agent responses as Server-Sent Events."""
@@ -1408,6 +1715,16 @@ async def agent_playground_stream(request: Request, agent_id: str):
     # inspector, else the conversation's own folder.
     harness_grant = str(form.get("harness_grant", "")).strip()
     harness_workspace = str(form.get("harness_workspace", "")).strip()
+    # "Answered by": a harness that runs this turn in place of the agent's
+    # own model. Chosen per conversation in the page; never saved on the agent.
+    answer_harness = (
+        str(form.get("answer_harness", "")).strip().lower().replace("_", "-")
+    )
+    answer_model = str(form.get("answer_model", "")).strip() or None
+    if answer_harness:
+        if _state.get("read_only"):
+            raise HTTPException(status_code=403, detail="This console is read-only")
+        await run_in_threadpool(_check_answer_harness, answer_harness)
 
     if not query:
         raise HTTPException(status_code=400, detail="No query provided")
@@ -1491,6 +1808,9 @@ async def agent_playground_stream(request: Request, agent_id: str):
             )
             if not sandbox_cfg:
                 sandbox_cfg = os.environ.get("MEMORIZZ_DEFAULT_SANDBOX_PROVIDER", "")
+            if _sandbox_is_off(sandbox_cfg):
+                # This agent runs no code, whatever the console's default.
+                sandbox_cfg = ""
             resolved_sandbox_cfg = _resolve_sandbox_provider_config(sandbox_cfg)
             # Only attempt if no sandbox config was already tried during load
             stored_sandbox = (
@@ -1498,7 +1818,9 @@ async def agent_playground_stream(request: Request, agent_id: str):
                 if stored_agent
                 else None
             )
-            sandbox_already_attempted = bool(stored_sandbox)
+            sandbox_already_attempted = bool(stored_sandbox) and not _sandbox_is_off(
+                stored_sandbox
+            )
             if resolved_sandbox_cfg and not sandbox_already_attempted:
                 try:
                     validation_error = _validate_sandbox_provider_choice(
@@ -1593,6 +1915,22 @@ async def agent_playground_stream(request: Request, agent_id: str):
                 scope="internet",
                 message="Internet access unavailable",
             )
+        if answer_harness:
+            _answer_on_harness(agent_instance, answer_harness, answer_model)
+            run_only.extend(
+                (
+                    "meta_harness",
+                    "meta_harness_mode",
+                    "default_harness",
+                    "harness_config",
+                )
+            )
+            session.emit(
+                "status",
+                stage="answered_by",
+                harness=answer_harness,
+                message=f"{answer_harness} answers this turn",
+            )
         keep_stored_fields(agent_instance, *run_only)
 
         # Validate entity-memory runtime tool availability.
@@ -1653,7 +1991,15 @@ async def agent_playground_stream(request: Request, agent_id: str):
                 message="Persona tools unavailable",
             )
         run_kwargs: Dict[str, Any] = {"user_id": user_id} if user_id else {}
-        if (harness_grant or harness_workspace) and _harness_delegates(agent_instance):
+        # Each playground conversation has a memory of its own, and one
+        # person owns them all: unless the agent keeps conversations apart, a
+        # chat recalls the agent's other conversations and is told of them.
+        recall_policy = _playground_recall_policy(agent_instance, memory_id)
+        if recall_policy is not None:
+            run_kwargs["retrieval_policy"] = recall_policy
+        if (harness_grant or harness_workspace) and (
+            answer_harness or _harness_delegates(agent_instance)
+        ):
             parent, warning = None, None
             try:
                 from ..state import get_meta_harness
@@ -1722,6 +2068,12 @@ async def agent_playground_stream(request: Request, agent_id: str):
         )
         last_frame = time.monotonic()
         sentinel = object()
+        run_ids: set = set()
+        # A harness turn can run for minutes. If the page goes away (a
+        # reload, a closed tab) it carries on, and the page finds it again.
+        started = None
+        progress = None
+        finished = False
 
         def poll():
             try:
@@ -1739,17 +2091,58 @@ async def agent_playground_stream(request: Request, agent_id: str):
                         yield ": heartbeat\n\n"
                         last_frame = time.monotonic()
                     continue
+                # The sidebar shows this step beside the agent's name.
+                run_ids.add(event["run_id"])
+                agent_status.note_event(agent_id, event)
+                if event["type"] == "run.started":
+                    started = event
+                elif event["type"] == "run.done":
+                    finished = True
+                elif event["type"] == "status" and event.get("harness_run_id"):
+                    progress = event
                 yield f"id: {event['run_id']}:{event['seq']}\nevent: {event['type']}\ndata: {event.to_json()}\n\n"
                 last_frame = time.monotonic()
         finally:
-            # Explicit browser abort cancels this request's producer, never another run.
-            await asyncio.to_thread(stream.close)
+            if answer_harness and started is not None and not finished:
+                # Stopping a harness turn is asked for by name (the run is
+                # cancelled through its own route), so a dropped connection
+                # here is the page leaving, not a request to stop.
+                _follow_detached(stream, agent_id, query, started, progress, run_ids)
+            else:
+                # Explicit browser abort cancels this request's producer, never another run.
+                await asyncio.to_thread(stream.close)
+                for run_id in run_ids:
+                    agent_status.end_run(agent_id, run_id)
 
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/api/agents/{agent_id}/answer-harnesses")
+async def agent_answer_harnesses(agent_id: str):
+    """The harnesses this agent's conversations can be answered by."""
+    from ..helpers import _load_agent
+
+    agent = _load_agent(agent_id)
+
+    def field(name):
+        return (
+            agent.get(name) if isinstance(agent, dict) else getattr(agent, name, None)
+        )
+
+    # An agent set to run on a harness is answered by it whatever is picked
+    # here, so the page names that harness instead of "the agent's model".
+    runtime = None
+    if field("meta_harness") and str(field("meta_harness_mode") or "") == "runtime":
+        runtime = str(field("default_harness") or "auto").strip().lower() or "auto"
+    return {
+        "ok": True,
+        "harnesses": await run_in_threadpool(_answer_harnesses),
+        "runtime": runtime,
+    }
 
 
 @router.post("/api/agents/{agent_id}/harness-access")
@@ -1769,13 +2162,18 @@ async def agent_harness_access_grant(request: Request, agent_id: str):
     if (network == "full" or write) and not approver:
         raise HTTPException(
             status_code=400,
-            detail="Give your name to approve web access or edits for harness delegates",
+            detail="Give your name to approve web access or edits",
         )
     workspace = str(body.get("workspace") or "").strip()
     agent = await run_in_threadpool(_state["provider"].retrieve_memagent, agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    if not await run_in_threadpool(_harness_delegates, agent):
+    # Access is for the agent's harness delegates, or for a conversation that
+    # a harness answers (the page names it; it is checked like a turn's).
+    answer_harness = str(body.get("answer_harness") or "").strip().lower()
+    if answer_harness:
+        await run_in_threadpool(_check_answer_harness, answer_harness.replace("_", "-"))
+    elif not await run_in_threadpool(_harness_delegates, agent):
         raise HTTPException(
             status_code=400, detail="This agent has no delegates that run on a harness"
         )
@@ -2171,6 +2569,9 @@ async def agent_playground_thread(
         )
 
     serialized = [_serialize_thread_message(msg) for msg in messages]
+    await run_in_threadpool(
+        _mark_harness_turns, serialized, agent_id, requested_memory_id
+    )
     thread_memory = _load_thread_memories(agent_id, requested_memory_id)
     toolbox_memory = thread_memory["toolbox"]
     workflow_memory = thread_memory["workflow"]
@@ -2293,6 +2694,16 @@ async def agent_playground_config_update(request: Request, agent_id: str):
             llm_config["deployment_name"] = new_model
         else:
             llm_config["model"] = new_model
+    if "llm_routing_json" in form:
+        # OpenRouter's routing rules; empty fields clear them, and another
+        # provider never carries them.
+        llm_config.pop("routing", None)
+        if (llm_config.get("provider") or "").lower() == "openrouter":
+            routing, routing_error = _parse_routing(form.get("llm_routing_json"))
+            if routing_error:
+                return _config_error_redirect(agent_id, routing_error)
+            if routing:
+                llm_config["routing"] = routing
     if "context_window_tokens" in form:
         # Blank means the provider default (for Ollama, the model's own
         # length when it fits in memory); a number pins the window.
@@ -2379,8 +2790,11 @@ async def agent_playground_config_update(request: Request, agent_id: str):
     )
 
     # Resolve sandbox provider: use form value, fall back to existing
-    sandbox_value = new_sandbox_provider if new_sandbox_provider else None
-    if sandbox_value is None:
+    # The form's choice is the setting: empty follows the console's default,
+    # "none" turns it off. A request without the field leaves it as it was.
+    if "sandbox_provider" in form:
+        sandbox_value = new_sandbox_provider or None
+    else:
         sandbox_value = getattr(existing, "sandbox_provider", None)
     # Only validate sandbox when the user explicitly changed it;
     # carry forward the existing value without blocking unrelated edits.
@@ -2449,9 +2863,20 @@ async def agent_playground_config_update(request: Request, agent_id: str):
         # The window chosen here replaces any agent-level cap, so it is the
         # one the agent actually runs with.
         window_update = {"context_window_tokens": None, "context_window_source": None}
+    retrieval_policy_value = getattr(existing, "retrieval_policy", None)
+    if "recall_across_present" in form and _recall_scope(existing) != "sealed":
+        # Sealing is set on the agent's own page; this is the lighter choice
+        # between recalling across conversations and keeping each on its own.
+        chosen = dict(retrieval_policy_value or {})
+        if _parse_bool(form.get("recall_across")):
+            chosen.pop("conversation_scope", None)
+        else:
+            chosen["conversation_scope"] = "thread"
+        retrieval_policy_value = chosen or None
     updated = existing.model_copy(
         update={
             "agent_id": agent_id,
+            "retrieval_policy": retrieval_policy_value,
             "instruction": new_instruction or getattr(existing, "instruction", None),
             "memory_types": memory_types_value,
             "max_steps": max_steps_value,

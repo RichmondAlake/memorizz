@@ -13,6 +13,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from ...metaharness import catalog
 from ...metaharness.catalog import fill_reported_models
+from ..harness_memory_view import known_memories, memory_overview, run_memory
 from ..helpers import (
     _approval_payload,
     _build_agent_nav_items,
@@ -23,6 +24,7 @@ from ..security import ui_read_only
 from ..state import _state, get_meta_harness, templates
 
 logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["meta-harness"])
 # The page's run ledger shows the newest runs; the JSON API pages through more.
 RUN_LIMIT = 100
@@ -46,6 +48,10 @@ def _http_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=400, detail=str(exc))
     logger.exception("Meta-harness UI operation failed")
     return HTTPException(status_code=500, detail="Harness operation failed")
+
+
+# Runs read to list the memories harnesses have used.
+MEMORY_RUN_LIMIT = 1000
 
 
 @router.get("/harnesses", response_class=HTMLResponse)
@@ -120,6 +126,7 @@ async def harnesses_page(request: Request):
             "harnesses": harnesses,
             "workspace_roots": list(getattr(service, "allowed_workspace_roots", [])),
             "recent_workspaces": _recent_workspaces(service, runs),
+            "known_memories": known_memories(runs),
             "agents": agents,
             "agent_label": catalog.agent_name_of,
             "agent_teams": catalog.agent_teams(agents),
@@ -398,6 +405,8 @@ def _task_from_payload(payload: Dict[str, Any], *, write: bool):
         allow_dirty_workspace=bool(payload.get("allow_dirty_workspace", False)),
         network=payload.get("network") or "none",
         mcp_access=payload.get("mcp_access") or "read_only",
+        mcp_memory_scope=payload.get("mcp_memory_scope") or "run",
+        mcp_read_memory_ids=payload.get("mcp_read_memory_ids"),
         allowed_env=payload.get("allowed_env"),
         allowed_tools=payload.get("allowed_tools"),
         denied_tools=payload.get("denied_tools"),
@@ -760,6 +769,106 @@ async def api_harness_run(run_id: str, include_events: bool = False):
     if include_events:
         value["events"] = await asyncio.to_thread(service.event_history, run_id)
     return {"ok": True, "run": value}
+
+
+@router.get("/api/harness-runs/{run_id}/memory")
+async def api_harness_run_memory(run_id: str):
+    """What the run was given from memory, looked up itself and was refused."""
+    service = _service()
+    run = await asyncio.to_thread(service.get_run, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Harness run not found")
+    events = await asyncio.to_thread(service.event_history, run_id)
+    return JSONResponse(
+        {"ok": True, **run_memory(run, events)}, headers={"Cache-Control": "no-store"}
+    )
+
+
+@router.get("/harnesses/memory/{memory_id:path}", response_class=HTMLResponse)
+async def harness_memory_page(request: Request, memory_id: str):
+    """One memory as harnesses share it: who wrote to it, in order."""
+    if not _state.get("provider"):
+        return RedirectResponse(url="/connect", status_code=302)
+    runs = await asyncio.to_thread(_service().list_runs, limit=MEMORY_RUN_LIMIT)
+    overview = memory_overview(memory_id, runs)
+    refine = await asyncio.to_thread(_refine_state, memory_id)
+    if not overview["runs"] and not overview["readers"]:
+        raise HTTPException(
+            status_code=404, detail="No harness run has used that memory"
+        )
+    return templates.TemplateResponse(
+        "harness_memory.html",
+        {
+            "request": request,
+            "active_page": "harnesses",
+            "memory": overview,
+            "refine": refine,
+            "read_only": bool(_state.get("read_only")),
+            "others": [
+                entry
+                for entry in known_memories(runs)
+                if entry["memory_id"] != memory_id
+            ][:12],
+        },
+    )
+
+
+REFINE_PROVIDERS = ("openai", "anthropic", "gemini", "openrouter", "ollama")
+
+
+def _refine_state(memory_id: str) -> Dict[str, Any]:
+    """What a shared memory knows, what waits to be distilled, and its cycles."""
+    refine = _service().memory_refine
+    known = refine.findings(memory_id, include_replaced=True)
+    return {
+        "settings": refine.settings.get(),
+        "providers": list(REFINE_PROVIDERS),
+        "findings": [item for item in known if not item["replaced_by"]],
+        "replaced": [item for item in known if item["replaced_by"]],
+        "waiting": len(refine.answers(memory_id, only_new=True)),
+        "answers": len(refine.answers(memory_id)),
+        "runs": refine.list_runs(memory_id, limit=5),
+    }
+
+
+@router.get("/api/harness-memories/{memory_id:path}/refine")
+async def api_harness_memory_refine_state(memory_id: str):
+    return {"ok": True, **await asyncio.to_thread(_refine_state, memory_id)}
+
+
+@router.post("/api/harness-memories/{memory_id:path}/refine")
+async def api_harness_memory_refine(memory_id: str, request: Request):
+    """Run one refine cycle over a shared memory; ``dry_run`` changes nothing."""
+    payload = await _json_object(request, required=False)
+    dry_run = bool(payload.get("dry_run"))
+    if not dry_run and _state.get("read_only"):
+        raise HTTPException(status_code=403, detail="This console is read-only")
+    try:
+        report = await asyncio.to_thread(
+            _service().refine_memory, memory_id, dry_run=dry_run
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "report": report}
+
+
+@router.put("/api/harness-memory-refine/settings")
+async def api_harness_memory_refine_settings(request: Request):
+    """The model that distils harness memory, and whether cycles start by
+    themselves after enough new answers."""
+    if _state.get("read_only"):
+        raise HTTPException(status_code=403, detail="This console is read-only")
+    payload = await _json_object(request)
+    provider = str(payload.get("provider") or "").strip().lower()
+    if provider and provider not in REFINE_PROVIDERS:
+        raise HTTPException(status_code=400, detail="Unknown model provider")
+    try:
+        settings = _service().memory_refine.settings.set(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "settings": settings}
 
 
 @router.get("/api/harness-runs/{run_id}/activity")

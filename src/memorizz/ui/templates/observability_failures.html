@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Failures - Memorizz{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/pages/observability.css?v=5">{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/observability.css?v=7">{% endblock %}
 {% block content %}
 {% from '_ui.html' import page_header, observability_tabs %}
 {% from '_run_health.html' import range_picker with context %}
@@ -72,7 +72,7 @@
 {% if rules is not none %}
 <div class="detail-section observability-section" id="alerts">
     <h2>Alerts</h2>
-    <p class="obs-lede">Rules are checked every minute while the MemoRizz UI is running. A rule that crosses its limit shows on the Overview, and with a webhook it sends a message when it fires and when it clears. Messages hold names, codes and counts, never conversation content.</p>
+    <p class="obs-lede">Rules are checked every minute while the MemoRizz UI is running. A rule that crosses its limit shows on the Dashboard, and with a webhook it sends a message when it fires and when it clears. Messages hold names, codes and counts, never conversation content.</p>
     {% if alert_notice %}<p class="form-success" role="status">{{ alert_notice }}</p>{% endif %}
     {% if alert_error %}<p class="error-message" role="alert">{{ alert_error }}</p>{% endif %}
     {% if rules %}
@@ -83,7 +83,7 @@
                 <strong>{{ rule.threshold }} or more {{ 'stopped turns' if rule.stopped_only else 'failures' }} in {{ rule.window_phrase }}, on {{ rule.agent }}</strong>
                 <p class="obs-failure-meta">
                     {% if rule.firing %}<span class="is-bad">Firing</span>: {{ rule.count }} now.{% elif rule.checked_at %}Under the limit: {{ rule.count }} now.{% else %}Not checked yet.{% endif %}
-                    {% if rule.webhook_host %}Sends to {{ rule.webhook_host }}.{% else %}Shows on the Overview only.{% endif %}
+                    {% if rule.webhook_host %}Sends to {{ rule.webhook_host }}.{% else %}Shows on the Dashboard only.{% endif %}
                 </p>
                 {% if rule.delivery_error %}<p class="error-message">{{ rule.delivery_error }}. It will try again at the next check.</p>{% endif %}
             </div>

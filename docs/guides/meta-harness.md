@@ -62,6 +62,17 @@ Install only the CLIs that you intend to operate:
   (the older `@mariozechner/pi-coding-agent` package is deprecated)
 - [Hermes Agent](https://hermes-agent.nousresearch.com) 0.21.4 or newer
   (Nous Research), which added `hermes chat --format stream-json`
+- [Factory's Droid](https://docs.factory.com/cli): install Factory's CLI and
+  set `FACTORY_API_KEY`. MemoRizz runs `droid exec` and leaves Droid only
+  its file tools with `--only-tools`: Read, LS, Grep and Glob, plus Edit,
+  ApplyPatch and Create (and `--auto low`) for a task that edits. Its
+  command, web, messaging and sub-agent tools are never enabled, so it is not
+  offered to runs that ask for web access. Edits need an isolated wrapper
+  (`MEMORIZZ_DROID_EXTERNAL_ISOLATION=true`), as with pi, because MemoRizz
+  cannot confine Droid's edits to the workspace. It reports tokens and
+  Factory credits, with no dollar cost.
+  `MEMORIZZ_DROID_MODEL` names its model, including one of your own from
+  `~/.factory/settings.json` (`custom:<name>-<index>`).
 - DeepSeek: install Claude Code and set `DEEPSEEK_API_KEY`. The `deepseek`
   harness runs Claude Code's agent loop against
   [DeepSeek's Anthropic-compatible API](https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code).
@@ -106,6 +117,7 @@ Capability probes and failed runs use the same secret-free error contract:
 | OpenHands | Not necessarily an error: provider or CLI configuration may supply credentials. MemoRizz separately requires an external isolation boundary. |
 | DeepSeek | Not ready: set `DEEPSEEK_API_KEY`. Anthropic and cloud-provider credentials are never forwarded to DeepSeek. |
 | Hermes | Not ready: set the configured provider's key (for example `ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY`), or point `MEMORIZZ_HERMES_BASE_URL` at a local OpenAI-compatible server. Logins stored in your own `~/.hermes` are not used. |
+| Droid | Not ready: set `FACTORY_API_KEY`. No other service's key is passed to it. |
 | pi | Checked with `pi auth check` for the configured provider: its key (for example `DEEPSEEK_API_KEY`) or a stored `/login`. Without a configured provider, pi's own default is used. |
 
 The result is identical across form factors:
@@ -631,6 +643,109 @@ turn. Later runs in the same memory scope receive it in their context pack, and
 the Memory explorer lists it. Without a `memory_id`, answers stay in the run
 ledger only.
 
+### What a run can reach in memory
+
+A harness run reads and writes one memory: the task's `memory_id`. That
+holds for both ways memory reaches it.
+
+- **Its starting context.** Records are retrieved from the run's memory
+  only.
+- **Its MemoRizz MCP server.** Reads and writes with no memory named use
+  the run's memory. Naming another memory is refused
+  (`memory_out_of_scope`), a record or harness run that belongs to another
+  memory is reported as not found, and operations that read across memories
+  (traces, exports, agent inspection, fine-tuning) are not available.
+
+Two runs therefore share memory only when they are given the same
+`memory_id`.
+
+| Setting | What it does |
+| --- | --- |
+| no `memory_id` | The run is private: it starts with nothing from memory, its MCP server is kept to a memory of its own (`harness-run-<run id>`), and its answer is not saved. |
+| `permissions.mcp_read_memory_ids` | Up to 5 other memories the run may read and never write, such as a team handbook. Their records join its starting context, marked as read-only. |
+| `permissions.mcp_memory_scope="all"` | Opens the run to every memory of the user (`"run"` is the default). |
+
+```python
+meta.run({
+    "task": "Check this change against our release rules",
+    "workspace": "/repo",
+    "harness": "codex",
+    "memory_id": "billing-repo",
+    "permissions": {"mcp_read_memory_ids": ["team-handbook"]},
+})
+```
+
+A run that fails, is cancelled or is interrupted without changing a file
+leaves an error, not an answer, so nothing is saved to memory for it.
+
+The same limits are available on any MemoRizz MCP server:
+`MEMORIZZ_MCP_SERVER_MEMORY_IDS` and `MEMORIZZ_MCP_SERVER_READ_MEMORY_IDS`
+(comma-separated), or `memory_ids` and `read_memory_ids` on
+`MemorizzMCPServerConfig`.
+
+In the console, a run's **Memory** tab shows the memory it was limited to,
+each record it was given at the start (with the harness and run that wrote
+it), each MemoRizz tool it called itself and how that went, and any lookup
+that was refused; refused lookups are also marked in the trajectory.
+`/harnesses/memory/<memory id>` shows one memory as harnesses share it: who
+wrote to it, in order, what each was given and whether its answer was
+saved, and the runs that only read it. The launch form picks a memory from
+those in use, a new one, or none.
+
+### The refine cycle of a shared memory
+
+Every run's answer stays in the memory as a raw conversation turn. A refine
+cycle turns those into what the memory knows, the way an agent's
+[refine cycle](refine-cycle.md) does for an agent, and with the same kind
+of report.
+
+1. **Findings.** A model reads the answers not yet distilled, beside the
+   findings the memory already holds, and proposes lasting facts. Each must
+   quote the answer it came from; a finding whose quote is not in that
+   answer is not taken. A fact already held is confirmed (one more run
+   agrees) instead of written again, and every other answer of the cycle
+   that holds the quoted words is counted too. A fact a newer answer
+   corrects is replaced: the old finding is kept, hidden, and points at its
+   successor.
+2. **Raw answers.** Each answer read is marked as distilled. It stays in
+   conversation memory and on the memory's page. Later runs are handed the
+   findings in their starting context, not the distilled answers; a harness
+   can still search the raw answers with the MemoRizz tools.
+
+```python
+report = meta.refine_memory("billing-repo")            # run a cycle
+preview = meta.refine_memory("billing-repo", dry_run=True)  # change nothing
+
+meta.memory_refine.findings("billing-repo")   # what the memory knows
+meta.memory_refine.answers("billing-repo")    # every raw answer, kept
+meta.memory_refine.settings.set(
+    {"provider": "openai", "model": "gpt-6.2-sol", "auto": True, "after_answers": 3}
+)
+```
+
+One finding needs no cycle. When a run that changed files or had a check
+ends, MemoRizz keeps what it saw itself ("codex changed pricing.py and its
+check passed", with the task it was asked) as a finding straight away, so an
+agent that shares the memory can say whether the work is done and checked
+before any cycle has run.
+
+A cycle needs a model: set one in the settings above, or pass `model=` (a
+model object, or a config such as `{"provider": "openai", "model": "…"}` as
+an agent takes). A finding keeps what a run changed and whether its check
+passed, so an agent that shares the memory can answer "is it done, and was
+it checked?". Its report names the model it ran on and the tokens it spent.
+With
+`auto` on, a cycle starts in the background once `after_answers` new answers
+wait in a memory; it is off until a model is chosen, since a cycle spends
+tokens. Findings are knowledge-base notes in the namespace
+`harness_findings`, with the runs and harnesses that support them. Reports
+are stored like an agent's refine runs, under `harness-memory:<memory id>`.
+
+In the console, `/harnesses/memory/<memory id>` shows what the memory knows
+(with how many runs agree and the quote behind each finding), **Preview** and
+**Refine now**, the model and automatic settings, and past cycles, above the
+raw answers.
+
 ## Continue a run as a conversation
 
 Any run can continue: the next message is a new run with the same setup, and
@@ -703,6 +818,17 @@ edits; web access and edits need an approver's name). The grant is recorded as
 an approved `metaharness.delegate_access` approval that lasts eight hours
 (`MetaHarness.grant_delegate_access()`, `delegate_access()`). Without one,
 each conversation's delegates get a fresh scratch folder and no web access.
+
+The same card serves a playground conversation that a harness answers
+directly. Choose the harness under **Answered by** in the composer and each
+turn of that conversation is a run of that harness, in `runtime` mode, for
+that turn only: the agent record is not changed. It starts in a folder of
+the conversation's own, read-only and without web access; the card grants
+more. A turn carries on when the page is reloaded and is ended with
+**Stop**. From code the equivalent is
+`agent.with_meta_harness(meta, mode="runtime", default_harness="codex")`,
+and a turn takes the folder or grant its caller holds as
+`tool_context={"harness_parent": {...}}`.
 
 Harness delegates and model delegates differ. A harness delegate brings that
 harness's own agent loop, tools and sandbox (Codex's shell, Claude Code's file

@@ -298,7 +298,7 @@ The turn reports this in three places:
 - each refused call in `agent.last_tool_outcomes`, with
   `reason_code="tool_budget_exhausted"`;
 - the turn's `turn_result` trace event, with `tool_budget_exhausted=true`,
-  `refused_tool_calls` and `tool_call_limit`. The Overview's *Needs
+  `refused_tool_calls` and `tool_call_limit`. The Dashboard's *Needs
   attention* list names the cause for the tool whose calls were refused.
 
 The model is told too. The results of a turn's last three allowed calls

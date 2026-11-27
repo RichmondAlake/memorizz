@@ -14,8 +14,8 @@
             document.documentElement.classList.toggle('theme-light', light);
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/styles.css?v=46">
-    <link rel="stylesheet" href="/static/css/console.css?v=31">
+    <link rel="stylesheet" href="/static/css/styles.css?v=47">
+    <link rel="stylesheet" href="/static/css/console.css?v=37">
     <link rel="stylesheet" href="/static/css/shell.css?v=10">
     <link rel="stylesheet" href="/static/css/pages/connect.css?v=1">
 </head>
@@ -46,7 +46,7 @@
             {% if current_connection %}
             <div class="connect-current" role="status">
                 <span>Connected to <strong>{{ current_connection.label or (current_connection.provider_type|title) }}</strong> <span class="connect-current-target" title="{{ current_connection.title }}">{{ current_connection.target }}</span>.</span>
-                <a href="/dashboard">Open the overview</a>
+                <a href="/">Open the playground</a>
             </div>
             {% if embedding_check and embedding_check.message %}
             <div class="{{ 'error-message' if embedding_check.status == 'mismatch' else 'success-message' }}" id="embedding-check">{{ embedding_check.message }}</div>

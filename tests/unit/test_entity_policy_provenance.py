@@ -730,3 +730,72 @@ def test_get_by_identity_key_finds_older_records_too(work_dir):
         entities.get_by_identity_key("nobody", memory_id="memory-1", user_id="u1")
         is None
     )
+
+
+# --- an agent that reads a shared memory and may not change it --------------
+
+
+def test_a_reader_gets_the_records_and_no_tool_to_change_them(work_dir):
+    provider = _provider(work_dir)
+    owner = _agent(work_dir, memory_provider=provider)
+    reader = _agent(
+        work_dir,
+        memory_provider=provider,
+        entity_policy={"writes": False},
+        background_model=_Model(lambda prompt: [{"name": "user", "role": "CEO"}]),
+    )
+    reader.agent_id = "agent-2"
+    try:
+        assert EntityPolicy().writes is True and EntityPolicy().stored is None
+        assert reader.entity_policy.stored == {
+            "self_identity_key": None,
+            "subjects": "all",
+            "writes": False,
+        }
+        assert EntityPolicy.from_value({"writes": "false"}).writes is False
+
+        owner_tools, reader_tools = (
+            set(agent.tool_manager.list_tools()) for agent in (owner, reader)
+        )
+        assert {"entity_memory_lookup", "entity_memory_upsert"} <= owner_tools
+        assert "entity_memory_lookup" in reader_tools
+        assert "entity_memory_upsert" not in reader_tools
+        # Nothing from a reader's conversations is filed either.
+        assert reader._turn_capture_mode() is None
+        prompt = reader._build_system_prompt()
+        assert "You read these records and do not change them" in prompt
+        assert "the record is right" in prompt
+        assert "entity_memory_upsert" not in prompt
+
+        # The pen follows the policy when it changes on a live agent.
+        reader.with_entity_memory(True, policy={"writes": True})
+        assert "entity_memory_upsert" in reader.tool_manager.list_tools()
+        reader.with_entity_memory(True, policy={"writes": False})
+        assert "entity_memory_upsert" not in reader.tool_manager.list_tools()
+        # A call that reaches the tool anyway is refused.
+        with pytest.raises(ValueError, match="does not change it"):
+            reader._current_memory_id = "memory-1"
+            reader._entity_memory_upsert_tool(
+                name="Spring Sale", attributes=[{"name": "ends", "value": "31 March"}]
+            )
+        assert _records(provider, user_id=None) == []
+    finally:
+        owner.close()
+
+
+def test_a_reader_is_still_a_reader_after_it_is_saved_and_loaded(work_dir):
+    provider = _provider(work_dir)
+    reader = _agent(work_dir, memory_provider=provider, entity_policy={"writes": False})
+    try:
+        reader.save()
+        assert provider.retrieve_memagent("agent-1").entity_policy == {
+            "self_identity_key": None,
+            "subjects": "all",
+            "writes": False,
+        }
+        loaded = MemAgent.load("agent-1", memory_provider=provider, model=_Model())
+        assert loaded.entity_policy.writes is False
+        assert "entity_memory_upsert" not in loaded.tool_manager.list_tools()
+        assert "entity_memory_lookup" in loaded.tool_manager.list_tools()
+    finally:
+        reader.close()

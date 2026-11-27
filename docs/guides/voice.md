@@ -96,6 +96,37 @@ per agent with the private key; the browser only receives the public key and
 the assistant's id. The path token is derived from the private key, so a
 request with any other token gets a 404.
 
+## A call with several agents
+
+`LiveKitVoice.group_session` holds one call for several agents. LiveKit
+listens and decides when the caller has finished; then `round(said)` is asked
+for the answers and each is spoken in that agent's own voice, one after
+another on a single stream, so two agents never talk at once. When the
+caller speaks again, the rest of the round is dropped.
+
+```python
+from memorizz.voice import VoiceConfig, create_voice_provider
+
+def round(said):
+    # Yield (speaker_id, text) in the order they should be spoken.
+    yield "ada", ada.run(said)
+    yield "bruno", bruno.run(said)
+
+details = create_voice_provider(VoiceConfig(provider="livekit")).group_session(
+    speakers=[
+        {"id": "ada", "name": "Ada", "voice_config": VoiceConfig(provider="livekit")},
+        {"id": "bruno", "name": "Bruno"},   # no voice of its own: one is lent
+    ],
+    round=round,
+)
+# details: server_url, participant_token, session_id, voices
+```
+
+A speaker whose voice is on another provider is lent a LiveKit voice for the
+call, since one stream carries them all. The call waits about a second of
+silence before taking the caller's turn as finished (`group_endpointing_delay`
+in the provider's options).
+
 ## Settings
 
 | `voice_config` key | Meaning |
@@ -125,7 +156,16 @@ routes work for any saved agent with a voice:
 | `GET /api/voice/status` | Every provider, whether it is ready and what it can do |
 | `POST /api/agents/{id}/voice/speak` | JSON `{"text": ...}` in, audio out |
 | `POST /api/agents/{id}/voice/listen` | A recording (form field `audio`) in, `{"text": ...}` out |
-| `POST /api/agents/{id}/voice/session` | Starts a live call and returns what the browser needs |
+| `POST /api/agents/{id}/voice/session` | Starts a live call and returns what the browser needs. With `{"memory_id": "..."}` (empty for a new conversation) the call is part of that playground conversation and works for an agent without a voice, on LiveKit's default voice |
+
+In the playground, the waveform button in the composer starts a live
+conversation with the agent: just talk, and speak again to cut an answer
+short. What is said shows above the composer as you talk, and the turns are
+part of the open conversation when you end the call.
+
+A live call asks the agent for an answer only once you have finished
+speaking. LiveKit's early, speculative answers are turned off, because with a
+MemAgent every answer is a real turn that is remembered.
 
 ## From the command line
 

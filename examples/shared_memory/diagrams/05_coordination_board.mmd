@@ -1,0 +1,23 @@
+sequenceDiagram
+    autonumber
+    participant You
+    participant Ona as Ona (coordinator)
+    participant Board as Coordination board
+    participant Mara
+    participant Cole
+    participant Sam
+    You->>Ona: Prepare the Spring Sale launch pack
+    Ona->>Board: workflow_start + task_decomposition (3 tasks)
+    par each delegate works its part
+        Ona->>Mara: task 1 · confirm the offer
+        Mara->>Board: task_start … task_completion
+    and
+        Ona->>Cole: task 2 · write the announcement
+        Cole->>Board: task_start … task_completion
+    and
+        Ona->>Sam: task 3 · three customer answers
+        Sam->>Board: task_start … task_completion
+    end
+    Note over Mara,Sam: All three read the same shared memory while they work.
+    Ona->>Board: workflow_complete
+    Ona-->>You: one combined launch pack

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -25,6 +26,12 @@ DANGEROUS_TOOL_NAMES: FrozenSet[str] = frozenset(
         "self_aware_delete_path",
     }
 )
+
+
+# Outside coding agents a self-aware agent may hand its fixes to, and how
+# much each may do in the agent's copy of the source.
+CODING_AGENTS = ("droid",)
+CODING_AGENT_AUTONOMY = ("low", "medium")
 
 
 class SelfAwarenessManager:
@@ -255,6 +262,13 @@ class SelfAwarenessManager:
             "root_paths": roots,
             "allow_writes": allow_writes,
             "allow_deletes": allow_deletes,
+            # The agent keeps its own versioned copy of the MemoRizz source.
+            "own_source": self._coerce_bool(config.get("own_source"), default=False),
+            # The model that reads and edits that copy; the agent's own if unset.
+            "coding_model": self._normalize_coding_model(config.get("coding_model")),
+            # An outside coding agent (Factory's Droid) that makes the fixes
+            # instead; it takes the place of the coding model when set.
+            "coding_agent": self._normalize_coding_agent(config.get("coding_agent")),
             "policy_version": str(config.get("policy_version") or self.POLICY_VERSION),
             "timeout_seconds": self._coerce_int(
                 config.get("timeout_seconds"), default=30, min_value=1, max_value=300
@@ -278,6 +292,58 @@ class SelfAwarenessManager:
                 max_value=5000000,
             ),
         }
+
+    @staticmethod
+    def _normalize_coding_model(value: Any) -> Optional[Dict[str, str]]:
+        """Provider, model and address only: a key is never part of a config."""
+        if isinstance(value, str):
+            value = {"model": value}
+        if not isinstance(value, dict):
+            return None
+        model = str(value.get("model") or "").strip()
+        if not model:
+            return None
+        cleaned = {
+            "provider": str(value.get("provider") or "ollama").strip().lower(),
+            "model": model,
+        }
+        for key in ("host", "base_url"):
+            text = str(value.get(key) or "").strip()
+            if text:
+                cleaned[key] = text
+        # The name of the environment variable that holds the key, for an
+        # endpoint that is not the provider's own. Never the key.
+        if isinstance(value.get("routing"), dict) and value["routing"]:
+            # A gateway's routing rules: plain settings, no secrets.
+            cleaned["routing"] = dict(value["routing"])
+        key_env = str(value.get("api_key_env") or "").strip()
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", key_env):
+            cleaned["api_key_env"] = key_env
+        return cleaned
+
+    @staticmethod
+    def _normalize_coding_agent(value: Any) -> Optional[Dict[str, str]]:
+        """An outside coding agent that makes the fixes, in place of a model
+        driven by MemoRizz: its kind, and optionally a model and how much it
+        may do. Never a key."""
+        if isinstance(value, str):
+            value = {"kind": value}
+        if not isinstance(value, dict):
+            return None
+        kind = str(value.get("kind") or "").strip().lower()
+        if kind not in CODING_AGENTS:
+            return None
+        cleaned = {"kind": kind}
+        model = str(value.get("model") or "").strip()
+        if model:
+            cleaned["model"] = model
+        autonomy = str(value.get("autonomy") or "").strip().lower()
+        if autonomy in CODING_AGENT_AUTONOMY and autonomy != "low":
+            cleaned["autonomy"] = autonomy
+        command = str(value.get("command") or "").strip()
+        if command:
+            cleaned["command"] = command
+        return cleaned
 
     def _normalize_root_paths(self, raw_paths: Any) -> List[str]:
         values: List[Any]

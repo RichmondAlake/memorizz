@@ -23,7 +23,7 @@
     <div class="panel-header">
         <div>
             <h2 class="panel-title" id="budget-title">{{ 'This month' if status else 'Monthly budget' }}</h2>
-            <p class="panel-description">{% if status %}Known spend since {{ status.month_start.strftime('%b') }} {{ status.month_start.day }}, UTC. The Overview flags it at {{ status.alert_percent }}% of the budget.{% elif editable %}Set a monthly budget to get an alert before spend runs over.{% else %}No monthly budget is set.{% endif %}</p>
+            <p class="panel-description">{% if status %}Known spend since {{ status.month_start.strftime('%b') }} {{ status.month_start.day }}, UTC. The Dashboard flags it at {{ status.alert_percent }}% of the budget.{% elif editable %}Set a monthly budget to get an alert before spend runs over.{% else %}No monthly budget is set.{% endif %}</p>
         </div>
     </div>
     {% if notice %}<p class="success-message" role="status">{{ notice }}</p>{% endif %}

@@ -69,7 +69,7 @@ function initializeMemorizzUI() {
             );
             sidebarToggleBtn.setAttribute(
                 "title",
-                isCollapsed ? "Expand navigation" : "Collapse navigation"
+                (isCollapsed ? "Expand navigation" : "Collapse navigation") + " (Ctrl/⌘ + B)"
             );
         }
         if (persist) {
@@ -159,11 +159,27 @@ function initializeMemorizzUI() {
         if (label && !item.title) item.title = label.textContent.trim();
     });
     document.querySelectorAll(".sidebar-nav .nav-dropdown > summary").forEach(function(summary) {
+        // Space folds the list from the keyboard; Enter opens the page.
+        let spaced = false;
+        summary.addEventListener("keydown", function(event) { spaced = event.key === " "; });
         summary.addEventListener("click", function(event) {
-            if (!body.classList.contains("sidebar-collapsed") || phoneQuery.matches) return;
+            const byKeyboard = spaced;
+            spaced = false;
+            if (body.classList.contains("sidebar-collapsed") && !phoneQuery.matches) {
+                event.preventDefault();
+                summary.parentElement.open = true;
+                setSidebarCollapsed(false);
+                return;
+            }
+            // A group that has a page of its own (Agents, Memory types): its
+            // name opens that page with the list unfolded. The caret, as
+            // before, only folds and unfolds the list.
+            const href = summary.dataset.navHref;
+            if (!href || byKeyboard || event.target.closest(".nav-caret")) return;
             event.preventDefault();
             summary.parentElement.open = true;
-            setSidebarCollapsed(false);
+            if (event.metaKey || event.ctrlKey) window.open(href, "_blank", "noopener");
+            else if (window.location.pathname !== href) window.location.href = href;
         });
     });
 
@@ -187,6 +203,24 @@ function initializeMemorizzUI() {
             setSidebarCollapsed(!body.classList.contains("sidebar-collapsed"));
         });
     }
+
+    // ⌘B on a Mac, Ctrl B elsewhere: fold or unfold the sidebar. In rich text
+    // the same keys mean bold, so they are left to the editor there.
+    document.addEventListener("keydown", function(event) {
+        const mac = /Mac|iPhone|iPad/.test(navigator.platform || "");
+        const modifier = mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+        if (!modifier || event.shiftKey || event.altKey || event.defaultPrevented) return;
+        if (!event.key || event.key.toLowerCase() !== "b") return;
+        if (event.target instanceof Element && event.target.closest("[contenteditable]:not([contenteditable='false'])")) return;
+        event.preventDefault();
+        if (phoneQuery.matches) {
+            setMobileNavOpen(!body.classList.contains("mobile-nav-open"));
+        } else {
+            setSidebarCollapsed(!body.classList.contains("sidebar-collapsed"));
+        }
+    });
+
+    initializeAgentNavStatus(storage);
 
     if (themeToggleBtn) {
         themeToggleBtn.addEventListener("click", function() {
@@ -233,15 +267,17 @@ function initializeShortcuts() {
     if (typeof HTMLDialogElement === "undefined") return;
     const isMac = /Mac|iPhone|iPad/.test(navigator.platform || "");
     const GO_TO = [
-        ["o", "Overview", "/dashboard"],
+        ["p", "Playground", "/playground"],
         ["a", "Agents", "/agents"],
         ["h", "Agent harnesses", "/harnesses"],
-        ["p", "Playground", "/playground"],
         ["u", "Automations", "/automations"],
         ["m", "Memory types", "/memory/knowledge-base"],
         ["l", "Continual learning", "/memory/workflows"],
         ["c", "MCP connections", "/mcp"],
         ["k", "Skills", "/vercel-skills"],
+        ["d", "Dashboard", "/dashboard"],
+        // The Dashboard was the Overview; its old key still opens it.
+        ["o", "Dashboard", "/dashboard"],
         ["t", "Observability", "/traces"],
         ["e", "Evalground", "/evalground"],
         ["s", "Settings", "/settings"],
@@ -311,6 +347,7 @@ function initializeShortcuts() {
         body.className = "kbd-sheet-body";
         const general = group("General", [
             { label: "Search pages, agents and actions", keys: [isMac ? "⌘" : "Ctrl", "K"] },
+            { label: "Show or hide the sidebar", keys: [isMac ? "⌘" : "Ctrl", "B"] },
             { label: "Switch theme", keys: [isMac ? "⌘" : "Ctrl", "⇧", "L"] },
             { label: "Show this list", keys: ["?"] },
             { label: "Close a dialog", keys: ["esc"] },
@@ -407,6 +444,11 @@ function initializeCommandPalette() {
             const group = link.closest(".nav-dropdown");
             const parent = group ? group.querySelector("summary span:not(.nav-icon):not(.nav-caret)").textContent.trim() : "";
             pages.push({ group: "Pages", label: label, hint: parent, href: link.getAttribute("href") });
+        });
+        // A group whose name is its page (Agents) has no link of its own.
+        document.querySelectorAll(".sidebar-nav .nav-dropdown > summary[data-nav-href]").forEach(function(summary) {
+            const label = summary.querySelector("span:not(.nav-icon):not(.nav-caret)").textContent.trim();
+            pages.push({ group: "Pages", label: label, hint: "", href: summary.dataset.navHref });
         });
         [
             ["Failures", "Observability", "/traces/failures"],
@@ -628,6 +670,90 @@ function initializeCommandPalette() {
             else open();
         }
     });
+}
+
+// Each agent in the sidebar shows what it is doing now, or what it last said.
+function initializeAgentNavStatus(storage) {
+    const rows = Array.from(document.querySelectorAll(".nav-agent-item[data-nav-agent]"));
+    if (!rows.length) return;
+    const cacheKey = "memorizz_ui_agent_nav_status";
+    const ids = rows.map(function(row) { return row.dataset.navAgent; });
+    const FAST = 3000, SLOW = 20000;
+    let timer = null, busy = false, inFlight = false, latest = {};
+
+    function age(at) {
+        if (!at) return "";
+        const seconds = Math.max(0, Date.now() / 1000 - at);
+        if (seconds < 60) return "now";
+        if (seconds < 3600) return Math.floor(seconds / 60) + "m";
+        if (seconds < 86400) return Math.floor(seconds / 3600) + "h";
+        if (seconds < 86400 * 30) return Math.floor(seconds / 86400) + "d";
+        return Math.floor(seconds / (86400 * 30)) + "mo";
+    }
+
+    function paint(statuses) {
+        latest = statuses || {};
+        busy = false;
+        rows.forEach(function(row) {
+            const status = latest[row.dataset.navAgent];
+            const line = row.querySelector(".nav-agent-status");
+            const when = row.querySelector(".nav-agent-age");
+            const name = row.querySelector(".nav-agent-name").textContent.trim();
+            if (!status) {
+                row.removeAttribute("data-state");
+                line.hidden = true;
+                when.textContent = "";
+                return;
+            }
+            const state = status.state || "idle";
+            if (state !== "idle") busy = true;
+            row.dataset.state = state;
+            const text = state === "running" ? (status.text || "Working") + "…" : status.text || "";
+            if (line.textContent !== text) line.textContent = text;
+            line.hidden = !text;
+            // A reply in progress has no age; its step says enough.
+            when.textContent = state === "running" ? "" : age(status.at);
+            const label = state === "running" ? "working" : state === "waiting" ? "needs approval" : "";
+            row.setAttribute("aria-label", name + (label ? ", " + label : "") + (text ? ". " + text : ""));
+            row.title = text ? name + " — " + text : name;
+        });
+    }
+
+    function schedule() {
+        window.clearTimeout(timer);
+        if (document.hidden) return;
+        timer = window.setTimeout(refresh, busy ? FAST : SLOW);
+    }
+
+    function refresh() {
+        if (inFlight) return;
+        inFlight = true;
+        fetch("/api/nav/agent-status?ids=" + encodeURIComponent(ids.join(",")), { headers: { Accept: "application/json" } })
+            .then(function(response) { return response.ok ? response.json() : null; })
+            .then(function(data) {
+                if (!data || !data.agents) return;
+                paint(data.agents);
+                storage.set(cacheKey, JSON.stringify(data.agents));
+            })
+            .catch(function() {})
+            .then(function() { inFlight = false; schedule(); });
+    }
+
+    // Paint what the last page knew, so the lines do not blink in on each visit.
+    try {
+        const cached = JSON.parse(storage.get(cacheKey) || "null");
+        if (cached) paint(cached);
+    } catch (_) {}
+
+    document.addEventListener("visibilitychange", function() {
+        if (!document.hidden) refresh();
+    });
+    // A page that starts or ends a reply asks for the sidebar to catch up now.
+    window.addEventListener("memorizz:agent-activity", function() {
+        busy = true;
+        window.setTimeout(refresh, 250);
+    });
+    refresh();
 }
 
 function initializeBenchmarkMonitor({ body, storage, storageKeys }) {

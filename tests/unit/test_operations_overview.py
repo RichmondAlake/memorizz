@@ -510,3 +510,30 @@ def test_dashboard_offers_90_days_a_custom_range_and_bars_that_open_runs(client)
     assert "No runs in this window" in custom
     assert "Choose a start and an end" in broken
     assert 'aria-current="page">7d<' in broken
+
+
+@pytest.mark.unit
+def test_a_harness_runs_evidence_is_not_an_agent_turn():
+    """A harness run keeps its events as a trace bundle of its own kinds. It
+    has no turn result, so counted as a turn it was "running", then
+    "incomplete" for good; its run is on the harness pages."""
+    harness = [
+        {
+            "kind": "trace",
+            "root_trace_id": "harness-run-1",
+            "run_id": "harness-run-1",
+            "agent_id": "metaharness",
+            "timestamp": _at(minutes),
+        }
+        for minutes in (3, 2)
+    ]
+    # A turn still in progress has started, and still counts.
+    started = _run("t-live", "agent-a", minutes_ago=1, status=None)
+
+    overview = build_operations_overview(
+        [*_run("t1", "agent-a", minutes_ago=5), *started, *harness], now=NOW
+    )
+
+    assert overview["totals"]["runs"] == 2
+    assert [row["agent_id"] for row in overview["agents"]] == ["agent-a"]
+    assert {run["status"] for run in overview["recent"]} == {"success", "running"}

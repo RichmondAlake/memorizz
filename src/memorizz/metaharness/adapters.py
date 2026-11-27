@@ -514,7 +514,7 @@ class NativeMemAgentHarness(AgentHarness):
                 error=str(exc),
                 remediation=(
                     "Give the agent an internet provider on its Agents page, or "
-                    "set TAVILY_API_KEY or FIRECRAWL_API_KEY for MemoRizz."
+                    "set TAVILY_API_KEY, FIRECRAWL_API_KEY or EXA_API_KEY for MemoRizz."
                 ),
             )
         model = _agent_model(self.agent)
@@ -2745,6 +2745,263 @@ HERMES_FORBIDDEN_TOOLSETS = [
 ]
 
 
+DROID_READ_TOOLS = ("Read", "LS", "Grep", "Glob")
+DROID_EDIT_TOOLS = ("Edit", "ApplyPatch", "Create")
+
+
+class DroidHarness(SubprocessHarness):
+    """Droid, Factory's coding agent, run headless with ``droid exec``.
+
+    Droid ships many tools (commands, web search, messaging, sub-agents).
+    MemoRizz leaves it only its file tools with ``--only-tools``: Read, LS,
+    Grep and Glob, plus Edit, ApplyPatch and Create for an approved edit run,
+    which also gets ``--auto low``. It cannot run commands or reach the
+    network beyond Factory's service and its model. MemoRizz cannot confine
+    its edits to the workspace itself, so an edit run also requires an
+    operator-attested isolation wrapper, as with pi. Memory reaches Droid
+    through the prompt's context pack.
+
+    Events are read from ``-o stream-json``. Factory bills in credits, not
+    dollars, so tokens and credits are reported and no cost.
+    """
+
+    name = "droid"
+    executable = "droid"
+    auth_environment = ("FACTORY_API_KEY",)
+    authentication_remediation = (
+        "Create a key in Factory's settings and set FACTORY_API_KEY, then rerun "
+        "`memorizz harness doctor droid`."
+    )
+
+    def __init__(self, *, external_isolation: bool = False, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.external_isolation = bool(external_isolation)
+
+    def _has_key(self) -> bool:
+        return bool(
+            os.environ.get("FACTORY_API_KEY") or self.extra_env.get("FACTORY_API_KEY")
+        )
+
+    def _capabilities(self, **values: Any) -> HarnessCapabilities:
+        probe_error = values.get("error")
+        missing_key = bool(
+            values["available"] and not probe_error and not self._has_key()
+        )
+        return HarnessCapabilities(
+            name=self.name,
+            available=values["available"],
+            command=values.get("command"),
+            version=values.get("version"),
+            error_code=(
+                "harness_unavailable"
+                if probe_error and not values["available"]
+                else "authentication_required"
+                if missing_key
+                else None
+            ),
+            error=probe_error
+            or (
+                "Droid needs FACTORY_API_KEY to run headless." if missing_key else None
+            ),
+            remediation=(
+                "Install Factory's CLI (https://docs.factory.com/cli) so `droid` "
+                "is on PATH, then rerun `memorizz harness doctor droid`."
+                if probe_error and not values["available"]
+                else self.authentication_remediation
+                if missing_key
+                else None
+            ),
+            structured_events=True,
+            resume=False,
+            mcp=False,
+            per_action_approvals=False,
+            requires_external_isolation=False,
+            usage_reporting=True,
+            metadata={
+                "cost_reporting": False,
+                "token_reporting": True,
+                "billing_unit": "factory_credits",
+                "network_policy": "no_network_tools",
+                "network_modes": ["none"],
+                "forbidden_tools": ["Execute", "WebSearch", "FetchUrl"],
+                "task_tool_policy": True,
+                "output_schema": False,
+                "mcp_fallback": "context_pack",
+                "authentication_configured": self._has_key(),
+                "write_requires_external_isolation": not self.external_isolation,
+            },
+        )
+
+    def build_command(
+        self, task: HarnessTask, *, workspace: Path, prompt: str
+    ) -> List[str]:
+        if task.writes_workspace and not self.external_isolation:
+            raise HarnessSecurityError(
+                "Droid's edits are not confined to the workspace by MemoRizz; "
+                "run edits through an isolated droid wrapper and set "
+                "MEMORIZZ_DROID_EXTERNAL_ISOLATION=true"
+            )
+        tools = list(DROID_READ_TOOLS) + (
+            list(DROID_EDIT_TOOLS) if task.writes_workspace else []
+        )
+        requested = {
+            str(item).strip().lower()
+            for item in task.permissions.allowed_tools
+            if str(item).strip()
+        }
+        if requested:
+            # A task may narrow the tool set, never widen it.
+            tools = [tool for tool in tools if tool.lower() in requested]
+        denied = {str(item).strip().lower() for item in task.permissions.denied_tools}
+        tools = [tool for tool in tools if tool.lower() not in denied]
+        if not tools:
+            raise HarnessSecurityError("Droid needs at least one file tool to work")
+        command = [self.command, "exec", "--cwd", str(workspace), "-o", "stream-json"]
+        if task.writes_workspace:
+            command.extend(["--auto", "low"])
+        command.extend(["--only-tools", ",".join(tools)])
+        model = str(task.model or self.default_model or "").strip()
+        if model:
+            command.extend(["-m", model])
+        # The prompt stays an opaque positional after every option.
+        command.extend(["--", prompt])
+        return command
+
+    @staticmethod
+    def _usage(raw: Any) -> Dict[str, Any]:
+        raw = raw if isinstance(raw, dict) else {}
+
+        def count(key: str) -> int:
+            value = raw.get(key)
+            return int(value) if isinstance(value, (int, float)) else 0
+
+        cached = count("cache_read_input_tokens")
+        written = count("cache_creation_input_tokens")
+        usage: Dict[str, Any] = {
+            # Droid reports new input apart from what the cache held.
+            "input_tokens": count("input_tokens") + cached + written,
+            "output_tokens": count("output_tokens"),
+            "cached_tokens": cached,
+            "cache_write_tokens": written,
+        }
+        if raw.get("factory_credits") is not None:
+            usage["factory_credits"] = raw["factory_credits"]
+        return usage
+
+    def parse_event(
+        self, run_id: str, payload: Dict[str, Any]
+    ) -> tuple[List[HarnessEvent], Dict[str, Any]]:
+        events: List[HarnessEvent] = []
+        updates: Dict[str, Any] = {}
+        kind = str(payload.get("type") or "")
+        if kind == "system":
+            if payload.get("subtype") == "init":
+                checkpoint = {"session_id": payload.get("session_id")}
+                updates["checkpoint"] = checkpoint
+                events.append(
+                    HarnessEvent(
+                        run_id,
+                        HarnessEventType.STATUS,
+                        {**checkpoint, "model": payload.get("model")},
+                    )
+                )
+        elif kind == "message":
+            text = str(payload.get("text") or "").strip()
+            # The user's message is the prompt MemoRizz sent.
+            if payload.get("role") == "assistant" and text:
+                updates["final_response"] = text
+                events.append(
+                    HarnessEvent(
+                        run_id,
+                        HarnessEventType.MESSAGE,
+                        {"role": "assistant", "text": text},
+                    )
+                )
+        elif kind == "tool_call":
+            # Droid's model calls its tools from a short script; the script
+            # is what was asked for.
+            parameters = payload.get("parameters")
+            parameters = parameters if isinstance(parameters, dict) else {}
+            script = str(parameters.get("script") or "")
+            data = {
+                "call_id": payload.get("id"),
+                "name": str(payload.get("toolName") or payload.get("toolId") or ""),
+                "input": {**parameters, "script": script[:4_000]}
+                if script
+                else parameters,
+            }
+            edits = (
+                "ApplyPatch" in script
+                or "tools.Edit" in script
+                or "tools.Create" in script
+            )
+            events.append(
+                HarnessEvent(
+                    run_id,
+                    HarnessEventType.FILE_CHANGE
+                    if edits
+                    else HarnessEventType.TOOL_CALL,
+                    data,
+                )
+            )
+        elif kind == "tool_result":
+            failure = payload.get("error")
+            text = (
+                str(failure.get("message") or "")
+                if isinstance(failure, dict)
+                else str(payload.get("value") or "")
+            )
+            events.append(
+                HarnessEvent(
+                    run_id,
+                    HarnessEventType.TOOL_RESULT,
+                    {
+                        "call_id": payload.get("id"),
+                        "name": payload.get("toolId"),
+                        "is_error": bool(payload.get("isError")),
+                        "text": text[:4_000],
+                    },
+                )
+            )
+        elif kind in {"completion", "result"}:
+            # "completion" ends a stream; "result" is what -o json prints.
+            text = str(payload.get("finalText") or payload.get("result") or "").strip()
+            usage = self._usage(payload.get("usage"))
+            if isinstance(payload.get("usage"), dict):
+                updates["usage"] = usage
+                events.append(
+                    HarnessEvent(
+                        run_id,
+                        HarnessEventType.USAGE,
+                        {
+                            **usage,
+                            "cost_usd": None,
+                            "turns": payload.get("numTurns")
+                            or payload.get("num_turns"),
+                        },
+                    )
+                )
+            if payload.get("is_error"):
+                error = text or "Droid stopped with an error"
+                updates.update(error_code="droid_failed", error=error)
+                events.append(
+                    HarnessEvent(run_id, HarnessEventType.ERROR, {"error": error})
+                )
+            elif text:
+                updates["final_response"] = text
+        elif kind == "error":
+            error = str(payload.get("message") or "Droid was stopped")
+            if "insufficient permission" in error.lower():
+                # It reached for something its tools or level do not allow.
+                updates.update(error_code="droid_permission_stop", error=error)
+            else:
+                updates.update(error_code="droid_failed", error=error)
+            events.append(
+                HarnessEvent(run_id, HarnessEventType.ERROR, {"error": error})
+            )
+        return events, updates
+
+
 def _hermes_profiles_root() -> Optional[Path]:
     """Where per-run Hermes homes must live to share the installed runtime.
 
@@ -3172,6 +3429,7 @@ __all__ = [
     "ClaudeCodeHarness",
     "CodexHarness",
     "DeepSeekHarness",
+    "DroidHarness",
     "HermesHarness",
     "NativeMemAgentHarness",
     "OpenHandsHarness",

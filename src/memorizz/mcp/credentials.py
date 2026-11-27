@@ -229,7 +229,11 @@ class MCPOAuthTokenStorage:
     async def set_tokens(self, tokens) -> None:
         self.store.update(
             self.credential_ref,
-            {"oauth_tokens": tokens.model_dump(mode="json", exclude_none=True)},
+            {
+                "oauth_tokens": tokens.model_dump(mode="json", exclude_none=True),
+                # New tokens (a sign-in or a refresh) end a lapsed sign-in.
+                "sign_in_lapsed_at": None,
+            },
         )
 
     async def get_client_info(self):

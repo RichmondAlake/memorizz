@@ -10,17 +10,18 @@ imports every router at module import time). They read the connected provider
 from the shared ``ui.state._state`` and never import from ``ui.app``.
 """
 
+import json
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 from ..llms.model_catalog import (
     DEFAULT_LLM_MODEL_BY_PROVIDER,
     DEFAULT_LLM_PROVIDER,
     LLM_MODEL_CATALOG,
 )
-from .state import _state
+from .state import _state, templates
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,88 @@ def _read_lob_value(value: Any) -> Any:
         except Exception:
             return value
     return value
+
+
+def observability_link(agent: Any) -> Dict[str, Any]:
+    """Where an agent's traces go, for the pages that link there.
+
+    ``external`` is True when the traces are also sent outside MemoRizz;
+    ``url`` then opens the agent's traces at that provider (a new tab), and
+    ``ready`` says whether this UI process can send to it (``missing`` names
+    what it lacks). The built-in provider links to the Traces page.
+    """
+    from ..observability.providers import create_observability_provider
+
+    agent_id = _to_text(_agent_field(agent, "agent_id", "")).strip()
+    enabled = _agent_field(agent, "observability") is not False
+    config = _agent_field(agent, "observability_config")
+    try:
+        provider = create_observability_provider(
+            config if isinstance(config, Mapping) and config else None
+        )
+    except ValueError:
+        # A provider this install does not know: the traces stay in MemoRizz.
+        provider = create_observability_provider(None)
+    try:
+        missing = provider.missing()
+        url = provider.dashboard_url(
+            agent_id=agent_id or None,
+            agent_name=_to_text(_agent_field(agent, "name", "")).strip() or None,
+        )
+    except Exception as exc:
+        logger.debug("Reading the observability provider failed: %s", exc)
+        missing, url = [], None
+    if url and not (url.startswith(("https://", "http://")) or url.startswith("/")):
+        url = None
+    return {
+        "enabled": enabled,
+        "provider": provider.name,
+        "label": provider.label or provider.name,
+        "external": bool(provider.external),
+        "url": url,
+        "ready": not missing,
+        "missing": missing,
+        # Turns go to Sentry's local development server and nowhere else.
+        "local_only": bool(getattr(provider, "local_only", False)),
+    }
+
+
+templates.env.globals["observability_link"] = observability_link
+
+
+def observability_trace_link(
+    agent: Any, sent_to: Any, root_trace_id: Any, started_at: Any = None
+) -> Optional[Dict[str, str]]:
+    """The link that opens one turn at the provider it was sent to.
+
+    ``sent_to`` is the provider recorded on the turn when it was exported.
+    The agent's own settings (its organisation) shape the link when the agent
+    still uses that provider; otherwise the provider's defaults do, so a turn
+    sent before the agent changed provider still opens. None when the turn
+    was not sent anywhere, or the provider has no page for one trace.
+    """
+    from ..observability.providers import create_observability_provider
+
+    name = _to_text(sent_to).strip().lower()
+    if not name or not _to_text(root_trace_id).strip():
+        return None
+    config = _agent_field(agent, "observability_config") if agent is not None else None
+    try:
+        provider = create_observability_provider(
+            config
+            if isinstance(config, Mapping) and config.get("provider") == name
+            else name
+        )
+        url = provider.trace_url(root_trace_id, started_at=started_at)
+    except Exception as exc:  # an unknown provider, a malformed setting
+        logger.debug("Building the provider's trace link failed: %s", exc)
+        return None
+    if not url or not url.startswith(("https://", "http://")):
+        return None
+    return {"label": provider.label or provider.name, "url": url}
+
+
+templates.env.globals["observability_trace_link"] = observability_trace_link
 
 
 def _agent_field(record: Any, key: str, default: Any = None) -> Any:
@@ -1064,6 +1147,46 @@ def _get_default_llm_model(provider: Optional[str] = None) -> str:
     )
 
 
+# The key each hosted provider reads; local providers need none.
+_PROVIDER_KEY_ENV = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "azure": "AZURE_OPENAI_API_KEY",
+}
+# A second variable some providers' keys are commonly kept in.
+_PROVIDER_KEY_ALTERNATES = {"gemini": ("GOOGLE_API_KEY",)}
+_PROVIDER_TITLES = {
+    "openai": "OpenAI",
+    "anthropic": "Anthropic",
+    "gemini": "Google Gemini",
+    "openrouter": "OpenRouter",
+    "azure": "Azure OpenAI",
+    "ollama": "Ollama",
+    "huggingface": "Hugging Face",
+    "local-openai": "a local server",
+}
+
+
+def first_agent_model() -> Dict[str, Any]:
+    """The model an agent made without choosing one gets, and whether it can
+    answer yet: a hosted provider needs its key where MemoRizz runs."""
+    provider = _get_default_llm_provider()
+    key_env = _PROVIDER_KEY_ENV.get(provider)
+    return {
+        "provider": provider,
+        "provider_title": _PROVIDER_TITLES.get(provider, provider),
+        "model": _get_default_llm_model(provider),
+        "key_env": key_env,
+        "ready": not key_env
+        or any(
+            os.environ.get(name, "").strip()
+            for name in (key_env, *_PROVIDER_KEY_ALTERNATES.get(provider, ()))
+        ),
+    }
+
+
 def _build_internet_provider_config(
     provider_name: Optional[str], base_config: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, Any]]:
@@ -1084,7 +1207,7 @@ def _build_internet_provider_config(
             config[key] = value
 
     # Credentials never belong in the agent record: the provider resolves its
-    # key from the environment (TAVILY_API_KEY, FIRECRAWL_API_KEY or
+    # key from the environment (TAVILY_API_KEY, FIRECRAWL_API_KEY, EXA_API_KEY or
     # MEMORIZZ_DEFAULT_INTERNET_PROVIDER_API_KEY) when it is created.
     from ..internet_access.base import scrub_secret_config
 
@@ -1234,6 +1357,29 @@ def _validate_browser_control_choice(
         return _to_text(exc).strip() or "Failed to initialize Browser Use."
 
 
+def _parse_routing(raw: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """A model gateway's routing rules from a form's JSON, checked.
+
+    Returns ``(routing or None, error or None)``; empty rules are None."""
+    from ..llms.routing import ModelRouting
+
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None, None
+        try:
+            raw = json.loads(text)
+        except ValueError:
+            return None, "The routing settings could not be read."
+    if not raw:
+        return None, None
+    try:
+        routing = ModelRouting.coerce(raw)
+    except (TypeError, ValueError) as exc:
+        return None, f"Routing: {exc}"
+    return (routing.to_dict() or None), None
+
+
 def _validate_internet_provider_choice(
     internet_provider: Any,
     internet_config: Optional[Dict[str, Any]] = None,
@@ -1256,7 +1402,7 @@ def _validate_internet_provider_choice(
         if not provider:
             return (
                 f"Unknown internet provider '{provider_name}'. "
-                "Supported providers: tavily, firecrawl, offline."
+                "Supported providers: tavily, firecrawl, exa, offline."
             )
         try:
             provider.close()
@@ -1332,7 +1478,7 @@ def _validate_sandbox_provider_choice(
     Returns:
         ``None`` when valid, otherwise an actionable error message.
     """
-    if not sandbox_provider:
+    if not sandbox_provider or _sandbox_is_off(sandbox_provider):
         return None
 
     resolved_provider = _resolve_sandbox_provider_config(sandbox_provider)
@@ -1413,6 +1559,18 @@ def _build_graalpy_default_sandbox_config() -> Dict[str, Any]:
     return config
 
 
+# Saved on an agent that must run no code, even when a default sandbox is
+# set for the console: an empty value means "use the default".
+SANDBOX_OFF = "none"
+
+
+def _sandbox_is_off(sandbox_provider: Any) -> bool:
+    return (
+        isinstance(sandbox_provider, str)
+        and sandbox_provider.strip().lower() == SANDBOX_OFF
+    )
+
+
 def _resolve_sandbox_provider_config(sandbox_provider: Any) -> Any:
     """
     Resolve sandbox provider input into the effective provider config.
@@ -1420,7 +1578,7 @@ def _resolve_sandbox_provider_config(sandbox_provider: Any) -> Any:
     For GraalPy string inputs, this applies Settings-driven defaults so runtime
     behavior matches the Settings page toggles.
     """
-    if not sandbox_provider:
+    if not sandbox_provider or _sandbox_is_off(sandbox_provider):
         return None
     if isinstance(sandbox_provider, dict):
         return sandbox_provider

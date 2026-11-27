@@ -63,3 +63,48 @@
     ('/evalground/compare', 'Compare models & rerankers', 'compare', 'evalground-compare-tab'),
 ], active, 'Evalground views') }}
 {%- endmacro %}
+
+
+{#- routing_fields: who may answer for a model on OpenRouter. Shown only for
+    that provider; static/js/routing-form.js fills it, keeps the hidden
+    `llm_routing_json` field in step, and hides it for other providers. -#}
+{% macro routing_fields(row_class='form-group', id_prefix='routing') -%}
+<fieldset class="routing-fields {{ row_class }}" data-routing hidden>
+    <legend>Routing</legend>
+    <p class="form-hint">Which providers may answer for this model, and what to fall back to. Leave everything empty to use OpenRouter's defaults.</p>
+    <input type="hidden" name="llm_routing_json" data-routing-json value="">
+    <div class="routing-grid">
+        <label class="routing-wide" for="{{ id_prefix }}-fallbacks">Fallback models
+            <textarea id="{{ id_prefix }}-fallbacks" rows="2" spellcheck="false" data-routing-field="fallback_models" placeholder="openai/gpt-6.2-sol&#10;openrouter/free"></textarea>
+            <span class="form-hint">One per line, tried in order when the model errors, is rate limited or is down. You pay the rate of the model that answers.</span>
+        </label>
+        <label for="{{ id_prefix }}-sort">Prefer
+            <select id="{{ id_prefix }}-sort" data-routing-field="sort">
+                <option value="">OpenRouter's default</option>
+                <option value="price">The cheapest provider</option>
+                <option value="throughput">The fastest (tokens per second)</option>
+                <option value="latency">The quickest to start</option>
+            </select>
+        </label>
+        <label for="{{ id_prefix }}-providers">Try these providers first
+            <input id="{{ id_prefix }}-providers" type="text" spellcheck="false" autocomplete="off" data-routing-field="providers" placeholder="anthropic, google-vertex">
+        </label>
+        <label for="{{ id_prefix }}-only">Use only these providers
+            <input id="{{ id_prefix }}-only" type="text" spellcheck="false" autocomplete="off" data-routing-field="only" placeholder="Any provider">
+        </label>
+        <label for="{{ id_prefix }}-ignore">Never use these providers
+            <input id="{{ id_prefix }}-ignore" type="text" spellcheck="false" autocomplete="off" data-routing-field="ignore" placeholder="None">
+        </label>
+        <label for="{{ id_prefix }}-max-prompt">Most to pay for input, $ per million tokens
+            <input id="{{ id_prefix }}-max-prompt" type="number" min="0" step="any" data-routing-field="max_price.prompt" placeholder="No limit">
+        </label>
+        <label for="{{ id_prefix }}-max-completion">Most to pay for output, $ per million tokens
+            <input id="{{ id_prefix }}-max-completion" type="number" min="0" step="any" data-routing-field="max_price.completion" placeholder="No limit">
+        </label>
+    </div>
+    <label class="routing-check"><input type="checkbox" data-routing-field="data_collection" data-routing-on="deny"> Only providers that do not keep or train on prompts</label>
+    <label class="routing-check"><input type="checkbox" data-routing-field="zero_data_retention" data-routing-on="true"> Only endpoints that retain nothing</label>
+    <label class="routing-check"><input type="checkbox" data-routing-field="require_parameters" data-routing-on="true"> Only providers that support everything the agent sends (tools, response formats)</label>
+    <label class="routing-check"><input type="checkbox" data-routing-field="allow_fallbacks" data-routing-on="false"> Fail instead of moving to a provider outside the ones tried first</label>
+</fieldset>
+{%- endmacro %}

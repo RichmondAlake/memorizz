@@ -268,5 +268,258 @@ def test_the_page_offers_the_control_only_with_harness_delegates(playground):
     assert 'id="pg-hx"' in page.text and 'id="pg-hx-chip"' in page.text
     assert "Codex researcher (codex)" in page.text
     assert "Note taker (" not in page.text  # runs in process, not on a harness
+    # Without them the panel is there but hidden: it shows when a
+    # conversation is answered by a harness.
     plain = playground.client.get("/agents/plain/playground").text
-    assert 'id="pg-hx"' not in plain and 'id="pg-hx-chip"' not in plain
+    assert (
+        'id="pg-hx" aria-labelledby="pg-hx-title" data-delegates="false" hidden'
+        in plain
+    )
+    assert 'id="pg-hx-chip"' not in plain
+    assert 'data-delegates="true"' in page.text
+
+
+# --- a conversation answered by a harness ---------------------------------
+
+
+def _harness(name, ready=True, models=("gpt-test",)):
+    """Stands in for an adapter: only what the page and the route ask of it."""
+    state_of = {
+        "name": name,
+        "ready": ready,
+        "models": list(models),
+        "error": None if ready else "not signed in",
+        "remediation": None if ready else f"Sign in to {name}.",
+    }
+    return SimpleNamespace(
+        probe=lambda: SimpleNamespace(to_dict=lambda: dict(state_of))
+    )
+
+
+@pytest.fixture()
+def answering(playground):
+    from memorizz.ui.routers import playground as module
+
+    module._ANSWER_HARNESSES.update(at=0.0, rows=None)
+    playground.meta.adapters.update(
+        codex=_harness("codex"),
+        deepseek=_harness("deepseek", ready=False),
+        memagent=_harness("memagent"),
+    )
+    yield playground
+    module._ANSWER_HARNESSES.update(at=0.0, rows=None)
+
+
+def test_the_page_lists_the_harnesses_that_can_answer(answering):
+    listed = answering.client.get("/api/agents/plain/answer-harnesses").json()
+
+    # Ready ones first; the agent's own runtime cannot answer for itself.
+    assert [(row["name"], row["ready"]) for row in listed["harnesses"]] == [
+        ("codex", True),
+        ("deepseek", False),
+    ]
+    assert listed["harnesses"][0]["models"] == ["gpt-test"]
+    assert listed["harnesses"][1]["why"] == "Sign in to deepseek."
+    # This agent answers with its own model, so the page keeps that label.
+    assert listed["runtime"] is None
+    page = answering.client.get("/agents/plain/playground").text
+    assert 'id="pg-answer"' in page and "playground-harness.js" in page
+    assert (
+        answering.client.get("/api/agents/nobody/answer-harnesses").status_code == 404
+    )
+
+
+def test_a_turn_can_be_answered_by_a_harness_without_saving_it(answering):
+    agent = _fake_agent([])
+    switched = {}
+    agent.harness_config = {"model": "the-agents-own-model", "budget": {"max_steps": 5}}
+    agent.with_meta_harness = lambda service, **options: switched.update(
+        service=service, **options
+    )
+    kept = []
+    with patch(
+        "memorizz.memagent.persistence.keep_stored_fields",
+        lambda _agent, *fields: kept.extend(fields),
+    ):
+        kwargs, events = _prepared_run(
+            answering.client,
+            agent,
+            {"answer_harness": "Codex", "harness_workspace": str(answering.workspace)},
+        )
+
+    assert switched["service"] is answering.meta
+    assert (switched["mode"], switched["default_harness"]) == ("runtime", "codex")
+    # The agent's own model name means nothing to a harness; its limits stay.
+    assert switched["config"] == {"budget": {"max_steps": 5}}
+    # The choice is for this turn: a save during it keeps the stored agent.
+    assert {"meta_harness_mode", "default_harness", "harness_config"} <= set(kept)
+    assert {"stage": "answered_by", "harness": "codex"}.items() <= next(
+        event for event in events if event.get("stage") == "answered_by"
+    ).items()
+    # The folder reaches the turn although the agent has no delegates.
+    assert kwargs["tool_context"]["harness_parent"]["workspace"] == str(
+        answering.workspace.resolve()
+    )
+
+    agent.with_meta_harness = lambda service, **options: switched.update(options)
+    _prepared_run(
+        answering.client,
+        agent,
+        {"answer_harness": "codex", "answer_model": "gpt-other"},
+    )
+    assert switched["config"]["model"] == "gpt-other"
+
+
+def test_a_harness_that_is_unknown_or_not_ready_is_refused_before_the_turn(answering):
+    client = answering.client
+
+    def ask(name):
+        return client.post(
+            "/agents/plain/playground/stream",
+            data={"query": "Hello", "answer_harness": name},
+        )
+
+    assert ask("nope").status_code == 400
+    assert ask("memagent").status_code == 400
+    refused = ask("deepseek")
+    assert (
+        refused.status_code == 409
+        and "Sign in to deepseek." in refused.json()["detail"]
+    )
+    with patch.dict(state._state, {"read_only": True}):
+        assert ask("codex").status_code == 403
+
+
+def test_access_can_be_allowed_for_a_conversation_a_harness_answers(answering):
+    client = answering.client
+    body = {"workspace": str(answering.workspace), "write": True, "approver_id": "ada"}
+
+    # An agent with no harness delegates has nothing to allow access for...
+    assert client.post("/api/agents/plain/harness-access", json=body).status_code == 400
+    # ...unless a harness answers the conversation.
+    allowed = client.post(
+        "/api/agents/plain/harness-access", json={**body, "answer_harness": "codex"}
+    )
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.json()["grant"]["permissions"]["workspace_mode"] == "direct"
+    assert (
+        client.post(
+            "/api/agents/plain/harness-access",
+            json={**body, "answer_harness": "deepseek"},
+        ).status_code
+        == 409
+    )
+
+
+def test_a_stored_answer_a_harness_gave_is_linked_to_its_run(answering):
+    from memorizz.ui.routers.playground import _mark_harness_turns
+
+    def run(run_id, question, memory="chat-1", agent="plain", mode="runtime"):
+        return {
+            "run_id": run_id,
+            "harness": "codex",
+            "status": "succeeded",
+            "task": {
+                "task": question,
+                "memory_id": memory,
+                "agent_id": agent,
+                "mode": mode,
+            },
+            "result": {"latency_ms": 1200, "cost_usd": 0.02},
+        }
+
+    runs = [
+        run("r3", "Second question"),
+        run("r2", "First question", memory="another-chat"),
+        run("r1", "First question"),
+        run("r0", "Its own model answered", mode="delegate"),
+    ]
+    messages = [
+        {"role": "user", "content": "First question"},
+        {"role": "assistant", "content": "One."},
+        {"role": "user", "content": "Its own model answered"},
+        {"role": "assistant", "content": "Two."},
+        {"role": "user", "content": "Second question"},
+        {"role": "assistant", "content": "Three."},
+    ]
+    with patch.object(answering.meta, "list_runs", lambda limit=300: runs):
+        _mark_harness_turns(messages, "plain", "chat-1")
+
+    assert messages[1]["harness_run"] == {
+        "run_id": "r1", "harness": "codex", "status": "succeeded",
+        "latency_ms": 1200, "cost_usd": 0.02,
+    }  # fmt: skip
+    assert "harness_run" not in messages[3]
+    assert messages[5]["harness_run"]["run_id"] == "r3"
+
+
+def test_a_harness_turn_carries_on_after_its_page_leaves(
+    answering, tmp_path, monkeypatch
+):
+    import time
+
+    from memorizz import live_turns
+    from memorizz.streaming import StreamEvent
+    from memorizz.ui.routers import playground as module
+
+    monkeypatch.setenv("MEMORIZZ_HOME", str(tmp_path / "home"))
+
+    def event(kind, **fields):
+        return StreamEvent({"type": kind, "run_id": "turn-1", "seq": 0, **fields})
+
+    class Stream:
+        """A turn that still has its ending to come when the page leaves."""
+
+        def __init__(self):
+            self.left = [
+                event(
+                    "status",
+                    message="Codex: writing",
+                    harness_run_id="run-9",
+                    harness="codex",
+                ),
+                event("answer.delta", delta="Done."),
+                event("run.done", status="completed"),
+            ]
+            self.closed = False
+
+        def poll(self, timeout=None):
+            if not self.left:
+                raise StopIteration
+            return self.left.pop(0)
+
+        def close(self):
+            self.closed = True
+
+    stream = Stream()
+    # A page already listening; one opened later gets a finished turn from
+    # the stored conversation instead.
+    tail = live_turns.LiveTail("plain", "chat-1")
+    assert tail.poll() == []
+    module._follow_detached(
+        stream,
+        "plain",
+        "Write the note",
+        event("run.started", memory_id="chat-1", thread_id="t-1"),
+        event(
+            "status",
+            message="Codex is working",
+            harness_run_id="run-9",
+            harness="codex",
+        ),
+        set(),
+    )
+    for _ in range(100):
+        if stream.closed:
+            break
+        time.sleep(0.05)
+    assert stream.closed  # the turn was followed to its end, then released
+
+    seen = tail.poll()
+    assert [item["type"] for item in seen] == [
+        "turn.started", "status", "status", "answer.delta", "turn.done",
+    ]  # fmt: skip
+    # The page that finds it knows it is its own, and which run to show.
+    assert seen[0]["source"] == "playground" and seen[0]["query"] == "Write the note"
+    assert seen[1]["harness_run_id"] == "run-9" and seen[1]["harness"] == "codex"
+    assert seen[-1]["status"] == "completed"

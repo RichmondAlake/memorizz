@@ -141,6 +141,25 @@ html.theme-light {
     background: var(--bg-hover);
 }
 
+/* The group's own page is the one open (the agents list): mark the group. */
+.nav-dropdown[open] > .nav-dropdown-toggle.active.nav-dropdown-toggle--page,
+.nav-dropdown[open] > .nav-dropdown-toggle.active.nav-dropdown-toggle--page:hover {
+    font-weight: 600;
+    background: var(--nav-active-bg);
+}
+
+/* The caret is its own target: it folds the list without leaving the page. */
+.nav-dropdown-toggle[data-nav-href] .nav-caret {
+    margin: -4px -6px -4px auto;
+    padding: 4px 6px;
+    border-radius: 5px;
+}
+
+.nav-dropdown-toggle[data-nav-href] .nav-caret:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+}
+
 .nav-dropdown {
     margin-top: 0;
 }
@@ -174,19 +193,96 @@ html.theme-light {
     display: none;
 }
 
+/* An agent's row: its name, then what it is doing or last said. */
 .nav-agent-item {
-    flex-direction: row;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: center;
+    gap: 2px;
+}
+
+.nav-agent-head {
+    display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
+    gap: 7px;
+    min-width: 0;
 }
 
 .nav-agent-name {
+    flex: 1 1 auto;
     min-width: 0;
     overflow: hidden;
     font-size: 13px;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.nav-agent-dot {
+    flex: 0 0 auto;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--border-color);
+}
+
+.nav-agent-item[data-state="running"] .nav-agent-dot {
+    background: var(--accent-primary);
+    animation: nav-agent-pulse 1.4s ease-in-out infinite;
+}
+
+.nav-agent-item[data-state="waiting"] .nav-agent-dot {
+    background: var(--accent-warning);
+}
+
+.nav-agent-age {
+    flex: 0 0 auto;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+}
+
+.sidebar-nav .nav-item.nav-agent-item > span.nav-agent-status {
+    display: -webkit-box;
+    padding-left: 13px;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: 11.5px;
+    font-weight: 400;
+    line-height: 1.35;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+}
+
+.sidebar-nav .nav-agent-item[data-state="running"] > span.nav-agent-status {
+    display: block;
+    color: var(--accent-primary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sidebar-nav .nav-agent-item[data-state="waiting"] > span.nav-agent-status {
+    display: block;
+    color: var(--accent-warning);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sidebar-nav .nav-item.nav-agent-item > span.nav-agent-status[hidden] {
+    display: none;
+}
+
+@keyframes nav-agent-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .nav-agent-item[data-state="running"] .nav-agent-dot {
+        animation: none;
+    }
 }
 
 /* The name identifies an agent; its ID is on the agent's own page. */
@@ -1157,9 +1253,9 @@ html {
     overflow: hidden auto;
     color: var(--text-primary);
     background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
-    box-shadow: 0 18px 50px rgb(0 0 0 / 0.28);
+    border: 0;
+    border-radius: 14px;
+    box-shadow: 0 18px 50px rgb(0 0 0 / 0.36), 0 2px 8px rgb(0 0 0 / 0.18);
 }
 
 .shell-pop:focus {
@@ -1171,18 +1267,14 @@ html {
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 12px 14px 10px;
+    padding: 14px 16px 8px;
     font-size: 13px;
-    border-bottom: 1px solid var(--border-subtle, var(--border-color));
 }
 
 .shell-pop-meta {
-    padding: 1px 7px;
-    color: var(--text-secondary);
-    font-family: var(--console-mono);
-    font-size: 11px;
-    background: var(--bg-tertiary);
-    border-radius: 999px;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
 }
 
 .shell-pop-empty {
@@ -1246,65 +1338,71 @@ html {
 
 .inbox-list {
     margin: 0;
-    padding: 6px;
+    padding: 0 6px 6px;
     list-style: none;
 }
 
 .inbox-item {
     display: grid;
-    gap: 2px;
-    padding: 9px 10px 10px 12px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 2px 10px;
+    padding: 10px;
     color: inherit;
     font-size: 12.5px;
     line-height: 1.45;
     text-decoration: none;
-    border-left: 2px solid var(--border-glow);
-    border-radius: 0 8px 8px 0;
-}
-
-.inbox-item + .inbox-item,
-.inbox-list li + li {
-    margin-top: 4px;
+    border-radius: 9px;
 }
 
 .inbox-item:hover,
 .inbox-item:focus-visible {
     background: var(--bg-hover);
+    outline: none;
 }
 
-.inbox-item--approval {
-    border-left-color: var(--accent-warning);
+.inbox-dot {
+    width: 7px;
+    height: 7px;
+    margin-top: 6px;
+    background: var(--text-muted);
+    border-radius: 50%;
 }
 
-.inbox-item--review {
-    border-left-color: var(--accent-primary);
+.inbox-item--approval .inbox-dot { background: var(--accent-warning); }
+.inbox-item--review .inbox-dot { background: var(--accent-primary); }
+.inbox-item--failure .inbox-dot { background: var(--accent-danger, #c8404b); }
+
+.inbox-body {
+    display: grid;
+    gap: 1px;
+    min-width: 0;
 }
 
-.inbox-item--failure {
-    border-left-color: var(--accent-danger, #c8404b);
-}
-
-.inbox-kind {
-    color: var(--text-muted);
-    font-size: 10.5px;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-}
-
-.inbox-item strong {
+.inbox-body strong {
     font-size: 13px;
     font-weight: 600;
 }
 
 .inbox-detail {
-    color: var(--text-secondary);
+    color: var(--text-muted);
 }
 
 .inbox-action {
-    margin-top: 2px;
-    color: var(--accent-primary);
+    align-self: center;
+    padding: 4px 10px;
+    color: var(--text-primary);
+    font-size: 12px;
     font-weight: 500;
+    white-space: nowrap;
+    background: var(--bg-tertiary);
+    border-radius: 999px;
+}
+
+.inbox-item:hover .inbox-action,
+.inbox-item:focus-visible .inbox-action {
+    color: var(--bg-primary);
+    background: var(--accent-primary);
 }
 
 .store-list {

@@ -1,0 +1,14 @@
+flowchart TB
+    Y([You]):::person -- "one task shape" --> M[MemoRizz MetaHarness<br/>permissions · approvals · verification · run ledger]:::meta
+    MEM[("Shared memory<br/>memory ID: fern-ember")]:::mem
+    M <-- "starting context in,<br/>answer out" --> MEM
+    M --> P[pi<br/>brief]:::harness
+    M --> C[Codex<br/>build]:::harness
+    M --> R[Claude Code<br/>review]:::harness
+    P & C & R --> W[["Workspace<br/>fern_ember_shop/pricing.py"]]:::work
+    P & C & R -. "MemoRizz MCP tools,<br/>kept to this memory" .-> MEM
+    classDef harness fill:#1a1408,stroke:#ffb454,color:#fff5e6;
+    classDef meta fill:#14171c,stroke:#6f7cff,color:#f2f4f7;
+    classDef mem fill:#0f2a1f,stroke:#3ddc97,color:#eafff5;
+    classDef work fill:#101318,stroke:#aab2c0,color:#f2f4f7;
+    classDef person fill:#000000,stroke:#aab2c0,color:#f2f4f7;

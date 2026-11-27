@@ -135,6 +135,8 @@ class MemorizzMCPServerConfig:
     oauth: bool = False
     # "memory" lists only the memory tools, for apps that do best with few.
     tool_set: str = "all"
+    #: Where a connected app's save goes when it names no memory ID.
+    app_memory_id: str = PERSONAL_MEMORY_ID
     allow_writes: Optional[bool] = None
     allow_trace_queries: bool = False
     allow_agent_execution: Optional[bool] = None
@@ -147,6 +149,11 @@ class MemorizzMCPServerConfig:
     ingest_roots: Optional[Set[str]] = None
     api_key_grants: List[StaticAPIKeyGrant] = field(default_factory=list)
     exposed_agent_ids: Optional[Set[str]] = None
+    # The only memories this server may read or write (see memory_scope.py).
+    # None leaves it open to every memory of the caller.
+    memory_ids: Optional[Set[str]] = None
+    # Memories it may also read, never write. Only with ``memory_ids``.
+    read_memory_ids: Optional[Set[str]] = None
     max_result_items: int = 100
     max_text_chars: int = 50_000
     max_request_body_size: int = 4_194_304
@@ -176,6 +183,9 @@ class MemorizzMCPServerConfig:
         )
         self.approval_ttl_seconds = max(1, min(int(self.approval_ttl_seconds), 86_400))
         self.tool_set = str(self.tool_set or "all").strip().lower()
+        self.app_memory_id = str(self.app_memory_id or "").strip() or PERSONAL_MEMORY_ID
+        if len(self.app_memory_id) > 128:
+            raise ValueError("The apps' memory ID may be at most 128 characters")
         if self.tool_set not in TOOL_SETS:
             raise ValueError(
                 "MCP server tool set must be one of: " + ", ".join(TOOL_SETS)
@@ -206,6 +216,18 @@ class MemorizzMCPServerConfig:
                 if str(value).strip()
             }
 
+        if self.memory_ids is not None:
+            self.memory_ids = {
+                str(value).strip() for value in self.memory_ids if str(value).strip()
+            } or None
+        if self.read_memory_ids is not None:
+            self.read_memory_ids = {
+                str(value).strip()
+                for value in self.read_memory_ids
+                if str(value).strip()
+            } or None
+        if self.read_memory_ids and not self.memory_ids:
+            raise ValueError("read_memory_ids needs memory_ids to be set")
         if self.exposed_agent_ids is not None:
             self.exposed_agent_ids = {
                 str(value).strip()
@@ -284,6 +306,7 @@ class MemorizzMCPServerConfig:
             "configured_principals": len(self.api_key_grants),
             "oauth": bool(self.oauth),
             "tool_set": self.tool_set,
+            "app_memory_id": self.app_memory_id,
             "allow_writes": bool(self.allow_writes),
             "allow_trace_queries": bool(self.allow_trace_queries),
             "allow_agent_execution": bool(self.allow_agent_execution),
@@ -303,6 +326,8 @@ class MemorizzMCPServerConfig:
                 "remote_http": False,
             },
             "exposed_agent_ids": sorted(self.exposed_agent_ids or []),
+            "memory_ids": sorted(self.memory_ids or []),
+            "read_only_memory_ids": sorted(self.read_memory_ids or []),
             "max_result_items": self.max_result_items,
             "max_text_chars": self.max_text_chars,
             "durable_approvals": True,
@@ -323,6 +348,7 @@ class MemorizzMCPServerConfig:
             "allow_anonymous_http": _env_bool("MEMORIZZ_MCP_SERVER_ALLOW_ANONYMOUS"),
             "oauth": _env_bool("MEMORIZZ_MCP_SERVER_OAUTH"),
             "tool_set": os.environ.get("MEMORIZZ_MCP_SERVER_TOOLS"),
+            "app_memory_id": os.environ.get("MEMORIZZ_MCP_SERVER_APP_MEMORY_ID"),
             "allow_writes": _env_bool("MEMORIZZ_MCP_SERVER_ALLOW_WRITES"),
             "allow_trace_queries": _env_bool("MEMORIZZ_MCP_SERVER_ALLOW_TRACE_QUERIES"),
             "allow_agent_execution": _env_bool(
@@ -337,6 +363,8 @@ class MemorizzMCPServerConfig:
             ),
             "ingest_roots": _env_csv("MEMORIZZ_MCP_SERVER_INGEST_ROOTS"),
             "exposed_agent_ids": _env_csv("MEMORIZZ_MCP_SERVER_AGENT_IDS"),
+            "memory_ids": _env_csv("MEMORIZZ_MCP_SERVER_MEMORY_IDS"),
+            "read_memory_ids": _env_csv("MEMORIZZ_MCP_SERVER_READ_MEMORY_IDS"),
             "approval_ttl_seconds": int(
                 os.environ.get("MEMORIZZ_MCP_SERVER_APPROVAL_TTL", "900")
             ),

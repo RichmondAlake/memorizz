@@ -1490,8 +1490,9 @@ class MultiAgentOrchestrator:
             aggregate_usage: Dict[str, int] = {}
             rejection_count = 0
             while True:
+                asked = time.perf_counter()
                 response = self.root_agent.model.generate(messages, tools=None)
-                _count_call(self.root_agent)
+                _count_call(self.root_agent, stage="combining", started=asked)
                 response_text = self.task_decomposer._response_text(response).strip()
                 if not response_text:
                     raise ValueError(

@@ -1,0 +1,17 @@
+flowchart LR
+    M[Mara<br/>merchandiser]:::agent
+    C[Cole<br/>copywriter]:::agent
+    S[Sam<br/>support]:::agent
+    O[Ona<br/>shop manager]:::lead
+    SH[("One shared memory<br/>memory ID: fern-ember<br/> <br/>1 · Handbook<br/>2 · Decisions<br/>3 · What was said<br/>4 · Coordination board")]:::mem
+    U([Customer]):::person
+    M == "writes the offer" ==> SH
+    SH -- "read before writing copy" --> C
+    SH -- "read before answering" --> S
+    O -- "hands out work" --> SH
+    U -- "When does the sale start?" --> S
+    S -- "3 March, and gift cards are excluded" --> U
+    classDef agent fill:#14171c,stroke:#6f7cff,color:#f2f4f7;
+    classDef lead fill:#1d1730,stroke:#b58cff,color:#f6f0ff;
+    classDef mem fill:#0f2a1f,stroke:#3ddc97,color:#eafff5;
+    classDef person fill:#000000,stroke:#aab2c0,color:#f2f4f7;

@@ -97,6 +97,8 @@ def _default_model(provider: str) -> str:
         "anthropic": cfg.DEFAULT_ANTHROPIC_MODEL,
         "azure": cfg.DEFAULT_AZURE_MODEL,
         "ollama": cfg.DEFAULT_OLLAMA_LLM,
+        "openrouter": cfg.DEFAULT_OPENROUTER_MODEL,
+        "gemini": cfg.DEFAULT_GEMINI_MODEL,
     }.get(provider, cfg.DEFAULT_OPENAI_MODEL)
 
 
@@ -170,7 +172,7 @@ def detect_llm_config() -> Dict[str, Any]:
     """Auto-detect an llm_config from the environment.
 
     Order: explicit ``MEMORIZZ_DEFAULT_LLM_PROVIDER`` > Anthropic key > OpenAI key
-    > Azure key > local Ollama. Raises :class:`NeedsOllamaPull` or
+    > Azure key > Gemini key > OpenRouter key > local Ollama. Raises :class:`NeedsOllamaPull` or
     :class:`NoProviderConfigured` when nothing is usable.
     """
     explicit = _env("MEMORIZZ_DEFAULT_LLM_PROVIDER")
@@ -183,6 +185,10 @@ def detect_llm_config() -> Dict[str, Any]:
         return {"provider": "openai", "model": _default_model("openai")}
     if _env("AZURE_OPENAI_API_KEY"):
         return config_for_provider("azure")
+    if _env("GEMINI_API_KEY") or _env("GOOGLE_API_KEY"):
+        return config_for_provider("gemini")
+    if _env("OPENROUTER_API_KEY"):
+        return config_for_provider("openrouter")
 
     # No cloud key — probe a local Ollama daemon.
     host = ollama_probe.resolve_host()
@@ -391,6 +397,9 @@ def make_internet_provider():
     firecrawl_key = _env("FIRECRAWL_API_KEY")
     if firecrawl_key:
         return create_internet_access_provider("firecrawl", {"api_key": firecrawl_key})
+    exa_key = _env("EXA_API_KEY")
+    if exa_key:
+        return create_internet_access_provider("exa", {"api_key": exa_key})
     if _env("MEMORIZZ_DEFAULT_INTERNET_PROVIDER"):
         try:
             prov = get_default_internet_access_provider()
@@ -668,7 +677,7 @@ def prepare_agent(
         _slim_chat_tools(agent)
 
     # 3c. Internet access: attach a real provider when a key is configured
-    # (Tavily/Firecrawl), else detach so the offline placeholder tools aren't
+    # (Tavily/Firecrawl/Exa), else detach so the offline placeholder tools aren't
     # exposed. make_internet_provider() returns None when no key is set.
     try:
         agent.with_internet_access_provider(make_internet_provider())

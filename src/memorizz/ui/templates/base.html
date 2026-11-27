@@ -38,11 +38,11 @@
                 + '<line x1="12" y1="15" x2="12" y2="3"></line></svg>';
         }
     </script>
-    <link rel="stylesheet" href="/static/css/styles.css?v=46">
+    <link rel="stylesheet" href="/static/css/styles.css?v=48">
     {% block head %}{% endblock %}
-    <link rel="stylesheet" href="/static/css/console.css?v=31">
+    <link rel="stylesheet" href="/static/css/console.css?v=37">
     <link rel="stylesheet" href="/static/css/components/dialogs.css?v=4">
-    <link rel="stylesheet" href="/static/css/shell.css?v=10">
+    <link rel="stylesheet" href="/static/css/shell.css?v=13">
 </head>
 <body{% block body_attrs %}{% endblock %}{% if ui_conn.read_only %} data-read-only="true" data-read-only-tooltip="{{ ui_conn.read_only_tooltip }}" data-read-only-allow="{{ ui_conn.allowed_posts|join(' ') }}"{% endif %}>
     <script>if (document.documentElement.classList.contains('theme-light')) document.body.classList.add('theme-light');</script>
@@ -50,7 +50,15 @@
     {% block body %}
     {% macro connection_chip(compact=false) -%}
     {%- set chip_tag = 'a' if ui_conn.href else 'span' -%}
-    {%- if ui_conn.connected -%}
+    {%- if ui_conn.connected and ui_conn.opens -%}
+    <a class="ui-conn{% if compact %} ui-conn--compact{% endif %}" href="{{ ui_conn.opens }}" target="_blank" rel="noopener noreferrer" title="{{ ui_conn.title }}. Open the memory database in Notion.">
+        <span class="ui-conn-dot" aria-hidden="true"></span>
+        <span class="ui-conn-provider">{{ ui_conn.label }}</span>
+        {% if ui_conn.target %}<span class="ui-conn-target mono">{{ ui_conn.target }}</span>{% endif %}
+        <svg class="ui-conn-out" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M19 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h4"/></svg>
+        <span class="sr-only">(opens in a new tab)</span>
+    </a>
+    {%- elif ui_conn.connected -%}
     <{{ chip_tag }} class="ui-conn{% if compact %} ui-conn--compact{% endif %}"{% if ui_conn.href %} href="{{ ui_conn.href }}" data-store-switch aria-haspopup="dialog" aria-expanded="false" title="{{ ui_conn.title }}. Switch store."{% else %} title="{{ ui_conn.title }}"{% endif %}>
         <span class="ui-conn-dot" aria-hidden="true"></span>
         <span class="ui-conn-provider">{{ ui_conn.label }}</span>
@@ -76,7 +84,7 @@
         <button type="button" class="mobile-nav-toggle" id="mobile-nav-toggle" aria-controls="app-sidebar" aria-expanded="false" aria-label="Open navigation">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></svg>
         </button>
-        <a href="/dashboard" class="mobile-topbar-logo">Memorizz</a>
+        <a href="/playground" class="mobile-topbar-logo">Memorizz</a>
         <button type="button" class="mobile-nav-toggle mobile-search-btn" data-cmdk-open aria-haspopup="dialog" aria-label="Search pages, agents and actions">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
         </button>
@@ -91,7 +99,7 @@
         <!-- Sidebar -->
         <aside class="sidebar" id="app-sidebar">
             <div class="sidebar-header">
-                <a href="/dashboard" class="logo">
+                <a href="/playground" class="logo" title="Playground">
                     <span class="logo-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M9 3a3 3 0 0 0-3 3v.3A3.7 3.7 0 0 0 4 9.7V10a4 4 0 0 0 1.2 2.9A4 4 0 0 0 4 16v.3A3.7 3.7 0 0 0 6 19.7V20a3 3 0 0 0 3 3"/>
@@ -110,7 +118,7 @@
                     class="sidebar-toggle-btn"
                     id="sidebar-toggle-btn"
                     aria-label="Collapse side navigation"
-                    title="Collapse navigation"
+                    title="Collapse navigation (Ctrl/⌘ + B)"
                 >
                     <span class="sidebar-toggle-icon" id="sidebar-toggle-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
@@ -135,23 +143,28 @@
             <nav class="sidebar-nav">
                 {% set memory_pages = ['personas', 'toolbox', 'workflow-memory', 'skillbox', 'conversations', 'knowledge-base', 'short-term', 'entity', 'summaries', 'shared', 'cache', 'memory-transfer'] %}
                 {% set continual_learning_pages = ['workflows', 'skills', 'learning-control-plane', 'persona-evolution', 'fine-tuning', 'model-registry'] %}
-                <a href="/dashboard" class="nav-item {% if active_page == 'dashboard' %}active{% endif %}"{% if active_page == 'dashboard' %} aria-current="page"{% endif %}>
+
+                {#- Home: where you talk to an agent. -#}
+                <a href="/playground" class="nav-item {% if active_page == 'playground' %}active{% endif %}"{% if active_page == 'playground' %} aria-current="page"{% endif %}>
                     <span class="nav-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M3 3v18h18"/>
-                            <path d="M7 14v4"/>
-                            <path d="M12 10v8"/>
-                            <path d="M17 6v12"/>
+                            <rect x="3" y="7" width="18" height="10" rx="4"/>
+                            <path d="M8 12h4"/>
+                            <path d="M10 10v4"/>
+                            <path d="M16 11h.01"/>
+                            <path d="M18 13h.01"/>
                         </svg>
                     </span>
-                    <span>Overview</span>
+                    <span>Playground</span>
                 </a>
 
                 <div class="nav-section" role="presentation"><span>Build</span></div>
 
                 {% if agents_nav %}
-                <details class="nav-dropdown" {% if active_page == 'agents' %}open{% endif %}>
-                    <summary class="nav-item nav-dropdown-toggle {% if active_page == 'agents' %}active{% endif %}">
+                {#- The group's name opens the agents page and its list; the
+                    caret only folds the list (see app.js). -#}
+                <details class="nav-dropdown" {% if active_page == 'agents' or active_agent_id %}open{% endif %}>
+                    <summary class="nav-item nav-dropdown-toggle {% if active_page == 'agents' %}active nav-dropdown-toggle--page{% endif %}" data-nav-href="/agents" title="Agents: open the list of agents">
                         <span class="nav-icon" aria-hidden="true">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                                 <rect x="4" y="7" width="16" height="12" rx="3"/>
@@ -165,10 +178,15 @@
                         <span class="nav-caret" aria-hidden="true"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></span>
                     </summary>
                     <div class="nav-dropdown-content">
-                        <a href="/agents" class="nav-item nav-item--sub"><span>All agents</span></a>
                         {% for nav_agent in agents_nav %}
-                        <a href="/agents/{{ nav_agent.agent_id }}/playground" class="nav-item nav-item--sub nav-agent-item {% if nav_agent.agent_id == active_agent_id %}active{% endif %}">
-                            <span class="nav-agent-name">{{ nav_agent.name }}</span>
+                        {#- The dot, age and second line are filled by app.js from /api/nav/agent-status. -#}
+                        <a href="/agents/{{ nav_agent.agent_id }}/playground" class="nav-item nav-item--sub nav-agent-item {% if nav_agent.agent_id == active_agent_id %}active{% endif %}" data-nav-agent="{{ nav_agent.agent_id }}">
+                            <span class="nav-agent-head">
+                                <span class="nav-agent-dot" aria-hidden="true"></span>
+                                <span class="nav-agent-name">{{ nav_agent.name }}</span>
+                                <span class="nav-agent-age"></span>
+                            </span>
+                            <span class="nav-agent-status" hidden></span>
                             <span class="nav-agent-id">{{ nav_agent.short_id }}</span>
                         </a>
                         {% endfor %}
@@ -200,19 +218,6 @@
                     <span>Agent harnesses</span>
                 </a>
 
-                <a href="/playground" class="nav-item {% if active_page == 'playground' %}active{% endif %}">
-                    <span class="nav-icon" aria-hidden="true">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                            <rect x="3" y="7" width="18" height="10" rx="4"/>
-                            <path d="M8 12h4"/>
-                            <path d="M10 10v4"/>
-                            <path d="M16 11h.01"/>
-                            <path d="M18 13h.01"/>
-                        </svg>
-                    </span>
-                    <span>Playground</span>
-                </a>
-
                 {{ extension_nav('Build') }}
 
                 <a href="/automations" class="nav-item {% if active_page == 'automations' %}active{% endif %}">
@@ -227,7 +232,7 @@
 
                 <div class="nav-section" role="presentation"><span>Memory</span></div>
                 <details class="nav-dropdown" {% if active_page in memory_pages %}open{% endif %}>
-                    <summary class="nav-item nav-dropdown-toggle {% if active_page in memory_pages %}active{% endif %}">
+                    <summary class="nav-item nav-dropdown-toggle {% if active_page in memory_pages %}active{% endif %}" data-nav-href="/memory/knowledge-base" title="Memory types: open memory and its list of types">
                         <span class="nav-icon" aria-hidden="true">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                                 <path d="M9 3a3 3 0 0 0-3 3v.3A3.7 3.7 0 0 0 4 9.7V10a4 4 0 0 0 1.2 2.9A4 4 0 0 0 4 16v.3A3.7 3.7 0 0 0 6 19.7V20a3 3 0 0 0 3 3"/>
@@ -454,6 +459,18 @@
                 </a>
 
                 <div class="nav-section" role="presentation"><span>Operate</span></div>
+                <a href="/dashboard" class="nav-item {% if active_page == 'dashboard' %}active{% endif %}"{% if active_page == 'dashboard' %} aria-current="page"{% endif %}>
+                    <span class="nav-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M3 3v18h18"/>
+                            <path d="M7 14v4"/>
+                            <path d="M12 10v8"/>
+                            <path d="M17 6v12"/>
+                        </svg>
+                    </span>
+                    <span>Dashboard</span>
+                </a>
+
                 <a href="/traces" class="nav-item {% if active_page == 'traces' %}active{% endif %}">
                     <span class="nav-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -535,10 +552,10 @@
             <div class="app-bar">
                 {#- Where this page sits in the sidebar: group, then area. -#}
                 {% set crumb_areas = {
-                    'dashboard': (None, 'Overview', '/dashboard'),
+                    'dashboard': ('Operate', 'Dashboard', '/dashboard'),
                     'agents': ('Build', 'Agents', '/agents'),
                     'harnesses': ('Build', 'Agent harnesses', '/harnesses'),
-                    'playground': ('Build', 'Playground', '/playground'),
+                    'playground': (None, 'Playground', '/playground'),
                     'automations': ('Build', 'Automations', '/automations'),
                     'mcp': ('Connect', 'MCP connections', '/mcp'),
                     'vercel-skills': ('Connect', 'Skills', '/vercel-skills'),
@@ -584,6 +601,7 @@
                     </a>
                 </div>
             </div>
+            {% if ui_preview_label %}<p class="preview-banner" role="status"><strong>Preview</strong> of {{ ui_preview_label }}. This window runs an agent's own version of MemoRizz, read-only; nothing done here is saved.</p>{% endif %}
             {% block content %}{% endblock %}
         </main>
     </div>
@@ -630,9 +648,10 @@
     {% endblock %}
 
     <script src="/static/js/page-dialogs.js?v=3" defer></script>
-    <script src="/static/js/app.js?v=28" defer></script>
+    <script src="/static/js/select.js?v=2" defer></script>
+    <script src="/static/js/app.js?v=30" defer></script>
     <script src="/static/js/monitor.js?v=3" defer></script>
-    <script src="/static/js/shell-menus.js?v=2" defer></script>
+    <script src="/static/js/shell-menus.js?v=3" defer></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

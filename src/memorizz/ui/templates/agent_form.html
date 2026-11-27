@@ -13,7 +13,7 @@
             <span class="builder-section-status" data-section-status="{{ key }}"></span>
         </summary>
 {% endmacro %}
-{% from '_ui.html' import page_header, id_chip %}
+{% from '_ui.html' import page_header, id_chip, routing_fields %}
 {#- A new agent has no page to go back to but the list, which the top bar's breadcrumb already links. -#}
 {% set form_back = ('/agents/' ~ agent_id ~ '/playground', 'Agent playground') if is_edit else none %}
 {% if is_edit %}
@@ -133,10 +133,12 @@
                     <select id="llm_provider" name="llm_provider" onchange="syncAgentModelOptions()">
                         <option value="openai" {% if llm_provider == 'openai' %}selected{% endif %}>OpenAI</option>
                         <option value="anthropic" {% if llm_provider == 'anthropic' %}selected{% endif %}>Anthropic</option>
+                        <option value="gemini" {% if llm_provider == 'gemini' %}selected{% endif %}>Google Gemini</option>
                         <option value="azure" {% if llm_provider == 'azure' %}selected{% endif %}>Azure OpenAI</option>
                         <option value="ollama" {% if llm_provider == 'ollama' %}selected{% endif %}>Ollama (Local)</option>
                         <option value="huggingface" {% if llm_provider == 'huggingface' %}selected{% endif %}>HuggingFace</option>
                         <option value="mlx" {% if llm_provider == 'mlx' %}selected{% endif %}>MLX (Apple Silicon)</option>
+                        <option value="openrouter" {% if llm_provider == 'openrouter' %}selected{% endif %}>OpenRouter (many models, one key)</option>
                         <option value="local-openai" {% if llm_provider == 'local-openai' %}selected{% endif %}>Local OpenAI-compatible (llama.cpp / LM Studio)</option>
                     </select>
                 </div>
@@ -170,6 +172,7 @@
                 </label>
                 <p class="form-hint">When on, Gemma 4 / DeepSeek-R1 / Qwen3-thinking emit a separate reasoning trace before the final answer (shown in the playground's trace timeline). Off by default for snappier replies — thinking can take 30–60 s before any visible content on CPU-only setups.</p>
             </div>
+            {{ routing_fields('form-group', 'routing') }}
             {% set memory_models = builder_context.memory_models if builder_context is defined and builder_context and builder_context.memory_models else {} %}
             <details class="builder-subsection" id="memory-models" {% if background_model|default('') or reranker|default('') or memory_routing|default('') or decision_model|default('') %}open{% endif %}>
                 <summary>Memory models<span class="builder-subsection-desc">The background model, the reranker, the memory router and the decision model</span></summary>
@@ -182,10 +185,12 @@
                             <option value="">Same as the chat model</option>
                             <option value="openai">OpenAI</option>
                             <option value="anthropic">Anthropic</option>
+                            <option value="gemini">Google Gemini</option>
                             <option value="azure">Azure OpenAI</option>
                             <option value="ollama">Ollama (Local)</option>
                             <option value="huggingface">HuggingFace</option>
                             <option value="mlx">MLX (Apple Silicon)</option>
+                            <option value="openrouter">OpenRouter</option>
                             <option value="local-openai">Local OpenAI-compatible</option>
                         </select>
                     </div>
@@ -271,7 +276,8 @@
             </details>
         </div>
     </details>
-    <script>
+    <script src="/static/js/routing-form.js?v=1"></script>
+            <script>
     // Show contextual hints + the base_url field when the provider needs them.
     (function () {
         const GATED_HF_PREFIXES = ['google/gemma', 'meta-llama/', 'mistralai/'];
@@ -330,6 +336,14 @@
                         + '<code>llama-server</code>, <code>mlx_lm.server</code>, '
                         + 'LM Studio, vLLM) and point the base URL at it.';
                 }
+            } else if (provider === 'openrouter') {
+                hint = 'Needs <code>OPENROUTER_API_KEY</code> in Settings. Any model name from '
+                    + '<a href="https://openrouter.ai/models" target="_blank" rel="noopener">openrouter.ai/models</a> '
+                    + 'works; choose providers and fallback models under Routing below.';
+            } else if (provider === 'gemini') {
+                hint = 'Needs <code>GEMINI_API_KEY</code> in Settings; create one at '
+                    + '<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. '
+                    + 'Any model code from the Gemini API works as a custom model.';
             } else if (provider === 'ollama') {
                 hint = 'Pull the model in Settings → Local models, or run <code>ollama pull '
                     + (model || 'llama3.1:8b') + '</code>.';
@@ -350,6 +364,16 @@
                 refreshLLMHint();
             }
         });
+        // The Routing fields start from the saved config's routing.
+        const routingFields = (function () {
+            const cfg = document.getElementById('llm_config_json');
+            let saved = {};
+            try { saved = (cfg && cfg.value.trim() ? JSON.parse(cfg.value) : {}).routing || {}; }
+            catch (_) { saved = {}; }
+            return window.MemorizzRouting
+                ? MemorizzRouting.attach(document.querySelector('[data-routing]'), document.getElementById('llm_provider'), saved)
+                : null;
+        })();
         // Mirror the base_url field into llm_config_json on submit so the
         // backend `_parse_llm_config` picks it up without a new form field.
         const baseUrlEl = document.getElementById('llm_base_url');
@@ -388,8 +412,19 @@
                     }
                 }
 
+                // The Routing fields are the routing: empty fields clear it, and
+                // another provider never carries OpenRouter's rules.
+                if (routingFields) {
+                    const rules = (provEl && (provEl.value || '').toLowerCase() === 'openrouter')
+                        ? routingFields.read() : {};
+                    if (Object.keys(rules).length > 0) obj.routing = rules;
+                    else delete obj.routing;
+                }
+
                 if (Object.keys(obj).length > 0) {
                     cfgEl.value = JSON.stringify(obj);
+                } else {
+                    cfgEl.value = '';
                 }
             });
         }
@@ -876,6 +911,7 @@
                     <option value="" {% if not internet_provider %}selected{% endif %}>None (disabled)</option>
                     <option value="tavily" {% if internet_provider == 'tavily' %}selected{% endif %}>Tavily (Search + extract)</option>
                     <option value="firecrawl" {% if internet_provider == 'firecrawl' %}selected{% endif %}>Firecrawl (Search + crawl)</option>
+                    <option value="exa" {% if internet_provider == 'exa' %}selected{% endif %}>Exa (Search by meaning + page text)</option>
                     <option value="offline" {% if internet_provider == 'offline' %}selected{% endif %}>Offline (placeholder provider)</option>
                 </select>
                 <p class="form-hint">When enabled, the agent gets `internet_search` and `open_web_page` tools. Configure API keys in Settings.</p>
@@ -889,6 +925,7 @@
                     <option value="graalpy" {% if sandbox_provider == 'graalpy' %}selected{% endif %}>GraalPy (Local — No cloud required)</option>
                 </select>
                 <p class="form-hint">Enable code execution in a secure sandbox. Requires the corresponding API key in Settings (E2B, Daytona) or GraalPy installed locally.</p>
+                {% if sandbox_default_note %}<p class="form-hint" id="sandbox-default-note">{{ sandbox_default_note }} <a href="/settings">Open Settings</a></p>{% endif %}
             </div>
             <div class="form-group">
                 <label for="browser_control_provider">Browser control provider</label>
@@ -992,6 +1029,7 @@
                         <option value="deepseek" {% if default_harness == 'deepseek' %}selected{% endif %}>DeepSeek (Claude Code runtime)</option>
                         <option value="pi" {% if default_harness == 'pi' %}selected{% endif %}>pi</option>
                         <option value="hermes" {% if default_harness == 'hermes' %}selected{% endif %}>Hermes Agent</option>
+                        <option value="droid" {% if default_harness == 'droid' %}selected{% endif %}>Factory Droid</option>
                     </select>
                 </div>
                 <div class="form-group">
@@ -1160,6 +1198,68 @@
         </div>
     </details>
 
+    <!-- Observability -->
+    {% set chosen_observability_provider = observability_provider|default('memorizz') %}
+    {# Sentry's readiness and link, whichever provider is chosen: the block
+       below appears as soon as Sentry is picked. #}
+    {% set obs = observability_link({
+        'agent_id': agent_id|default('', true),
+        'name': agent_name|default('', true),
+        'observability_config': {
+            'provider': 'sentry',
+            'org': observability_org|default('', true),
+            'project': observability_project|default('', true),
+        },
+    }) %}
+    <details class="panel agent-form-section builder-section" id="section-observability" {% if not observability|default(true) or chosen_observability_provider != 'memorizz' %}open{% endif %}>
+        {{ section_summary('observability', 'Observability', 'Whether this agent is traced, and where its traces go.') }}
+        <div class="section-body">
+            <input type="hidden" name="observability_form" value="1">
+            <div class="form-grid">
+                <div class="form-group checkbox-group">
+                    <label>
+                        <input type="checkbox" id="observability" name="observability" value="on" {% if observability|default(true) %}checked{% endif %}>
+                        Trace this agent's turns
+                    </label>
+                    <p class="form-hint">Each turn is recorded with its model calls, tool calls, memory reads, timings and token counts. Off, the agent leaves no traces, so Traces, Failures and Usage show nothing for it.</p>
+                </div>
+                <div class="form-group">
+                    <label for="observability_provider">Observability provider</label>
+                    <select id="observability_provider" name="observability_provider">
+                        <option value="memorizz" {% if chosen_observability_provider == 'memorizz' %}selected{% endif %}>MemoRizz (default)</option>
+                        <option value="sentry" {% if chosen_observability_provider == 'sentry' %}selected{% endif %}>Sentry</option>
+                    </select>
+                    <p class="form-hint">MemoRizz keeps the traces in the agent's memory provider and shows them on <a href="/traces{% if is_edit %}?agent_id={{ agent_id|urlencode }}{% endif %}">Traces</a>. With Sentry, each turn is also sent there as one trace; the MemoRizz copy stays.</p>
+                </div>
+            </div>
+            <div class="provider-fields" id="observability-sentry" {% if chosen_observability_provider != 'sentry' %}hidden{% endif %}>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label for="observability_org">Sentry organisation slug <span class="optional">optional</span></label>
+                        <input id="observability_org" type="text" name="observability_org" value="{{ observability_org|default('') }}" placeholder="acme" autocomplete="off" spellcheck="false">
+                        <p class="form-hint">The name in your Sentry address (acme.sentry.io). It shapes the link to this agent's traces. Blank uses the one in <a href="/settings#settings-observability">Settings</a>, or the organisation you are signed in to.</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="observability_project">Sentry project ID <span class="optional">optional</span></label>
+                        <input id="observability_project" type="text" name="observability_project" value="{{ observability_project|default('') }}" placeholder="From the DSN" autocomplete="off" spellcheck="false">
+                        <p class="form-hint">The number at the end of the DSN. Blank reads it from the DSN.</p>
+                    </div>
+                </div>
+                <div class="form-group checkbox-group">
+                    <label>
+                        <input type="checkbox" id="observability_include_content" name="observability_include_content" value="on" {% if observability_include_content|default(false) %}checked{% endif %}>
+                        Also send content
+                    </label>
+                    <p class="form-hint">Off, Sentry receives names, timings, token counts and statuses only. On, it also receives tool arguments, tool results and the user ID.</p>
+                </div>
+                <p class="form-hint observability-provider-status">
+                    {% if obs.ready and obs.local_only %}<span class="pill pill--success">Ready</span> This UI sends to Sentry's local development server only (<code>sentry local</code>); no DSN is set, so nothing reaches sentry.io.{% elif obs.ready %}<span class="pill pill--success">Ready</span> This UI can send to Sentry.{% else %}<span class="pill pill--warning">Needs setup</span> This UI cannot send to Sentry yet: {{ obs.missing|join(' and ') }} missing. Set the DSN in <a href="/settings#settings-observability">Settings</a>; it is never saved with the agent.{% endif %}
+                    {% if chosen_observability_provider == 'sentry' and obs.url %}<a class="observability-provider-link" href="{{ obs.url }}" target="_blank" rel="noopener noreferrer">Open in Sentry ↗</a>{% endif %}
+                </p>
+            </div>
+        </div>
+    </details>
+
     <div class="form-actions builder-actions">
         <button type="submit" class="btn btn-primary">Save agent</button>
         <button type="button" class="btn" id="save-template-toggle" aria-expanded="false" aria-controls="save-template-panel" data-mutates>Save as template</button>
@@ -1189,7 +1289,7 @@
     <nav class="panel builder-nav" aria-label="Form sections">
         <p class="builder-aside-title">Sections</p>
         <ol>
-            {% for key, title in [('identity', 'Identity'), ('model', 'Model'), ('persona', 'Persona'), ('memory', 'Memory'), ('learning', 'Learning'), ('tools', 'Tools & integrations'), ('runtime', 'Runtime & orchestration'), ('channels', 'Automations & channels')] %}
+            {% for key, title in [('identity', 'Identity'), ('model', 'Model'), ('persona', 'Persona'), ('memory', 'Memory'), ('learning', 'Learning'), ('tools', 'Tools & integrations'), ('runtime', 'Runtime & orchestration'), ('channels', 'Automations & channels'), ('observability', 'Observability')] %}
             <li><a href="#section-{{ key }}" data-nav="{{ key }}"><span>{{ title }}</span><span class="builder-nav-status" data-nav-status="{{ key }}"></span></a></li>
             {% endfor %}
         </ol>
@@ -1228,6 +1328,8 @@
 const AGENT_FORM_MODEL_CATALOG = {{ llm_model_catalog|default({}, true)|tojson }};
 const AGENT_FORM_DEFAULT_MODELS = {{ default_llm_model_by_provider|default({}, true)|tojson }};
 const AGENT_FORM_CUSTOM = '__custom__';
+// The provider the model picker was last filled for.
+let agentFormModelProvider = null;
 
 // Background model: a provider and a model name, sent as "provider:model".
 function syncBackgroundModel(providerChanged) {
@@ -1278,8 +1380,15 @@ function syncAgentModelOptions() {
     const models = Array.isArray(AGENT_FORM_MODEL_CATALOG[provider])
         ? AGENT_FORM_MODEL_CATALOG[provider]
         : [];
-    const currentValue = (modelHidden.value || modelCustom.value || '').trim();
+    let currentValue = (modelHidden.value || modelCustom.value || '').trim();
     const fallback = (AGENT_FORM_DEFAULT_MODELS[provider] || '').trim();
+    // Another provider was chosen: its default model, not the last
+    // provider's model carried over as a custom one.
+    const switched = agentFormModelProvider !== null && agentFormModelProvider !== provider;
+    agentFormModelProvider = provider;
+    if (switched && !models.some(function(model) { return model.value === currentValue; })) {
+        currentValue = '';
+    }
 
     modelSelect.innerHTML = '';
     const grouped = {};
@@ -1554,5 +1663,5 @@ function syncSkillAuthorityReview() {
     window.AGENT_BUILDER = {{ builder_context|default({}, true)|tojson }};
 </script>
 <script src="/static/js/agent-templates.js?v=4"></script>
-<script src="/static/js/agent-builder.js?v=6"></script>
+<script src="/static/js/agent-builder.js?v=7"></script>
 {% endblock %}

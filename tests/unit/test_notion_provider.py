@@ -975,3 +975,149 @@ def test_skill_vectors_embed_applicability_not_procedure(stack):
     )
     assert "espresso" in embedder.calls[-1]
     assert "mechanism" not in embedder.calls[-1]
+
+
+def test_observations_of_every_memory_type_cost_one_query_per_scope(stack):
+    from memorizz import MemoryHistory
+
+    provider, _, api, _ = stack
+    fact = save(provider, agent_id="a", user_id=None)
+    alias = save(provider, owner_agent_id="a", user_id=None)
+    shared = save(provider, memory_id="m", user_id=None)
+    message = provider.store(
+        {"role": "user", "content": "hello", "agent_id": "a", "user_id": None},
+        MemoryType.CONVERSATION_MEMORY,
+    )
+    save(provider, agent_id="other", memory_id="m", user_id=None)
+    api.calls.clear()
+
+    rows = MemoryHistory(provider).observations(
+        agent_id="a",
+        memory_ids=["m"],
+        user_id=None,
+        exclude_records=[(MemoryType.KNOWLEDGE_BASE, alias)],
+    )
+
+    assert {(row["memory_type"], row["target_record_id"]) for row in rows} == {
+        ("knowledge_base", fact),
+        ("knowledge_base", shared),
+        ("conversation_memory", message),
+    }
+    # The agent's rows, its owner alias and the one namespace: three queries,
+    # where asking type by type made three for each of the eleven types.
+    queries = [call for call in api.calls if call[1].endswith("/query")]
+    assert len(queries) == 3
+    kinds = queries[0][2]["filter"]["and"][0]["or"]
+    assert len(kinds) == len(MemoryType) - 2
+
+
+def test_a_missing_trace_or_journal_row_is_asked_for_once(stack):
+    from memorizz import MemoryHistory
+    from memorizz.memory_history import enable_memory_history
+    from memorizz.observability.store import ObservabilityStore
+
+    provider, _, api, _ = stack
+
+    def queries():
+        return [call for call in api.calls if call[1].endswith("/query")]
+
+    # A record that is not there: one lookup by ID, no second one by name
+    # and no scan of every shared record.
+    api.calls.clear()
+    assert ObservabilityStore(provider)._get("setting-nobody-saved") is None
+    assert len(queries()) == 1
+
+    # A new memory's journal entry looks for its head once.
+    enable_memory_history(provider)
+    history = MemoryHistory(provider)
+    api.calls.clear()
+    with history.recording(actor="a", agent_id="a", memory_id="m"):
+        save(provider, content="tea")
+    heads = [call for call in queries() if "mem-head-" in json.dumps(call[2])]
+    assert len(heads) == 2  # the lookup, and the store's own check before creating
+    assert [e["action"] for e in history.timeline(agent_id="a")["events"]] == [
+        "created"
+    ]
+
+
+def _turns(provider, count):
+    return [
+        provider.store(
+            {
+                "content": f"turn {index}",
+                "role": "user",
+                "user_id": "alice",
+                "agent_id": "agent",
+                "thread_id": "thread",
+                "timestamp": f"2026-01-{index + 1:02d}T00:00:00Z",
+            },
+            MemoryType.CONVERSATION_MEMORY,
+        )
+        for index in range(count)
+    ]
+
+
+def _read_events(provider, limit, cursor=None):
+    from memorizz.observability.normalization import query_trace_events
+
+    return query_trace_events(
+        provider,
+        MemoryType.CONVERSATION_MEMORY,
+        limit=limit,
+        cursor=cursor,
+        agent_ids=["agent"],
+        user_id="alice",
+    )
+
+
+def test_trace_records_are_read_a_page_at_a_time_not_one_per_request(stack):
+    provider, _, api, _ = stack
+    stored = _turns(provider, 7)
+    api.page_size = 3
+    api.calls.clear()
+
+    page = _read_events(provider, 1000)
+
+    assert [event["source_record_id"] for event in page["items"]] == stored[::-1]
+    assert page["next_cursor"] is None
+    # Seven records in pages of three: three requests, where it took one each.
+    assert len([call for call in api.calls if call[1].endswith("/query")]) == 3
+
+
+def test_a_trace_read_resumes_after_any_record_without_repeats_or_gaps(stack):
+    provider, _, api, _ = stack
+    stored = _turns(provider, 7)
+    api.page_size = 3
+
+    seen, cursor = [], None
+    for step in range(10):
+        page = _read_events(provider, 2, cursor)
+        seen += [event["source_record_id"] for event in page["items"]]
+        cursor = page["next_cursor"]
+        if step == 0:
+            # A record that lands while the read is under way moves every
+            # row down a place; the read still continues where it stopped.
+            provider.store(
+                {
+                    "content": "newer",
+                    "role": "user",
+                    "user_id": "alice",
+                    "agent_id": "agent",
+                    "thread_id": "thread",
+                    "timestamp": "2026-02-01T00:00:00Z",
+                },
+                MemoryType.CONVERSATION_MEMORY,
+            )
+        if not cursor:
+            break
+    assert seen == stored[::-1]
+
+    # The record a cursor follows was deleted: the read says so.
+    first = _read_events(provider, 2)
+    provider.delete_by_id(
+        first["items"][-1]["source_record_id"], MemoryType.CONVERSATION_MEMORY
+    )
+    with pytest.raises(ValueError, match="gone; restart"):
+        _read_events(provider, 2, first["next_cursor"])
+    with pytest.raises(ValueError, match="not in the page"):
+        provider.observability_row_cursor({"id": "never-read"})

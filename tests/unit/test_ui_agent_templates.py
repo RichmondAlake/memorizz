@@ -103,6 +103,7 @@ def test_the_create_page_offers_every_template_and_the_overview(ui):
     cards = {card["key"]: card for card in _page_templates(html)}
     assert list(cards) == [
         "productivity",
+        "project-manager",
         "finance",
         "research",
         "support",
@@ -118,11 +119,31 @@ def test_the_create_page_offers_every_template_and_the_overview(ui):
     assert cards["productivity"]["needs_google_client"] is True
     # No key for a search provider: the template leaves web search off.
     assert cards["research"]["values"]["internet_provider"] == ""
-    assert "Tavily or Firecrawl key" in cards["research"]["warning"]["detail"]
+    assert "Tavily, Firecrawl or Exa key" in cards["research"]["warning"]["detail"]
     assert cards["research"]["warning"]["label"] == "Needs a web search key"
     assert (
         "not a licensed financial adviser" in cards["finance"]["values"]["instruction"]
     )
+    # The project manager works in Notion, learns, and shows what it made.
+    manager = cards["project-manager"]
+    assert manager["connections"] == ["Notion"] and "Learning" in manager["chips"]
+    assert manager["needs_google_client"] is False
+    values = manager["values"]
+    assert values["agent_name"] == "Project Management Assistant"
+    assert values["continual_learning"] is True
+    assert values["enable_workflow_memory"] is True
+    assert values["persona_role"] == "Senior project and delivery manager"
+    assert len(values["persona_background"]) > 400
+    for needed in (
+        "notion-create-database",
+        'type "board"',
+        "notion-create-view",
+        "notion-query-data-sources",
+        "send_page_snapshot",
+        "RAID log",
+        "pauses until the user approves",
+    ):
+        assert needed in " ".join(values["instruction"].split()), needed
 
     for section in ("identity", "model", "memory", "tools", "runtime", "channels"):
         assert f'id="section-{section}"' in html
@@ -299,12 +320,12 @@ def test_values_from_form_reads_unchecked_boxes_as_off():
 def test_the_model_picker_lists_current_openai_and_anthropic_models():
     openai = [model["value"] for model in LLM_MODEL_CATALOG["openai"]]
     anthropic = [model["value"] for model in LLM_MODEL_CATALOG["anthropic"]]
-    assert openai[:3] == ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"]
+    assert openai[:3] == ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-terra"]
     assert anthropic[:4] == [
+        "claude-fable-5-2",
         "claude-opus-5-5",
         "claude-sonnet-5-5",
         "claude-haiku-5-5",
-        "claude-fable-5-1",
     ]
     assert "gpt-4o" not in openai and "claude-3-haiku-20240307" not in anthropic
     assert DEFAULT_LLM_MODEL_BY_PROVIDER["openai"] in openai

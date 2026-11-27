@@ -12,6 +12,7 @@ state and the template engine without a circular import.
 never rebound), so everyone importing it observes the same object.
 """
 
+import os
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -151,6 +152,10 @@ def _connection_header() -> Dict[str, Any]:
 
 
 templates.env.globals["ui_connection"] = _connection_header
+# Set on a console started to preview one version of an agent's own source.
+templates.env.globals["ui_preview_label"] = os.environ.get(
+    "MEMORIZZ_UI_PREVIEW_LABEL", ""
+).strip()
 
 
 __all__ = [

@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% from '_ui.html' import page_header %}
+{% block title %}{{ agent_name }}'s source - Memorizz{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/agent-source.css?v=7">{% endblock %}
+{% block content %}
+{% call page_header(agent_name ~ "'s source", "This agent's own copy of the MemoRizz code it runs on. Its coding model reads the agent's errors, recommends a fix and makes it here; every fix kept is a version. The installed program is never changed.", back=('/agents/' ~ agent_id ~ '/playground', 'Back to ' ~ agent_name)) %}
+    <button class="btn" id="src-recommend" disabled>Find the cause</button>
+    <button class="btn btn-primary" id="src-fix" disabled>Fix it</button>
+{% endcall %}
+
+<div id="src-root" data-agent-id="{{ agent_id }}" data-agent-name="{{ agent_name }}" data-read-only="{{ '1' if read_only else '0' }}">
+    <section class="panel src-off" id="src-off" hidden>
+        <h2 class="panel-title">{{ agent_name }} has no copy of its source yet</h2>
+        <p class="panel-description">Giving it one makes the agent self-aware: it gets a private, versioned copy of MemoRizz {{ memorizz_version }} to read and change, a log of its own errors, and tools to recommend and make fixes. Edits stay in that copy.</p>
+        <button class="btn btn-primary" id="src-enable" {% if read_only %}disabled{% endif %}>Give {{ agent_name }} its own source</button>
+    </section>
+
+    <div id="src-on" hidden>
+        <div class="kpi-strip" id="src-kpis"></div>
+
+        <section class="panel src-preview" id="src-preview" hidden aria-live="polite"></section>
+        <section class="panel src-work" id="src-work" hidden aria-live="polite"></section>
+
+        <section class="panel cm" id="src-model-panel">
+            <div class="cm-head">
+                <div>
+                    <h2 class="panel-title">Coding model</h2>
+                    <p class="panel-description">The model that reads the errors and edits the source. It can differ from the model the agent talks with.</p>
+                </div>
+                <span class="cm-now" id="src-model-pill"></span>
+            </div>
+            <form class="cm-form" id="src-model-form" autocomplete="off">
+                <input type="hidden" name="provider" value="">
+                <div class="cm-row">
+                    <div class="cm-field cm-field--provider">
+                        <span class="cm-label" id="cm-provider-label">Provider</span>
+                        <div class="cm-pick" id="cm-pick">
+                            <button type="button" class="cm-pick-button" id="cm-pick-button" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="cm-provider-label cm-pick-button" {% if read_only %}disabled{% endif %}>
+                                <span class="cm-mark" data-cm-mark></span>
+                                <span class="cm-pick-name" data-cm-name></span>
+                                <svg class="cm-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+                            </button>
+                            <ul class="cm-menu" id="cm-menu" role="listbox" aria-labelledby="cm-provider-label" tabindex="-1" hidden>
+                                {% for option in coding_provider_options %}
+                                <li class="cm-option" role="option" id="cm-option-{{ option.value or 'own' }}" data-value="{{ option.value }}" data-key="{{ option.key_env }}" data-example="{{ option.example }}" aria-selected="false">
+                                    <span class="cm-mark" data-provider="{{ option.value or 'own' }}">{{ option.mark }}</span>
+                                    <span class="cm-option-text"><strong>{{ option.title }}</strong><small>{{ option.note }}</small></span>
+                                    <svg class="cm-check" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5 9-10"/></svg>
+                                </li>
+                                {% endfor %}
+                            </ul>
+                        </div>
+                    </div>
+                    <label class="cm-field cm-field--model" data-cm-needs-model>
+                        <span class="cm-label">Model</span>
+                        <input name="model" list="cm-models" placeholder="flint" spellcheck="false">
+                        <datalist id="cm-models"></datalist>
+                    </label>
+                    <label class="cm-field" data-for-provider="ollama">
+                        <span class="cm-label">Ollama address</span>
+                        <input name="host" placeholder="http://localhost:11434" spellcheck="false">
+                    </label>
+                    <label class="cm-field" data-for-provider="openai">
+                        <span class="cm-label">Endpoint address <em>optional</em></span>
+                        <input name="base_url" placeholder="https://api.openai.com/v1" spellcheck="false">
+                    </label>
+                    <label class="cm-field" data-for-provider="openai">
+                        <span class="cm-label">Variable holding its key <em>optional</em></span>
+                        <input name="api_key_env" placeholder="OPENAI_API_KEY" spellcheck="false">
+                    </label>
+                </div>
+                <div class="cm-foot">
+                    <p class="cm-key" id="src-key-status"></p>
+                    <button class="btn btn-primary" type="submit" id="src-model-save" {% if read_only %}disabled{% endif %}>Save</button>
+                </div>
+            </form>
+            <script type="application/json" id="cm-catalog">{{ coding_model_catalog|tojson }}</script>
+        </section>
+
+        <section class="panel">
+            <div class="panel-header"><h2 class="panel-title">Versions</h2><span class="src-actions"><a class="btn btn-sm" id="src-diff-all" href="/agents/{{ agent_id }}/source/diff?version=all" hidden>See every change</a><a class="btn btn-sm" id="src-patch" href="/api/agents/{{ agent_id }}/source/patch" hidden>Download as a patch</a></span></div>
+            <p class="panel-description" id="src-path"></p>
+            <ol class="src-versions" id="src-versions"></ol>
+        </section>
+
+        <section class="panel">
+            <div class="panel-header"><h2 class="panel-title">Recent errors</h2><span class="pill" id="src-error-count"></span></div>
+            <p class="panel-description">Kept on this machine for this agent only, with the file and line inside MemoRizz. This is what the coding model reads first.</p>
+            <ul class="src-errors" id="src-errors"></ul>
+        </section>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/js/agent-source.js?v=6" defer></script>{% endblock %}

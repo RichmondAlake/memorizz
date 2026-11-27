@@ -509,6 +509,60 @@ def test_workflow_handoffs_are_saved_to_conversation_memory(tmp_path: Path) -> N
 
 
 @pytest.mark.unit
+def test_a_saved_answer_gets_a_vector_so_agents_find_it_by_meaning(
+    tmp_path: Path,
+) -> None:
+    """A MemAgent sharing the memory recalls by meaning. An answer saved with
+    no vector is found only by its words."""
+    from memorizz.enums.memory_type import MemoryType
+    from memorizz.memory_provider.filesystem.provider import (
+        FileSystemConfig,
+        FileSystemProvider,
+    )
+
+    class Embedding(FileSystemProvider):
+        def embed_text(self, text):
+            return [1.0, 0.0, 0.5]
+
+    class NoModel(FileSystemProvider):
+        def embed_text(self, text):
+            raise NotImplementedError("Configure an embedding model")
+
+    for kind, vector in ((Embedding, [1.0, 0.0, 0.5]), (NoModel, None)):
+        root = tmp_path / kind.__name__
+        root.mkdir()
+        provider = kind(
+            FileSystemConfig(root_path=root / "memory", lazy_vector_indexes=True)
+        )
+        service = MetaHarness(
+            memory_provider=provider,
+            adapters=[_Recording("one")],
+            run_store=SQLiteHarnessRunStore(root / "runs.sqlite3"),
+            approval_store=SQLiteApprovalStore(root / "approvals.sqlite3"),
+            allowed_workspace_roots=[str(root)],
+        )
+        try:
+            result = service.run(
+                {
+                    "task": "Describe the parser",
+                    "workspace": str(_workspace(root)),
+                    "harness": "one",
+                    "memory_id": "team",
+                }
+            )
+            assert result.ok
+            (row,) = [
+                row
+                for row in provider.list_all(MemoryType.CONVERSATION_MEMORY)
+                if str(row.get("content")).startswith("[Harness run: one")
+            ]
+            # Saved either way: memory is evidence, not a precondition.
+            assert (row.get("embedding") or None) == vector
+        finally:
+            service.close()
+
+
+@pytest.mark.unit
 def test_workspace_errors_name_the_allowed_roots(tmp_path: Path) -> None:
     service = _service(tmp_path, _Recording("one"))
     try:

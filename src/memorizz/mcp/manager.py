@@ -546,7 +546,11 @@ class MCPClientManager:
                 authenticated = (
                     server.auth.type == "none"
                     or bool(record.get("bearer_token"))
-                    or bool(record.get("oauth_tokens"))
+                    # Tokens the server has since refused do not count.
+                    or (
+                        bool(record.get("oauth_tokens"))
+                        and not record.get("sign_in_lapsed_at")
+                    )
                 )
                 statuses.append(
                     {
@@ -813,6 +817,20 @@ class MCPClientManager:
             metrics[f"operation:{operation}"] = (
                 metrics.get(f"operation:{operation}", 0) + 1
             )
+        if ok:
+            self._note_sign_in_works(server_name)
+
+    def _note_sign_in_works(self, server_name: str) -> None:
+        """A request the server accepted ends a lapsed sign-in."""
+        try:
+            server = self.get_server(server_name)
+            ref = server.auth.credential_ref
+            if server.auth.type != "oauth" or not ref:
+                return
+            if self.credential_store.get(ref).get("sign_in_lapsed_at"):
+                self.credential_store.update(ref, {"sign_in_lapsed_at": None})
+        except Exception as exc:
+            logger.debug("Could not clear a lapsed MCP sign-in: %s", exc)
 
     def diagnostics(self) -> Dict[str, Any]:
         with self._metrics_lock:
@@ -834,6 +852,29 @@ class MCPClientManager:
         return value
 
     def _safe_error(
+        self, exc: BaseException, server: MCPServerConfig
+    ) -> MCPClientError:
+        error = self._classified_error(exc, server)
+        if error.code == "authorization_required":
+            self._note_sign_in_lapsed(server)
+        return error
+
+    def _note_sign_in_lapsed(self, server: MCPServerConfig) -> None:
+        """A saved sign-in the server just refused is not a sign-in: say so
+        in the connection's status until tokens are stored again."""
+        if server.auth.type != "oauth" or not server.auth.credential_ref:
+            return
+        try:
+            record = self.credential_store.get(server.auth.credential_ref)
+            if record.get("oauth_tokens") and not record.get("sign_in_lapsed_at"):
+                self.credential_store.update(
+                    server.auth.credential_ref,
+                    {"sign_in_lapsed_at": datetime.now(timezone.utc).isoformat()},
+                )
+        except Exception as exc:  # the call's own error is what matters
+            logger.debug("Could not record a lapsed MCP sign-in: %s", exc)
+
+    def _classified_error(
         self, exc: BaseException, server: MCPServerConfig
     ) -> MCPClientError:
         structured = _find_mcp_error(exc)
@@ -866,7 +907,11 @@ class MCPClientManager:
             )
         ):
             return MCPAuthorizationRequired(
-                f"Authorization is required for MCP server '{server.name}'",
+                f"Authorization is required for MCP server '{server.name}': it "
+                "is not signed in, or its saved sign-in no longer works. Its "
+                "tools will keep failing until the user signs in again, so "
+                "stop calling them and tell the user to sign in to "
+                f"'{server.name}' (the app shows them a sign-in button).",
                 server.name,
             )
         retryable = any(

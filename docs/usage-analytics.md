@@ -36,6 +36,7 @@ not inferred from response length.
 | --- | --- |
 | Input/output tokens | Provider response usage, including usage-bearing streaming events. Missing usage is unknown. |
 | Calculated charge | Measured token counts multiplied by a versioned rate card, calculated with `Decimal`. Not a provider invoice. |
+| Reported charge | The dollar amount a gateway returns with each response. OpenRouter reports it, so its calls are priced without a rate card, for any model it serves. Recorded as `cost_status: provider_reported`. |
 | Memory prompt tokens | Approximate `ceil(rendered_characters / 4)`, per memory type and model call. Not exact tokenizer output or billed-token allocation. |
 | Retrieval latency | Measured wall time around instrumented memory reads, including failures. Not causal attribution of model generation latency. |
 | Model latency | Recorded call duration; streaming follows the existing provider-stream timing contract. |
@@ -72,6 +73,13 @@ Unknown providers/models/tiers or incomplete token details yield `cost_usd: null
 and a reason. This includes local models: unconfigured pricing does not mean
 free hardware. OpenAI-compatible custom endpoints are identified as
 `openai_compatible` and never inherit OpenAI list pricing automatically.
+
+Calls through OpenRouter are the exception to needing a card: OpenRouter
+returns what each call cost, and that amount is the call's `cost_usd`, with
+`cost_status` set to `provider_reported` and `pricing_version` set to
+`openrouter-reported`. A free model reports `0`, which is a price, not a
+missing one. If a response carries no charge, the call falls back to a rate
+card for `openrouter` and the model, and is unpriced without one.
 
 Actual response `service_tier` is retained. If absent, the default standard tier
 is explicitly assumed in the quote's `cost_reason`. Configure separate cards
@@ -162,7 +170,7 @@ tokens or add provider totals to input/output totals.
 #### Rate cards page
 
 You can also price a model without code. Open **Usage & cost**, then **Rate
-cards**. A "calls without a price" item on the Overview links there with the
+cards**. A "calls without a price" item on the Dashboard links there with the
 provider, model and tier filled in. Enter input, cached input and output prices
 per million tokens and a public HTTPS page that lists them. For a model you run
 yourself, such as one on Ollama, tick **Local model, no charge**; the card cites
@@ -178,7 +186,7 @@ cards read-only; change them in code.
 Set a monthly budget in USD on the **Usage & cost** page, with an alert
 percentage (80 by default). The panel shows known spend since the first of the
 month in UTC, a progress bar and a straight-line projection to month end. When
-spend reaches the alert, the Overview lists it under **Needs attention**; past
+spend reaches the alert, the Dashboard lists it under **Needs attention**; past
 the budget, the item turns red. Spend counts only priced calls. The panel says
 how many calls have no price and links to **Rate cards**. The budget is saved
 to `usage_budget.json` in `MEMORIZZ_HOME`. Figures are cached for five minutes,

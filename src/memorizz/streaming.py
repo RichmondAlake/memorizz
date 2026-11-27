@@ -256,6 +256,9 @@ class _Session:
         self.answer_finished = False
         self.outcome = "completed"
         self.error_code = None
+        # A sentence for the person when a run fails for a reason they can
+        # act on; never the model's output or a request's content.
+        self.error_message = None
         self.approval = None
         self.persistence = {
             "conversation": "unknown",
@@ -360,6 +363,13 @@ class _Session:
                 )[:240],
                 status=event.get("status"),
                 span_id=event.get("span_id"),
+                # What to show a person for the result (a table, a list).
+                **(
+                    {"display": event["display"]}
+                    if event["trace_kind"] == "tool_result"
+                    and isinstance(event.get("display"), dict)
+                    else {}
+                ),
                 **(
                     {"reason_code": str(event["outcome_reason_code"])[:80]}
                     if event["trace_kind"] == "tool_result"
@@ -386,6 +396,23 @@ class _Session:
             from .observability.prompt_cache import add_call_usage
 
             add_call_usage(self.usage, event)
+            cost = event.get("cost_usd")
+            if (
+                event.get("cost_status") in {"calculated", "provider_reported"}
+                and cost is not None
+            ):
+                try:
+                    self.usage["cost_usd"] = round(
+                        float(self.usage.get("cost_usd") or 0.0) + float(cost), 8
+                    )
+                except (TypeError, ValueError):
+                    self.usage["unpriced_calls"] = (
+                        int(self.usage.get("unpriced_calls") or 0) + 1
+                    )
+            elif event.get("cost_status") is not None:
+                self.usage["unpriced_calls"] = (
+                    int(self.usage.get("unpriced_calls") or 0) + 1
+                )
         elif kind == "trace" and event.get("trace_kind") == "model_call":
             self.emit(
                 "status",
@@ -861,8 +888,15 @@ def agent_event_stream(
                 session.error_code = (
                     "cancelled"
                     if stream.cancellation.cancelled
-                    else getattr(exc, "code", "stream_error")
+                    # A provider's own error has a ``code`` of None; the
+                    # code its error event gave stands.
+                    else getattr(exc, "code", None)
+                    or session.error_code
+                    or "stream_error"
                 )
+                detail = getattr(exc, "detail", None)
+                if isinstance(detail, str) and detail.strip():
+                    session.error_message = detail.strip()[:500]
             finally:
                 if active_agent is not None and hasattr(
                     active_agent, "set_delegation_event_callback"
@@ -892,6 +926,11 @@ def agent_event_stream(
                         error_code=str(session.error_code)[:240]
                         if session.error_code
                         else None,
+                        **(
+                            {"error_message": session.error_message}
+                            if session.error_message and session.outcome == "error"
+                            else {}
+                        ),
                         persistence=session.persistence,
                         usage=session.usage or None,
                         **{k: v for k, v in identity.items() if k != "run_id"},

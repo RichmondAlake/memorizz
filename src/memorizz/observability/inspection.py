@@ -61,6 +61,7 @@ WATERFALL_ATTRIBUTES = (
     "outcome",
     "outcome_reason_code",
     "stop_reason",
+    "trace_export",
     "cache_decision",
     "memory_supplied_count",
     "memory_candidate_count",

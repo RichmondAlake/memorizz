@@ -1,0 +1,18 @@
+flowchart LR
+    subgraph TEAM["fern-ember: the team"]
+        direction TB
+        D[(Spring Sale decision)]:::mem
+        H[(Handbook)]:::mem
+    end
+    subgraph DESK["support-desk: Sam only"]
+        direction TB
+        P[(A customer's order,<br/>address and complaint)]:::private
+    end
+    M[Mara]:::agent --> TEAM
+    C[Cole]:::agent --> TEAM
+    S[Sam]:::agent --> TEAM
+    S --> DESK
+    C -. "cannot read" .-x DESK
+    classDef agent fill:#14171c,stroke:#6f7cff,color:#f2f4f7;
+    classDef mem fill:#0f2a1f,stroke:#3ddc97,color:#eafff5;
+    classDef private fill:#2a1620,stroke:#ff7aa2,color:#ffeef3;

@@ -1,0 +1,19 @@
+sequenceDiagram
+    autonumber
+    participant You
+    participant A as Assistant (in its cloud)
+    participant S as MemoRizz MCP server
+    participant Mem as Shared memory
+    You->>A: add a connector, here is the URL
+    A->>S: call the memory (no token yet)
+    S-->>A: 401, and where to sign in
+    A->>S: who am I - register or show my client document
+    A-->>You: opens the approval page in your browser
+    You->>S: pairing code, Allow
+    S-->>A: a one-time code
+    A->>S: swap it for a token (PKCE)
+    S-->>A: access token (1 hour) and refresh token
+    A->>S: search - when does the sale end?
+    S->>Mem: look in fern-ember only
+    Mem-->>S: the Spring Sale record
+    S-->>A: 3 to 12 March 2027

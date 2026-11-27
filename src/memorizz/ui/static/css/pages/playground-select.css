@@ -5,6 +5,17 @@
     cursor: pointer;
 }
 
+/* Clicked, and the agent's page is on its way. */
+.pg .fleet-table tbody tr.is-opening {
+    cursor: progress;
+    background: color-mix(in srgb, var(--accent-primary) 12%, transparent);
+}
+
+.pg .fleet-table tbody tr.is-opening .pg-open {
+    opacity: 1;
+    color: var(--text-secondary);
+}
+
 .pg .pg-name {
     max-width: 320px;
 }
@@ -429,3 +440,76 @@
         transform: none;
     }
 }
+
+/* The page's action, top right, clear of the centred greeting below it. */
+.chat-home-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: -8px;
+}
+
+/* The model picker sits beside the agent picker, in the same pill. */
+.chat-home-modelpick select { max-width: 200px; font-family: var(--console-mono); font-size: 12px; font-weight: 400; color: var(--text-secondary); }
+.chat-home-modelpick .ms-button { font-family: var(--console-mono); font-size: 12px; color: var(--text-secondary); }
+.chat-home-model-other {
+    flex: 0 1 180px;
+    min-width: 0;
+    height: 32px;
+    padding: 0 10px;
+    background: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    color: var(--text-primary);
+    font-family: var(--console-mono);
+    font-size: 12px;
+}
+.chat-home-model-other[hidden] { display: none; }
+.chat-home-model-other:focus-visible { outline: none; border-color: var(--accent-primary); }
+@media (max-width: 640px) { .chat-home-modelpick { display: none; } }
+
+/* ---------- First run: a store with no agent yet ---------- */
+.first-run-model { color: var(--text-muted); font-size: 12px; }
+.first-run-model .mono { color: var(--text-secondary); }
+.first-run-note { max-width: 560px; margin: 14px auto 0; color: var(--text-muted); font-size: 12.5px; line-height: 1.5; text-align: center; }
+.first-run-setup {
+    width: min(640px, 100%);
+    margin: 18px auto 0;
+    padding: 16px 18px;
+    background: var(--bg-secondary);
+    border-radius: 14px;
+    color: var(--text-secondary);
+    font-size: 13.5px;
+    line-height: 1.55;
+    text-align: left;
+}
+.first-run-setup p { margin: 0 0 12px; }
+.first-run-setup code, .chat-home-sub code { font-family: var(--console-mono); font-size: 12.5px; }
+.first-run-setup-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.first-run-section { margin-top: 36px; }
+.first-run-card .chat-home-card-text span {
+    display: -webkit-box;
+    white-space: normal;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+.first-run-more { margin: 10px 0 0; color: var(--text-muted); font-size: 12.5px; }
+.first-run-more a { color: var(--accent-primary); text-decoration: none; }
+.first-run-more a:hover { text-decoration: underline; }
+.first-run-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px 24px; margin: 0; padding: 0; list-style: none; }
+.first-run-steps li { display: flex; gap: 10px; align-items: flex-start; }
+.first-run-step-number {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    background: var(--bg-hover);
+    border-radius: 50%;
+    color: var(--text-secondary);
+    font-size: 11.5px;
+    font-weight: 600;
+}
+.first-run-step-text { display: grid; gap: 2px; min-width: 0; font-size: 13px; }
+.first-run-step-text strong { color: var(--text-primary); font-weight: 600; }
+.first-run-step-text span { color: var(--text-muted); font-size: 12.5px; line-height: 1.45; }

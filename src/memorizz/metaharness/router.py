@@ -120,6 +120,7 @@ class HarnessRouter:
             "deepseek",
             "pi",
             "hermes",
+            "droid",
         ),
         allowlist: Optional[Iterable[str]] = None,
     ) -> None:

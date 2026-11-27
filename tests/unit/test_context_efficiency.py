@@ -327,7 +327,7 @@ def test_system_prompt_is_byte_stable_across_turns(memagent_with_mocks):
     assert first == second
     # Volatile markers must not appear in the static prompt.
     assert "Recent tool outputs" not in first
-    assert "Entity memory facts:" not in first
+    assert "Entity memory facts" not in first
 
 
 def test_system_prompt_does_not_duplicate_tool_descriptions(memagent_with_mocks):

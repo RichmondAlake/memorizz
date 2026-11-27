@@ -140,7 +140,8 @@ def test_the_ui_connects_at_startup_from_the_environment(home, monkeypatch):
     app = create_app(startup_connect="env")
     with TestClient(app, follow_redirects=False) as client:
         assert state._state["provider_type"] == "filesystem"
-        assert client.get("/").headers["location"] == "/dashboard"
+        # Home is the playground; with no agent yet, its list of agents.
+        assert client.get("/").headers["location"] == "/playground"
         page = client.get("/dashboard").text
     assert '<span class="ui-conn-provider">FileSystem</span>' in page
 

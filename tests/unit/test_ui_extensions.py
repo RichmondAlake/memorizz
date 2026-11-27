@@ -130,3 +130,56 @@ def test_a_broken_extension_is_skipped(app_with, tmp_path):
 def test_extensions_can_be_switched_off(monkeypatch):
     monkeypatch.setenv("MEMORIZZ_UI_EXTENSIONS", "off")
     assert extensions.discover() == []
+
+
+def test_extension_self_authenticated_paths_bypass_ui_login_only_on_declared_path(
+    app_with, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MEMORIZZ_UI_AUTH_TOKEN", "operator-secret-token-123456")
+    self_auth_ext = """
+        from fastapi import APIRouter, Request
+        from fastapi.responses import JSONResponse
+        from memorizz.ui.extensions import UIExtension
+
+        router = APIRouter()
+
+        @router.post("/lab/publish")
+        async def lab_publish(request: Request):
+            if request.headers.get("authorization") != "Bearer scoped-key":
+                return JSONResponse({"ok": False}, status_code=401)
+            return {"ok": True}
+
+        @router.get("/lab/private")
+        async def lab_private():
+            return {"secret": True}
+
+        def ui_extension():
+            return UIExtension(
+                key="lab",
+                label="Lab",
+                href="/lab",
+                router=router,
+                self_authenticated_paths=("/lab/publish",),
+            )
+    """
+    (tmp_path / "lab_ext.py").write_text(
+        textwrap.dedent(self_auth_ext), encoding="utf-8"
+    )
+    app = app_with("lab_ext")
+    client = TestClient(app, follow_redirects=False)
+
+    # Declared path reaches the handler even cross-origin and without UI auth.
+    ok = client.post(
+        "/lab/publish",
+        headers={
+            "Authorization": "Bearer scoped-key",
+            "Origin": "https://other.example",
+        },
+    )
+    assert ok.status_code == 200 and ok.json() == {"ok": True}
+    # Handler itself rejects bad key.
+    bad = client.post("/lab/publish", headers={"Authorization": "Bearer wrong"})
+    assert bad.status_code == 401
+    # Undeclared path stays behind UI auth even when carrying the scoped key.
+    blocked = client.get("/lab/private", headers={"Authorization": "Bearer scoped-key"})
+    assert blocked.status_code == 401

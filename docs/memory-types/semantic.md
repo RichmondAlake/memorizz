@@ -138,6 +138,30 @@ user's record by its key (`EntityMemory.get_by_identity_key`) rather than
 searching by meaning: no query embedding and no vector search. The policy is
 saved with the agent, and `agent.describe_memory()["entity_policy"]` shows it.
 
+### Readers of a shared record
+
+When several agents run in one memory ID they share its entity records, and
+any of them that can write a record can write it wrong. `writes=False` makes
+an agent a reader:
+
+```python
+copywriter = (
+    MemAgentBuilder()
+    .with_memory_ids(["team"])
+    .with_entity_memory(True, policy={"writes": False})
+    .build()
+)
+```
+
+A reader is handed the records with each request and can look them up, and it
+has no `entity_memory_upsert` tool, no capture after a turn and no routing to
+entity memory. Its prompt says the records are the current values: where an
+earlier message disagrees with a record, the record is right. Give the pen to
+the agent that owns the decision and make the others readers. The
+[shared memory notebooks](https://github.com/RichmondAlake/memorizz/tree/main/examples/shared_memory)
+show why: without it, a copywriter that found the original decision in the
+conversation wrote the old date back over the new one.
+
 ### Where each fact came from
 
 Each attribute keeps the conversation that taught it (`thread_id`; the tool and

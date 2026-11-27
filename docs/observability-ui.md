@@ -8,6 +8,10 @@ without scanning and deserializing every conversation row. Traces cover the
 model/tool loop, context provenance, semantic-cache decisions, verified host
 outcomes, and learning signals.
 
+Whether an agent is traced, and whether its traces are also sent to another
+service such as Sentry, is set on the agent: see
+[Observability Providers](guides/observability-providers.md).
+
 ## What is captured
 
 | Evidence | Examples |
@@ -73,7 +77,9 @@ print(agent.trace_url())
 argument. Work a tagged turn starts carries its tags too:
 
 - **Delegates:** a delegate agent's turn keeps the parent turn's tags, with its
-  own tags added.
+  own tags added. The coordinator's turn is a run of its own beside its
+  delegates' runs: it holds the model call that planned the work and the one
+  that combined the results, each with its tokens and time.
 - **Harness tasks:** a harness task created during the turn keeps them in
   `task.metadata["trace_tags"]`, and its trace is tagged with them.
 
@@ -164,7 +170,7 @@ agent.record_task_outcome(
 Each verdict shows on its turn's result in the Traces timeline, such as
 **Verdict: fail · llm-judge · wrong answer · score 0.0**. A turn whose newest
 verdict from any grader is a failure appears under **Needs attention** on the
-Overview, linked to the newest such turn. Re-grading a turn with the same
+Dashboard, linked to the newest such turn. Re-grading a turn with the same
 grader replaces that grader's verdict there. Needs attention reads the newest
 1,000 recorded outcomes, verified or not. Tenant-scoped UI accounts don't see
 them, as on the Traces page.
@@ -252,7 +258,7 @@ Each model result says whether it wrote text or asked for tools.
 Accepted recommendations create draft experiments. They do not edit a live
 prompt, policy, tool, or learned skill automatically.
 
-The **Overview** and **Agents** pages summarize runs over the last 24 hours,
+The **Dashboard** and **Agents** pages summarize runs over the last 24 hours,
 7, 30 or 90 days, or a **Custom** start and end in UTC. Hover over or focus a
 bar in **Runs over time** to see its period, runs, failures, tokens and spend.
 Click it to open that period, or the run itself when it holds one. Each

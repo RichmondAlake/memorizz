@@ -1,0 +1,15 @@
+sequenceDiagram
+    autonumber
+    participant You
+    participant Mara
+    participant Mem as Shared memory
+    participant Sam
+    participant Cust as Customer
+    You->>Mara: The Spring Sale runs 3 to 9 March…
+    Mara->>Mem: upsert entity "Spring Sale"
+    Mem-->>Mara: saved
+    Note over Mem: One record. Nothing was sent to Cole or Sam.
+    Cust->>Sam: Are gift cards in the sale?
+    Sam->>Mem: what do we know about the sale?
+    Mem-->>Sam: Spring Sale record + handbook rule
+    Sam-->>Cust: No, houseplants and pots only.

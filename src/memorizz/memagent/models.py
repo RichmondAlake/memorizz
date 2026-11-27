@@ -52,6 +52,11 @@ class MemAgentModel(BaseModel):
     # models). Never credentials: those come from the environment.
     voice: Optional[bool] = False
     voice_config: Optional[Dict[str, Any]] = None
+    # Observability: whether turns are traced (None and True: yes), and the
+    # ObservabilityConfig of where they go besides MemoRizz's own store
+    # (None: nowhere else). Never credentials: those come from the environment.
+    observability: Optional[bool] = None
+    observability_config: Optional[Dict[str, Any]] = None
     # What persona learning has done: last review, a change waiting for review.
     persona_learning_state: Optional[Dict[str, Any]] = None
     # Memory routing of the agent's own writes (MemoryRoutingConfig); None = off.

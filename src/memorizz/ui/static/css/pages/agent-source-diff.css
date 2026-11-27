@@ -1,0 +1,677 @@
+/* What an agent changed in its own source, and its files, drawn the way a
+   code editor draws them. Shared by the diff page and the file page. */
+
+.ed-scope {
+    --ed-bg: #1e1e1e;
+    --ed-fg: #d4d4d4;
+    --ed-bar: #252526;
+    --ed-border: #333333;
+    --ed-num: #6e7681;
+    --ed-num-on: #c6c6c6;
+    --ed-hover: rgba(255, 255, 255, 0.04);
+    --ed-add: rgba(155, 185, 85, 0.2);
+    --ed-add-mark: rgba(155, 185, 85, 0.42);
+    --ed-add-edge: #587c0c;
+    --ed-del: rgba(255, 0, 0, 0.2);
+    --ed-del-mark: rgba(255, 0, 0, 0.42);
+    --ed-del-edge: #94151b;
+    --ed-hatch: rgba(204, 204, 204, 0.1);
+    --ed-fold: rgba(86, 156, 214, 0.1);
+    --ed-target: rgba(255, 213, 0, 0.14);
+    --ed-plus: #81b88b;
+    --ed-minus: #c74e39;
+    --ed-mod: #e2c08d;
+    --tk-flow: #c586c0;
+    --tk-kw: #569cd6;
+    --tk-str: #ce9178;
+    --tk-com: #6a9955;
+    --tk-num: #b5cea8;
+    --tk-fn: #dcdcaa;
+    --tk-cls: #4ec9b0;
+    --tk-self: #9cdcfe;
+    --tk-const: #4fc1ff;
+    --ed-mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+body.theme-light .ed-scope {
+    --ed-bg: #ffffff;
+    --ed-fg: #1f1f1f;
+    --ed-bar: #f3f3f3;
+    --ed-border: #e1e4e8;
+    --ed-num: #8c959f;
+    --ed-num-on: #1f1f1f;
+    --ed-hover: rgba(0, 0, 0, 0.035);
+    --ed-add: rgba(155, 185, 85, 0.22);
+    --ed-add-mark: rgba(120, 170, 40, 0.4);
+    --ed-add-edge: #587c0c;
+    --ed-del: rgba(255, 0, 0, 0.13);
+    --ed-del-mark: rgba(255, 0, 0, 0.26);
+    --ed-del-edge: #ad0707;
+    --ed-hatch: rgba(34, 34, 34, 0.09);
+    --ed-fold: rgba(0, 102, 204, 0.06);
+    --ed-target: rgba(255, 200, 0, 0.22);
+    --ed-plus: #587c0c;
+    --ed-minus: #ad0707;
+    --ed-mod: #895503;
+    --tk-flow: #af00db;
+    --tk-kw: #0000ff;
+    --tk-str: #a31515;
+    --tk-com: #008000;
+    --tk-num: #098658;
+    --tk-fn: #795e26;
+    --tk-cls: #267f99;
+    --tk-self: #001080;
+    --tk-const: #0070c1;
+}
+
+/* --- the controls above the code --- */
+
+.sdiff-pick select {
+    max-width: 320px;
+    min-height: 32px;
+    padding: 4px 10px;
+    color: var(--text-primary);
+    font-size: 13px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+}
+
+.sdiff-toggle { display: inline-flex; }
+.sdiff-toggle .btn { border-radius: 0; }
+.sdiff-toggle .btn:first-child { border-radius: 7px 0 0 7px; }
+.sdiff-toggle .btn:last-child { margin-left: -1px; border-radius: 0 7px 7px 0; }
+.sdiff-toggle .btn[aria-pressed="true"] {
+    color: var(--accent-primary);
+    background: var(--nav-active-bg, color-mix(in srgb, var(--accent-primary) 13%, transparent));
+}
+
+.sdiff-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px 24px;
+}
+
+.sdiff-summary-text { min-width: 0; flex: 1 1 320px; }
+.sdiff-summary-text h2 { margin: 0; overflow-wrap: anywhere; }
+.sdiff-summary-text p { margin: 2px 0 0; }
+.sdiff-summary-side { display: flex; align-items: center; gap: 8px; }
+.sdiff-total { margin-right: 6px; color: var(--text-muted); font-size: 13px; white-space: nowrap; }
+
+.sdiff-counts { font-family: var(--ed-mono); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sdiff-plus { color: var(--ed-plus); }
+.sdiff-minus { color: var(--ed-minus); }
+
+.sdiff-layout { display: block; }
+
+.has-files .sdiff-layout {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 20px;
+    align-items: start;
+}
+
+.sdiff-files {
+    position: sticky;
+    top: calc(var(--sticky-top, 0px) + 16px);
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    max-height: calc(100vh - var(--app-bar-height, 52px) - 48px);
+    overflow-y: auto;
+}
+
+.sdiff-files[hidden], .sdiff-summary[hidden] { display: none; }
+
+.sdiff-files h2 {
+    margin: 0 0 6px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.sdiff-files a {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 5px 8px;
+    color: var(--text-primary);
+    font-size: 13px;
+    text-decoration: none;
+    border-radius: 5px;
+}
+
+.sdiff-files a:hover { background: var(--bg-secondary); }
+.sdiff-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sdiff-main { min-width: 0; }
+.sdiff-note { margin: 0; padding: 12px 14px; color: var(--ed-num); font-size: 13px; }
+
+/* --- one file, as an editor --- */
+
+.ed-file {
+    margin-bottom: 16px;
+    overflow: hidden;
+    color: var(--ed-fg);
+    background: var(--ed-bg);
+    border: 1px solid var(--ed-border);
+    border-radius: 8px;
+    scroll-margin-top: calc(var(--app-bar-height, 52px) + 12px);
+}
+
+.ed-file > summary,
+.ed-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 36px;
+    padding: 0 12px;
+    font-size: 13px;
+    background: var(--ed-bar);
+}
+
+.ed-file > summary { cursor: pointer; list-style: none; }
+.ed-file[open] > summary, .ed-bar { border-bottom: 1px solid var(--ed-border); }
+.ed-file > summary::-webkit-details-marker { display: none; }
+
+.ed-file > summary::before {
+    content: "";
+    flex: 0 0 auto;
+    width: 6px;
+    height: 6px;
+    margin: 0 2px;
+    border-right: 1.5px solid var(--ed-num);
+    border-bottom: 1.5px solid var(--ed-num);
+    transform: rotate(-45deg);
+    transition: transform 0.12s ease;
+}
+
+.ed-file[open] > summary::before { transform: rotate(45deg); }
+
+.ed-file-name {
+    display: flex;
+    flex: 1 1 auto;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+}
+
+.ed-file-name strong { flex: 0 0 auto; font-weight: 500; }
+
+.ed-file-dir {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--ed-num);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ed-status {
+    flex: 0 0 auto;
+    width: 14px;
+    font-family: var(--ed-mono);
+    font-size: 12px;
+    font-weight: 600;
+    text-align: center;
+    color: var(--ed-mod);
+}
+
+.ed-status--added { color: var(--ed-plus); }
+.ed-status--deleted { color: var(--ed-minus); }
+
+.ed-open {
+    flex: 0 0 auto;
+    padding: 3px 9px;
+    color: var(--ed-fg);
+    font-size: 12px;
+    text-decoration: none;
+    border: 1px solid var(--ed-border);
+    border-radius: 5px;
+}
+
+.ed-open:hover { background: var(--ed-hover); }
+.ed-scroll { overflow-x: auto; }
+
+.ed-table {
+    width: 100%;
+    font-family: var(--ed-mono);
+    font-size: 12px;
+    line-height: 19px;
+    border-collapse: collapse;
+    border-spacing: 0;
+}
+
+.ed-table tbody:first-of-type tr:first-child > td { padding-top: 4px; }
+.ed-table tbody:last-of-type tr:last-child > td { padding-bottom: 4px; }
+.ed-table td { padding: 0; vertical-align: top; border: 0; }
+.ed-table tbody:not(.ed-fold) tr:hover > td:not(.is-add):not(.is-del):not(.is-blank) { background: var(--ed-hover); }
+
+.ed-num {
+    width: 1%;
+    min-width: 46px;
+    padding: 0 10px 0 12px !important;
+    color: var(--ed-num);
+    text-align: right;
+    white-space: nowrap;
+    user-select: none;
+    font-variant-numeric: tabular-nums;
+}
+
+.ed-num a { color: inherit; text-decoration: none; }
+.ed-num a:hover { color: var(--ed-num-on); text-decoration: underline; }
+
+.ed-sign {
+    width: 18px;
+    text-align: center;
+    user-select: none;
+}
+
+.ed-code {
+    padding: 0 16px 0 6px !important;
+    color: var(--ed-fg);
+    white-space: pre;
+    tab-size: 4;
+}
+
+/* Side by side, each half keeps its width and a long line wraps inside it. */
+.ed-table--split { table-layout: fixed; }
+.ed-col-num { width: 56px; }
+.ed-table--split .ed-code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ed-table--split td:nth-child(3) { border-left: 1px solid var(--ed-border); }
+
+tr.is-add > td, td.is-add { background: var(--ed-add); }
+tr.is-del > td, td.is-del { background: var(--ed-del); }
+tr.is-add > .ed-sign { color: var(--ed-plus); }
+tr.is-del > .ed-sign { color: var(--ed-minus); }
+tr.is-add > .ed-num, td.ed-num.is-add, tr.is-del > .ed-num, td.ed-num.is-del { color: var(--ed-num-on); }
+
+/* Where one side has no line, the editor hatches the gap. */
+td.is-blank {
+    background: repeating-linear-gradient(-45deg, var(--ed-hatch) 0 1px, transparent 1px 7px);
+}
+
+.ed-code mark { color: inherit; background: none; border-radius: 2px; }
+.is-add .ed-code mark, .ed-code.is-add mark { background: var(--ed-add-mark); }
+.is-del .ed-code mark, .ed-code.is-del mark { background: var(--ed-del-mark); }
+
+.ed-fold td { padding: 0 !important; background: var(--ed-fold); }
+
+.ed-fold a {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 12px;
+    color: var(--ed-num);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 12px;
+    text-decoration: none;
+}
+
+.ed-fold a:hover { color: var(--ed-num-on); }
+.ed-fold-dots { width: 34px; text-align: right; letter-spacing: 1px; }
+
+.tk-flow { color: var(--tk-flow); }
+.tk-kw { color: var(--tk-kw); }
+.tk-str { color: var(--tk-str); }
+.tk-com { color: var(--tk-com); font-style: italic; }
+.tk-num { color: var(--tk-num); }
+.tk-fn { color: var(--tk-fn); }
+.tk-cls { color: var(--tk-cls); }
+.tk-self { color: var(--tk-self); }
+.tk-const { color: var(--tk-const); }
+
+/* --- the whole file --- */
+
+.ed-crumbs {
+    display: flex;
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    color: var(--ed-num);
+    font-size: 12.5px;
+}
+
+.ed-crumbs span:last-child { color: var(--ed-fg); }
+.ed-crumbs i { font-style: normal; opacity: 0.6; }
+
+.ed-bar-side {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 8px;
+    color: var(--ed-num);
+    font-size: 12px;
+}
+
+.ed-bar-side button {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    color: var(--ed-fg);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    background: none;
+    border: 1px solid var(--ed-border);
+    border-radius: 5px;
+}
+
+.ed-bar-side button:hover:not(:disabled) { background: var(--ed-hover); }
+.ed-bar-side button:disabled { opacity: 0.4; cursor: default; }
+
+/* The file's name stays in view while its lines scroll under it. */
+#sfile-root .ed-file { overflow: clip; }
+
+#sfile-root .ed-bar {
+    position: sticky;
+    top: var(--sticky-top, 0px);
+    z-index: 2;
+    border-radius: 7px 7px 0 0;
+}
+
+.ed-table--file tr { scroll-margin-top: calc(var(--app-bar-height, 52px) + 120px); }
+
+/* The strip between the numbers and the code says what changed on a line. */
+.ed-edge { width: 4px; min-width: 4px; }
+tr.is-new > .ed-edge { background: var(--ed-add-edge); }
+tr.is-old > .ed-edge { background: var(--ed-del-edge); }
+tr.is-new > .ed-code { background: var(--ed-add); }
+tr.is-old > .ed-code { background: var(--ed-del); }
+tr.is-new > .ed-num, tr.is-old > .ed-num { color: var(--ed-num-on); }
+
+tr.was-cut > .ed-edge { position: relative; }
+
+tr.was-cut > .ed-edge::before {
+    content: "";
+    position: absolute;
+    top: -4px;
+    left: 0;
+    border: 4px solid transparent;
+    border-left-color: var(--ed-minus);
+}
+
+tr.is-target > td { background: var(--ed-target) !important; }
+tr.is-target > .ed-num { color: var(--ed-num-on); }
+
+.ed-foot {
+    padding: 6px 12px;
+    color: var(--ed-num);
+    font-size: 12px;
+    background: var(--ed-bar);
+    border-top: 1px solid var(--ed-border);
+}
+
+@media (max-width: 900px) {
+    .has-files .sdiff-layout { grid-template-columns: minmax(0, 1fr); }
+    .sdiff-files { position: static; max-height: none; }
+    .sdiff-pick select { max-width: 100%; }
+}
+
+@media (max-width: 760px) {
+    .sdiff-toggle { display: none; }
+    .ed-file-dir { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ed-file > summary::before { transition: none; }
+}
+
+/* --- how a version came about: the error, the cause, the prompt, the work --- */
+
+.story { padding-bottom: 8px; }
+.story[hidden] { display: none; }
+.story-fold > summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 14px;
+    cursor: pointer;
+    list-style: none;
+}
+
+.story-fold > summary::-webkit-details-marker { display: none; }
+.story-fold > summary .panel-title { margin: 0; }
+.story-fold > summary .story-meta { flex: 1 1 200px; min-width: 0; }
+.story-fold[open] > summary { margin-bottom: 16px; }
+.story-fold:not([open]) { padding-bottom: 8px; }
+
+.story-fold > summary::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    margin: 0 2px;
+    border-right: 1.5px solid var(--text-muted);
+    border-bottom: 1.5px solid var(--text-muted);
+    transform: rotate(-45deg);
+}
+
+.story-fold[open] > summary::before { transform: rotate(45deg); }
+
+/* The bar on the diff: what changed and how to lay it out. It stays in view. */
+.sdiff-bar {
+    position: sticky;
+    top: var(--sticky-top, 0px);
+    z-index: 3;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    margin: 0 calc(var(--main-pad-x, 40px) * -1) 12px;
+    padding: 10px var(--main-pad-x, 40px);
+    background: var(--bg-primary);
+    border-bottom: 1px solid var(--border-color);
+    scroll-margin-top: var(--app-bar-height, 52px);
+}
+
+.sdiff-bar[hidden] { display: none; }
+.sdiff-bar .panel-title { margin: 0; }
+.sdiff-bar-space { flex: 1 1 auto; }
+.sdiff-files { top: calc(var(--sticky-top, 0px) + 64px) !important; }
+.story-none { margin: 0; color: var(--text-muted); font-size: 13px; }
+
+.story-steps {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.story-step {
+    position: relative;
+    display: grid;
+    grid-template-columns: 26px minmax(0, 1fr);
+    gap: 14px;
+    padding-bottom: 18px;
+}
+
+/* The line that joins one step to the next. */
+.story-step:not(:last-child)::before {
+    content: "";
+    position: absolute;
+    top: 28px;
+    bottom: 2px;
+    left: 12.5px;
+    width: 1px;
+    background: var(--border-color);
+}
+
+.story-dot {
+    display: grid;
+    width: 26px;
+    height: 26px;
+    place-items: center;
+    color: var(--step, var(--text-muted));
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    background: color-mix(in srgb, var(--step, var(--text-muted)) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--step, var(--text-muted)) 45%, transparent);
+    border-radius: 50%;
+}
+
+.story-step--error { --step: var(--ed-minus); }
+.story-step--think { --step: var(--accent-primary); }
+.story-step--ask { --step: var(--ed-mod); }
+.story-step--work { --step: var(--accent-primary); }
+.story-step--kept { --step: var(--ed-plus); }
+
+.story-body { min-width: 0; }
+
+.story-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 12px;
+    min-height: 26px;
+    margin-bottom: 6px;
+}
+
+.story-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
+
+.story-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.story-error {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 8px;
+    padding: 10px 12px;
+    background: color-mix(in srgb, var(--ed-minus) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--ed-minus) 30%, transparent);
+    border-radius: 8px;
+}
+
+.story-error code {
+    padding: 0;
+    font-family: var(--ed-mono);
+    font-size: 12.5px;
+    overflow-wrap: anywhere;
+    background: none;
+}
+
+.story-error-text { color: var(--text-primary); font-weight: 500; }
+.story-error-code { color: var(--text-secondary, var(--text-muted)); }
+.story-error-code::before { content: "› "; color: var(--ed-minus); }
+.story-frame { color: var(--accent-primary); font-family: var(--ed-mono); text-decoration: none; }
+.story-frame:hover { text-decoration: underline; }
+
+.story-note { margin: 0 0 6px; color: var(--text-muted); font-size: 12.5px; }
+.story-note a { color: var(--accent-primary); }
+
+.story-text {
+    margin: 0;
+    padding: 10px 12px;
+    overflow-x: auto;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 13px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.story-text.is-folded {
+    max-height: calc(var(--story-lines, 6) * 1.55em + 20px);
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(#000 60%, transparent);
+    mask-image: linear-gradient(#000 60%, transparent);
+}
+
+.story-more {
+    margin-top: 4px;
+    padding: 2px 0;
+    color: var(--accent-primary);
+    font-size: 12.5px;
+    cursor: pointer;
+    background: none;
+    border: 0;
+}
+
+.story-details { margin-top: 8px; }
+.story-details > summary { color: var(--text-muted); font-size: 12.5px; cursor: pointer; }
+.story-details > summary:hover { color: var(--text-primary); }
+.story-details[open] > summary { margin-bottom: 6px; }
+
+.story-trail,
+.story-checks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.story-trail li,
+.story-checks li {
+    padding: 3px 9px;
+    font-size: 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+}
+
+.story-trail li:not(:last-child)::after {
+    content: "→";
+    margin-left: 8px;
+    color: var(--text-muted);
+}
+
+.story-checks .is-ok { color: var(--ed-plus); border-color: color-mix(in srgb, var(--ed-plus) 40%, transparent); }
+.story-checks .is-bad { color: var(--ed-minus); border-color: color-mix(in srgb, var(--ed-minus) 40%, transparent); }
+
+/* The line an error named, in the change itself. */
+.ed-num.is-blamed { position: relative; scroll-margin-top: 160px; }
+
+.ed-num.is-blamed::before {
+    content: "";
+    position: absolute;
+    top: 5px;
+    left: 4px;
+    width: 8px;
+    height: 8px;
+    background: var(--ed-minus);
+    border-radius: 50%;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ed-minus) 28%, transparent);
+}
+
+/* Why a change was made: the coding model's explainer. */
+.story-summary { margin: 0 0 10px; color: var(--text-primary); font-size: 13.5px; line-height: 1.55; }
+.story-facts { display: grid; gap: 8px; margin: 0 0 8px; }
+.story-fact { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 12px; }
+.story-fact dt { color: var(--text-muted); font-size: 12.5px; }
+.story-fact dd { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.story-step--why .story-dot { background: var(--accent-primary); color: var(--bg-primary); }
+
+.ed-why {
+    display: grid;
+    grid-template-columns: 130px minmax(0, 1fr);
+    gap: 12px;
+    padding: 10px 14px;
+    background: color-mix(in srgb, var(--accent-primary) 7%, transparent);
+    border-bottom: 1px solid var(--border-subtle, var(--border-color));
+    font-size: 12.5px;
+}
+.ed-why-label { color: var(--accent-primary); font-weight: 600; }
+.ed-why ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.ed-why li { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; }
+.ed-why-line { color: var(--accent-primary); font-family: var(--console-mono); font-size: 11.5px; text-decoration: none; }
+.ed-why-line:hover { text-decoration: underline; }
+.ed-why-what { color: var(--text-primary); }
+.ed-why-reason { flex-basis: 100%; color: var(--text-secondary); line-height: 1.5; }
+@media (max-width: 700px) { .ed-why, .story-fact { grid-template-columns: 1fr; gap: 4px; } }

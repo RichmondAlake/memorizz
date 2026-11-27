@@ -169,7 +169,7 @@ external origin, not the internal bind address.
 | List stored refine cycles | `memorizz_list_refine_runs` | `memorizz:read` |
 | Compact a scoped conversation | `memorizz_compact_conversation` | `memorizz:execute` + `memorizz:write` |
 | Inspect installed harnesses | `memorizz_list_harnesses` | `memorizz:read` |
-| Start a bounded harness run | `memorizz_start_harness_run` | `memorizz:execute`; writes also require `memorizz:write` |
+| Start a bounded harness run | `memorizz_start_harness_run` | `memorizz:execute`; writes also require `memorizz:write`. `mcp_read_memory_ids` names up to 5 memories the run may read beside its `memory_id`; the plan and comparison tools take it too. A tool cannot open a run to every memory: that is set by the host |
 | Read/list harness runs | `memorizz_get_harness_run`, `memorizz_list_harness_runs` | `memorizz:read` |
 | Read normalized harness events | `memorizz_get_harness_events` | `memorizz:read` |
 | Cancel or retry an owned harness run | `memorizz_cancel_harness_run`, `memorizz_retry_harness_run` | `memorizz:execute`; retrying an edit run also requires `memorizz:write` |
@@ -432,6 +432,9 @@ Every CLI option has a deployment-friendly environment equivalent:
 | `MEMORIZZ_MCP_SERVER_HARNESS_WORKSPACE_ROOTS` | Comma-separated allowed workspace roots |
 | `MEMORIZZ_MCP_SERVER_INGEST_ROOTS` | Comma-separated folders `memorizz_ingest` may read (`--ingest-root`); default: home folder for stdio, none for HTTP |
 | `MEMORIZZ_MCP_SERVER_AGENT_IDS` | Comma-separated remote agent allowlist |
+| `MEMORIZZ_MCP_SERVER_MEMORY_IDS` | Comma-separated memories the server is limited to; reads and writes elsewhere are refused, and operations that read across memories are not available. Unset: every memory of the caller |
+| `MEMORIZZ_MCP_SERVER_READ_MEMORY_IDS` | Comma-separated memories the server may also read and never write; needs `MEMORIZZ_MCP_SERVER_MEMORY_IDS` |
+| `MEMORIZZ_MCP_SERVER_APP_MEMORY_ID` | The memory a connected app saves to when it names none (default `personal`). See [keeping apps to one memory](cloud-apps.md#keep-apps-to-one-memory) |
 | `MEMORIZZ_MCP_SERVER_ALLOW_ANONYMOUS` | Explicitly disable HTTP auth |
 | `MEMORIZZ_MCP_SERVER_STATELESS_HTTP` | Stateless Streamable HTTP sessions |
 | `MEMORIZZ_MCP_SERVER_OAUTH` | OAuth sign-in for cloud apps (`--oauth`); see [Grok Bot and ChatGPT dots](cloud-apps.md) |

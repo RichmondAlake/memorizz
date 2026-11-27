@@ -20,7 +20,16 @@ agents_app = typer.Typer(
     no_args_is_help=True,
 )
 
-_LLM_PROVIDERS = {"anthropic", "azure", "huggingface", "mlx", "ollama", "openai"}
+_LLM_PROVIDERS = {
+    "anthropic",
+    "azure",
+    "gemini",
+    "huggingface",
+    "mlx",
+    "ollama",
+    "openai",
+    "openrouter",
+}
 
 
 def _provider() -> Tuple[Any, List[str]]:
@@ -87,6 +96,30 @@ def _voice_change(
         raise typer.BadParameter(str(exc), param_hint="--voice-provider") from exc
 
 
+def _observability_change(
+    record: Any,
+    enabled: Optional[bool],
+    provider: Optional[str],
+    org: Optional[str],
+) -> "tuple[bool, Optional[Dict[str, Any]]]":
+    """The agent's observability settings after the --observability options
+    are applied."""
+    from ..observability.providers import observability_change
+
+    try:
+        return observability_change(
+            getattr(record, "observability", None) if record is not None else None,
+            getattr(record, "observability_config", None),
+            enabled=enabled,
+            provider=provider,
+            org=org,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(
+            str(exc), param_hint="--observability-provider"
+        ) from exc
+
+
 def _agent_summary(agent: Any) -> Dict[str, Any]:
     application_mode = getattr(agent, "application_mode", None)
     if hasattr(application_mode, "value"):
@@ -111,6 +144,14 @@ def _agent_summary(agent: Any) -> Dict[str, Any]:
             or ("livekit" if getattr(agent, "voice", False) else None)
         ),
         "voice_name": (getattr(agent, "voice_config", None) or {}).get("voice"),
+        "observability": getattr(agent, "observability", None) is not False,
+        "observability_provider": (
+            getattr(agent, "observability_config", None) or {}
+        ).get("provider")
+        or "memorizz",
+        "observability_org": (getattr(agent, "observability_config", None) or {}).get(
+            "org"
+        ),
         "tool_cache": bool(
             getattr(agent, "tool_cache", None)
             or getattr(agent, "tool_cache_config", None)
@@ -317,6 +358,22 @@ def create_agent(
     voice_name: Optional[str] = typer.Option(
         None, "--voice-name", help="A voice ID or name from the voice provider."
     ),
+    observability: Optional[bool] = typer.Option(
+        None,
+        "--observability/--no-observability",
+        help="Trace the agent's turns (on unless --no-observability).",
+    ),
+    observability_provider: Optional[str] = typer.Option(
+        None,
+        "--observability-provider",
+        help="memorizz (the default: traces stay in MemoRizz) or sentry "
+        "(each turn is also sent to Sentry; set SENTRY_DSN).",
+    ),
+    observability_org: Optional[str] = typer.Option(
+        None,
+        "--observability-org",
+        help="The provider's organisation slug, for links to the agent's traces.",
+    ),
     tool_cache: bool = typer.Option(
         False,
         "--tool-cache/--no-tool-cache",
@@ -396,6 +453,11 @@ def create_agent(
         voice_on, voice_config = _voice_change(None, voice, voice_provider, voice_name)
         if voice_on or voice_config:
             builder.with_voice(voice_config, enabled=voice_on)
+        traced, observability_config = _observability_change(
+            None, observability, observability_provider, observability_org
+        )
+        if not traced or observability_config:
+            builder.with_observability(observability_config, enabled=traced)
         if memory_id:
             builder.with_memory_ids(
                 [value.strip() for value in memory_id if value.strip()]
@@ -539,6 +601,22 @@ def update_agent(
         "--voice-name",
         help='A voice ID or name from the voice provider; "" for its default.',
     ),
+    observability: Optional[bool] = typer.Option(
+        None,
+        "--observability/--no-observability",
+        help="Turn tracing of the agent's turns on or off.",
+    ),
+    observability_provider: Optional[str] = typer.Option(
+        None,
+        "--observability-provider",
+        help="memorizz (traces stay in MemoRizz) or sentry (each turn is also "
+        "sent to Sentry; set SENTRY_DSN). Turns tracing on.",
+    ),
+    observability_org: Optional[str] = typer.Option(
+        None,
+        "--observability-org",
+        help='The provider\'s organisation slug, for links; "" clears it.',
+    ),
     harness_mode: Optional[str] = typer.Option(
         None,
         "--harness-mode",
@@ -570,7 +648,8 @@ def update_agent(
     ),
     raw_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ):
-    """Change a saved MemAgent's name, instruction, model, voice, harness or delegates.
+    """Change a saved MemAgent's name, instruction, model, voice, observability,
+    harness or delegates.
 
     Options left out keep their current values.
     """
@@ -596,6 +675,17 @@ def update_agent(
                 record, voice, voice_provider, voice_name
             )
             changes.update(voice=voice_on, voice_config=voice_config)
+        if (
+            observability is not None
+            or observability_provider is not None
+            or observability_org is not None
+        ):
+            traced, observability_config = _observability_change(
+                record, observability, observability_provider, observability_org
+            )
+            changes.update(
+                observability=traced, observability_config=observability_config
+            )
         if harness_mode is not None and harness_mode.strip().lower() == "off":
             changes.update(meta_harness=False, meta_harness_mode=None)
         elif (

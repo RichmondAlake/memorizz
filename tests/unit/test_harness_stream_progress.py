@@ -520,3 +520,41 @@ def test_feed_follower_relays_several_runs_and_stops_each_once():
     assert lines.count("● Codex") == 1 and lines.count("● Claude Code") == 1
     assert "  Codex · $ ls" in lines and "  Claude Code · ✗ login expired" in lines
     assert lines.count("  Codex · A done") == 1
+
+
+def test_a_turn_answered_by_a_harness_uses_the_access_its_caller_holds(tmp_path: Path):
+    """In runtime mode the whole turn runs on the harness. The folder and
+    grant the caller passes (the playground's) reach that run."""
+    from memorizz.memagent.builders import MemAgentBuilder
+
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    service = MetaHarness(
+        adapters=[_BusyHarness()],
+        run_store=SQLiteHarnessRunStore(tmp_path / "runs.sqlite3"),
+        approval_store=SQLiteApprovalStore(tmp_path / "approvals.sqlite3"),
+        allowed_workspace_roots=[str(tmp_path)],
+    )
+    agent = (
+        MemAgentBuilder()
+        .with_instruction("Answer")
+        .with_meta_harness(
+            service,
+            default_harness="busy",
+            mode="runtime",
+            config={"permissions": {"mcp_access": "none"}},
+        )
+        .build()
+    )
+    try:
+        answer = agent.run(
+            "Check the plan",
+            tool_context={"harness_parent": {"workspace": str(chosen)}},
+        )
+        (run,) = service.list_runs(limit=5)
+    finally:
+        agent.close(close_memory_provider=True)
+        service.close()
+    assert answer == "all done"
+    assert run["task"]["mode"] == "runtime"
+    assert Path(run["task"]["workspace"]).resolve() == chosen.resolve()

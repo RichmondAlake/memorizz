@@ -5,7 +5,7 @@
 {% block body_attrs %} class="page-playground" data-sidebar-scope="playground" data-sidebar-default="collapsed"{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="/static/css/playground.css?v=23">
+<link rel="stylesheet" href="/static/css/playground.css?v=37">
 <link rel="stylesheet" href="/static/css/pages/memory-evolution.css?v=8">
 <script src="/static/js/memory-evolution.js?v=8" defer></script>
 <script src="/static/js/context-history.js?v=2" defer></script>
@@ -14,8 +14,14 @@
 <!-- marked.js for markdown rendering -->
 <script src="https://cdn.jsdelivr.net/npm/marked@14.0.0/marked.min.js"></script>
 <script src="/static/js/safe-markdown.js?v=2"></script>
+<script src="/static/js/routing-form.js?v=1"></script>
+<script src="/static/js/playground-call.js?v=1" defer></script>
 <script src="/static/js/local-models.js?v=1"></script>
 <script src="/static/js/playground-timers.js?v=1" defer></script>
+<script src="/static/js/playground-displays.js?v=7"></script>
+<link rel="stylesheet" href="/static/css/pages/harnesses.css?v=31">
+<script src="/static/js/harness-trajectory.js?v=16"></script>
+<script src="/static/js/playground-harness.js?v=5" defer></script>
 <script src="/static/js/chat-preview.js?v=1" defer></script>
 <style>
     /* Local-model manager widget styles are shared in styles.css
@@ -216,7 +222,7 @@
 {% endblock %}
 
 {% block content %}
-{% from '_ui.html' import id_chip %}
+{% from '_ui.html' import id_chip, routing_fields %}
 {% if agent %}
 {% set agent_is_favorite = agent.is_favorite if agent and agent.is_favorite is not none else false %}
 {% set agent_title = agent.name or (agent.persona.name if agent.persona and agent.persona.name else 'Agent') %}
@@ -266,7 +272,8 @@
             <button type="button" class="pg-icon-btn" id="pg-rail-toggle" onclick="togglePlaygroundRail()" aria-controls="pg-rail" aria-expanded="true" title="Show or hide conversations"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9 4.5v15"/></svg></button>
             <div class="pg-topbar-title">
                 <h1><button type="button" class="pg-agent-name" id="pg-agent-name" data-mutates onclick="pgStartAgentRename()" title="Rename this agent"><span class="pg-agent-name-text">{{ agent_title }}</span><span class="sr-only"> (rename)</span><svg class="pg-agent-name-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button></h1>
-                <button type="button" class="pg-model-chip" onclick="openInspectorTab('settings')" title="{{ llm_provider }} / {{ llm_model }} · change the model in Settings">{{ llm_model }}</button>
+                <button type="button" class="pg-model-chip" onclick="pgOpenSettingsGroup('model', 'cfg-llm-provider')" title="{{ llm_provider }} / {{ llm_model }} · change the model in Settings">{{ llm_model }}</button>
+                {% if self_aware %}<a class="pg-model-chip pg-aware-chip" href="/agents/{{ agent.agent_id }}/source" title="This agent can read and change its own code. Open its source, versions and fixes.">{{ self_aware_label }}</a>{% endif %}
             </div>
             <div class="pg-topbar-actions">
                 <form method="post" action="/agents/{{ agent.agent_id }}/favorite" class="playground-favorite-form">
@@ -277,6 +284,8 @@
                         aria-label="{% if agent_is_favorite %}Remove from favorites{% else %}Add to favorites{% endif %}"><span aria-hidden="true">★</span></button>
                 </form>
                 <a class="btn btn-sm" id="pg-traces-link" href="/traces?agent_id={{ agent.agent_id }}#trace-failures">Traces</a>
+                {% set obs = observability_link(agent) %}
+                {% if obs.enabled and obs.external and obs.url %}<a class="btn btn-sm" id="pg-observability-link" href="{{ obs.url }}" target="_blank" rel="noopener noreferrer" title="This agent's traces are also sent to {{ obs.label }}. Open them there.">{{ obs.label }} ↗</a>{% endif %}
                 <a class="btn btn-sm" href="/agents/{{ agent.agent_id }}/edit">Edit</a>
                 <button type="button" class="pg-icon-btn" id="context-panel-toggle" onclick="toggleContextPanel()" aria-controls="playground-context-panel" aria-expanded="true" title="Show or hide the inspector"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M15 4.5v15"/></svg></button>
             </div>
@@ -300,6 +309,18 @@
 
         <div class="pg-composer-wrap">
             <div class="pg-timers" id="pg-timers" aria-label="Timers" hidden></div>
+            <div class="pg-call-panel" id="pg-call-panel" role="status" aria-live="polite" hidden>
+                <div class="pg-call-head">
+                    <span class="pg-call-dot" aria-hidden="true"></span>
+                    <strong id="pg-call-title">Live with {{ agent_title }}</strong>
+                    <span class="pg-call-state" id="pg-call-state">Connecting…</span>
+                    <button type="button" class="btn btn-sm" id="pg-call-end">End</button>
+                </div>
+                <div class="pg-call-lines" id="pg-call-lines"></div>
+            </div>
+            {#- A connected app that needs signing in: the button is here, so
+                nobody has to leave the conversation to find it. -#}
+            {% if agent and not ui_read_only %}<div class="pg-signin" id="pg-signin" role="region" aria-label="Sign in to a connected app" hidden></div>{% endif %}
             <div class="pg-composer" id="playground-composer">
                 <div id="pg-kb-chips" class="pg-kb-chips" style="display:none;"></div>
                 <label for="pg-query" class="sr-only">Message</label>
@@ -316,7 +337,20 @@
                     </button>
                     <span class="pg-meter pg-meter--cache" id="pg-composer-cache" hidden></span>
                     {% if harness_delegates %}<button type="button" class="pg-meter pg-hx-chip" id="pg-hx-chip" onclick="openInspectorTab('overview'); document.getElementById('pg-hx')?.scrollIntoView({block: 'nearest'})" title="What this agent's harness delegates may use · change it in the inspector">Delegates · fresh folder · no web</button>{% endif %}
+                    {% if not ui_read_only %}
+                    <span class="pg-answer" hidden>
+                        <label class="sr-only" for="pg-answer">Answered by</label>
+                        <select id="pg-answer" title="Who answers this conversation: the agent’s own model, or a harness that does the work">
+                            <option value="">{{ agent_title }}’s model</option>
+                        </select>
+                        <input id="pg-answer-model" list="pg-answer-models" aria-label="Harness model" autocomplete="off" spellcheck="false" hidden>
+                        <datalist id="pg-answer-models"></datalist>
+                    </span>
+                    {% endif %}
                     <span class="composer-spacer"></span>
+                    <button type="button" id="pg-call-btn" data-mutates class="pg-icon-btn pg-call" aria-pressed="false" aria-label="Talk with {{ agent_title }}, live" title="Talk with {{ agent_title }}, live">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10v4"/><path d="M8 7v10"/><path d="M12 4v16"/><path d="M16 7v10"/><path d="M20 10v4"/></svg>
+                    </button>
                     <button type="button" id="pg-stop-btn" class="pg-send pg-stop" onclick="stopStreaming()" style="display:none;" aria-label="Stop generating" title="Stop generating (Esc)"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor"/></svg></button>
                     <button type="button" id="pg-send-btn" data-mutates class="pg-send" onclick="sendMessage()" aria-label="Send message" title="Send (Enter)">
                         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5.5 11.5L12 5l6.5 6.5"/></svg>
@@ -391,7 +425,7 @@
             <div class="token-utilization pg-cache-card" id="pg-prompt-cache" aria-live="polite">
                 <div class="token-header">
                     <h3>Prompt cache</h3>
-                    <a class="token-summary" href="/traces/usage?agent_id={{ agent.agent_id|urlencode }}#provider-prompt-cache">Details</a>
+                    <a class="token-summary" href="/traces/usage?agent_id={{ agent.agent_id|urlencode }}&window=7d#provider-prompt-cache">Details</a>
                 </div>
                 <div class="pg-cache-stats">
                     <div><span>Read rate</span><strong id="pg-cache-read">—</strong></div>
@@ -408,16 +442,21 @@
                     <div><dt>Mode</dt><dd>{{ agent.application_mode or 'assistant' }}</dd></div>
                     <div><dt>Max tool iterations</dt><dd>{{ max_steps }}</dd></div>
                     <div><dt>Conversations</dt><dd>{{ threads|length }}</dd></div>
+                    {%- set internet_titles = {'tavily': 'Tavily', 'firecrawl': 'Firecrawl', 'exa': 'Exa', 'offline': 'Offline'} %}
+                    <div><dt>Web search</dt><dd><button type="button" class="pg-fact-link" onclick="pgOpenSettingsGroup('web', 'cfg-internet-provider')">{{ internet_titles.get(internet_provider, internet_provider) if internet_provider else 'Off' }}</button></dd></div>
+                    <div><dt>Code sandbox</dt><dd><button type="button" class="pg-fact-link" onclick="pgOpenSettingsGroup('web', 'cfg-sandbox-provider')">{{ {'e2b': 'E2B', 'daytona': 'Daytona', 'graalpy': 'GraalPy'}.get(sandbox_effective, sandbox_effective) if sandbox_effective else 'Off' }}{% if sandbox_effective and not sandbox_provider %} (default){% endif %}</button></dd></div>
+                    <div class="pg-facts-wide"><dt>Self-aware</dt><dd>{% if self_aware %}<a href="/agents/{{ agent.agent_id }}/source">{{ self_aware_label|replace('Self-aware · ', 'Yes · ')|replace('Self-aware', 'Yes') }}</a>{% else %}No · <a href="/agents/{{ agent.agent_id }}/source">give it its own source</a>{% endif %}</dd></div>
                     <div class="pg-facts-wide"><dt>Agent ID</dt><dd>{{ id_chip(agent.agent_id|string, 36) }}</dd></div>
                 </dl>
             </section>
-            {% if harness_delegates %}
-            <section class="pg-section pg-hx" id="pg-hx" aria-labelledby="pg-hx-title">
+            {% if not ui_read_only %}
+            <section class="pg-section pg-hx" id="pg-hx" aria-labelledby="pg-hx-title" data-delegates="{{ 'true' if harness_delegates else 'false' }}"{% if not harness_delegates %} hidden{% endif %}>
                 <div class="pg-section-head">
                     <h3 class="pg-section-title" id="pg-hx-title">Harness delegates</h3>
                     <span class="pg-section-meta" id="pg-hx-state">Fresh folder · no web</span>
                 </div>
-                <p class="pg-hx-note">This agent hands parts of a request to {{ harness_delegates|join(', ') }}. They work in a folder and use only the access allowed here; each starts its own harness run, listed on <a href="/harnesses">Agent Harnesses</a>.</p>
+                <p class="pg-hx-note" id="pg-hx-answer-note" hidden>This conversation is answered by a harness. It works in a folder and uses only the access allowed here; each turn is a harness run, listed on <a href="/harnesses">Agent Harnesses</a>. It reads and writes this conversation’s memory and no other.</p>
+                {% if harness_delegates %}<p class="pg-hx-note">This agent hands parts of a request to {{ harness_delegates|join(', ') }}. They work in a folder and use only the access allowed here; each starts its own harness run, listed on <a href="/harnesses">Agent Harnesses</a>.</p>{% endif %}
                 <div class="pg-hx-active" id="pg-hx-active" hidden>
                     <dl class="pg-facts">
                         <div class="pg-facts-wide"><dt>Folder</dt><dd class="mono" id="pg-hx-active-folder"></dd></div>
@@ -888,18 +927,27 @@
                     </details>
         </div>
         <div class="pg-tab-panel" role="tabpanel" id="pg-panel-settings" aria-labelledby="pg-tab-settings" hidden>
-            <p class="pg-panel-intro">Changes apply to this agent and are saved to its configuration.</p>
+            <p class="pg-panel-intro">Each group shows what is set now. Open one to change it, then save.</p>
 <form method="post" action="/agents/{{ agent.agent_id }}/playground/config" class="playground-config-form">
+        <div class="cfg-groups" id="cfg-groups">
+        <details class="cfg-group" data-cfg-group="model" id="cfg-group-model">
+            <summary>
+                <span class="cfg-group-title">Model</span>
+                <span class="cfg-group-value" data-cfg-value></span>
+                <span class="cfg-group-desc">The model that answers and how far it may go.</span>
+            </summary>
         <div class="config-grid">
             <div class="config-field">
                 <label for="cfg-llm-provider">LLM Provider</label>
                 <select id="cfg-llm-provider" name="llm_provider" onchange="onProviderChange()">
                     <option value="openai" {% if llm_provider == 'openai' %}selected{% endif %}>OpenAI</option>
                     <option value="anthropic" {% if llm_provider == 'anthropic' %}selected{% endif %}>Anthropic</option>
+                    <option value="gemini" {% if llm_provider == 'gemini' %}selected{% endif %}>Google Gemini</option>
                     <option value="azure" {% if llm_provider == 'azure' %}selected{% endif %}>Azure OpenAI</option>
                     <option value="ollama" {% if llm_provider == 'ollama' %}selected{% endif %}>Ollama (Local)</option>
                     <option value="huggingface" {% if llm_provider == 'huggingface' %}selected{% endif %}>HuggingFace</option>
                     <option value="mlx" {% if llm_provider == 'mlx' %}selected{% endif %}>MLX (Apple Silicon)</option>
+                    <option value="openrouter" {% if llm_provider == 'openrouter' %}selected{% endif %}>OpenRouter</option>
                     <option value="local-openai" {% if llm_provider == 'local-openai' %}selected{% endif %}>Local OpenAI-compatible (llama.cpp / LM Studio)</option>
                 </select>
             </div>
@@ -923,88 +971,45 @@
                 </select>
                 <p class="form-hint" id="cfg-context-window-hint">Larger windows hold more of the conversation but use more memory and run slower.</p>
             </div>
+            {{ routing_fields('config-field', 'cfg-routing') }}
             <div class="config-field">
                 <label for="cfg-max-steps">Max Tool Iterations</label>
                 <input id="cfg-max-steps" name="max_steps" type="number" value="{{ max_steps }}" min="1" max="100">
                 <p class="form-hint">Maximum tool-calling rounds per run (default: 20).</p>
             </div>
-            <div class="config-field config-field--toggle">
-                <label for="cfg-enable-entity-memory">Entity Memory</label>
-                <label class="config-toggle-option">
-                    <input id="cfg-enable-entity-memory" name="enable_entity_memory" type="checkbox" value="1" {% if enable_entity_memory %}checked{% endif %}>
-                    <span>Enable structured entity memory tools</span>
-                </label>
-                {% if entity_memory_status_error %}
-                <p class="form-hint sandbox-error-hint">{{ entity_memory_status_error }}</p>
-                {% endif %}
-            </div>
-            <div class="config-field config-field--toggle">
-                <label for="cfg-enable-workflow-memory">Workflow Memory</label>
-                <label class="config-toggle-option">
-                    <input id="cfg-enable-workflow-memory" name="enable_workflow_memory" type="checkbox" value="1" {% if enable_workflow_memory %}checked{% endif %}>
-                    <span>Enable workflow trace and step memory</span>
-                </label>
-            </div>
-            <div class="config-field config-field--toggle">
-                <label for="cfg-self-aware">Self-Awareness</label>
-                <label class="config-toggle-option">
-                    <input id="cfg-self-aware" name="self_aware" type="checkbox" value="1" {% if self_aware %}checked{% endif %}>
-                    <span>Enable host codebase inspection tools</span>
-                </label>
-            </div>
-            <div class="config-field config-field--toggle">
-                <label for="cfg-self-aware-writes">Self-Aware Writes</label>
-                <label class="config-toggle-option">
-                    <input id="cfg-self-aware-writes" name="self_aware_allow_writes" type="checkbox" value="1" {% if self_aware_allow_writes %}checked{% endif %}>
-                    <span>Allow write operations</span>
-                </label>
-            </div>
-            <div class="config-field config-field--toggle">
-                <label for="cfg-self-aware-deletes">Self-Aware Deletes</label>
-                <label class="config-toggle-option">
-                    <input id="cfg-self-aware-deletes" name="self_aware_allow_deletes" type="checkbox" value="1" {% if self_aware_allow_deletes %}checked{% endif %}>
-                    <span>Allow delete operations (requires writes)</span>
-                </label>
-            </div>
-            <div class="config-field config-field--wide">
-                <label for="cfg-self-aware-roots">Self-Aware Root Paths</label>
-                <textarea id="cfg-self-aware-roots" name="self_aware_root_paths" rows="3" placeholder="/path/to/project&#10;./relative/path">{{ self_aware_root_paths }}</textarea>
-                <p class="form-hint">One path per line (or comma-separated). Empty uses current working directory.</p>
-            </div>
-            <div class="config-field config-field--toggle">
-                <label for="cfg-automations-enabled">Automations</label>
-                <label class="config-toggle-option">
-                    <input id="cfg-automations-enabled" name="automations_enabled" type="checkbox" value="1" {% if automations_enabled %}checked{% endif %}>
-                    <span>Enable automation scheduling tools</span>
-                </label>
-            </div>
-            <div class="config-field">
-                <label for="cfg-default-timezone">Default Timezone</label>
-                <input id="cfg-default-timezone" name="default_timezone" type="text" value="{{ default_timezone }}" placeholder="America/New_York" list="memorizz-timezones" autocomplete="off" spellcheck="false">
-                <p class="form-hint">Optional IANA timezone name used when an automation does not specify timezone.</p>
-            </div>
-            <div class="config-field">
-                <label for="cfg-sandbox-provider">Sandbox Provider</label>
-                <select id="cfg-sandbox-provider" name="sandbox_provider">
-                    <option value="" {% if not sandbox_provider %}selected{% endif %}>None (disabled)</option>
-                    <option value="e2b" {% if sandbox_provider == 'e2b' %}selected{% endif %}>E2B (Cloud)</option>
-                    <option value="daytona" {% if sandbox_provider == 'daytona' %}selected{% endif %}>Daytona (Cloud)</option>
-                    <option value="graalpy" {% if sandbox_provider == 'graalpy' %}selected{% endif %}>GraalPy (Local)</option>
-                </select>
-                {% if sandbox_status_error %}
-                <p class="form-hint sandbox-error-hint">{{ sandbox_status_error }}</p>
-                {% endif %}
-            </div>
+        </div>
+        </details>
+        <details class="cfg-group" data-cfg-group="web" id="cfg-group-web">
+            <summary>
+                <span class="cfg-group-title">Web and tools</span>
+                <span class="cfg-group-value" data-cfg-value></span>
+                <span class="cfg-group-desc">Web search, code and browser tools, skills and MCP servers.</span>
+            </summary>
+        <div class="config-grid">
             <div class="config-field">
                 <label for="cfg-internet-provider">Internet Provider</label>
                 <select id="cfg-internet-provider" name="internet_provider">
                     <option value="" {% if not internet_provider %}selected{% endif %}>None (disabled)</option>
                     <option value="tavily" {% if internet_provider == 'tavily' %}selected{% endif %}>Tavily</option>
                     <option value="firecrawl" {% if internet_provider == 'firecrawl' %}selected{% endif %}>Firecrawl</option>
+                    <option value="exa" {% if internet_provider == 'exa' %}selected{% endif %}>Exa</option>
                     <option value="offline" {% if internet_provider == 'offline' %}selected{% endif %}>Offline</option>
                 </select>
                 {% if internet_status_error %}
                 <p class="form-hint sandbox-error-hint">{{ internet_status_error }}</p>
+                {% endif %}
+            </div>
+            <div class="config-field">
+                <label for="cfg-sandbox-provider">Sandbox Provider</label>
+                <select id="cfg-sandbox-provider" name="sandbox_provider">
+                    {% if sandbox_default %}<option value="" {% if not sandbox_provider %}selected{% endif %}>Default ({{ {'e2b': 'E2B', 'daytona': 'Daytona', 'graalpy': 'GraalPy'}.get(sandbox_default, sandbox_default) }}, from Settings)</option>{% endif %}
+                    <option value="none" {% if sandbox_provider == 'none' %}selected{% endif %}>None (disabled)</option>
+                    <option value="e2b" {% if sandbox_provider == 'e2b' %}selected{% endif %}>E2B (Cloud)</option>
+                    <option value="daytona" {% if sandbox_provider == 'daytona' %}selected{% endif %}>Daytona (Cloud)</option>
+                    <option value="graalpy" {% if sandbox_provider == 'graalpy' %}selected{% endif %}>GraalPy (Local)</option>
+                </select>
+                {% if sandbox_status_error %}
+                <p class="form-hint sandbox-error-hint">{{ sandbox_status_error }}</p>
                 {% endif %}
             </div>
             <div class="config-field">
@@ -1029,26 +1034,6 @@
                 <p class="form-hint sandbox-error-hint">{{ skills_marketplace_status_error }}</p>
                 {% endif %}
                 <p class="form-hint">Lets the agent search a marketplace itself. To pin a skill, attach it under Skills below.</p>
-            </div>
-            <div class="config-field">
-                <label for="cfg-persona-name">Persona Name</label>
-                <input id="cfg-persona-name" name="persona_name" type="text" value="{{ persona_name }}" placeholder="Agent name">
-            </div>
-            <div class="config-field">
-                <label for="cfg-persona-role">Persona Role</label>
-                <input id="cfg-persona-role" name="persona_role" type="text" value="{{ persona_role }}" placeholder="e.g. assistant, researcher">
-            </div>
-            <div class="config-field config-field--wide">
-                <label for="cfg-persona-goals">Persona Goals</label>
-                <textarea id="cfg-persona-goals" name="persona_goals" rows="2" placeholder="What should the agent aim to achieve?">{{ persona_goals }}</textarea>
-            </div>
-            <div class="config-field config-field--wide">
-                <label for="cfg-persona-background">Persona Background</label>
-                <textarea id="cfg-persona-background" name="persona_background" rows="2" placeholder="Relevant experience, expertise, context...">{{ persona_background }}</textarea>
-            </div>
-            <div class="config-field config-field--wide">
-                <label for="cfg-instruction">System Instruction</label>
-                <textarea id="cfg-instruction" name="instruction" rows="3" placeholder="System instruction...">{{ instruction }}</textarea>
             </div>
             <div class="config-field config-field--wide">
                 <label>Skills (.skills.md / SKILL.md)</label>
@@ -1087,22 +1072,159 @@
                 </div>
                 <p class="form-hint">Attached servers are saved immediately. Test them, sign in again or change tool permissions on <a href="/mcp?agent_id={{ active_agent_id }}">MCP connections</a>.</p>
             </div>
-
             {% if agent_tools %}
-            <div class="config-field config-field--wide">
-                <label>Registered Tools ({{ agent_tools|length }})</label>
-                <div class="config-tools-list">
-                    {% for tool in agent_tools %}
-                    <div class="config-tool-item">
-                        <span class="config-tool-name">{{ tool.name }}</span>
-                        {% if tool.description %}
-                        <span class="config-tool-desc">{{ tool.description }}</span>
-                        {% endif %}
-                    </div>
-                    {% endfor %}
+            <div class="config-field config-field--wide tools-list" id="cfg-tools">
+                <div class="tools-head">
+                    <label for="cfg-tools-filter">Tools this agent can call</label>
+                    <span class="tools-count" id="cfg-tools-count">{{ agent_tools|length }}</span>
                 </div>
+                {% if agent_tools|length > 6 %}
+                <input type="search" id="cfg-tools-filter" class="tools-filter" placeholder="Filter by name or what it does" autocomplete="off" spellcheck="false">
+                {% endif %}
+                <ul class="tools-rows" id="cfg-tools-rows">
+                    {% for tool in agent_tools|sort(attribute='name') %}
+                    <li class="tools-row" data-text="{{ (tool.name ~ ' ' ~ (tool.description or ''))|lower }}">
+                        {% if tool.description %}
+                        <details>
+                            <summary><code>{{ tool.name }}</code><span>{{ tool.description }}</span></summary>
+                            <p>{{ tool.description }}</p>
+                        </details>
+                        {% else %}
+                        <div class="tools-plain"><code>{{ tool.name }}</code></div>
+                        {% endif %}
+                    </li>
+                    {% endfor %}
+                </ul>
+                <p class="tools-none" id="cfg-tools-none" hidden>No tool matches.</p>
             </div>
             {% endif %}
+        </div>
+        </details>
+        <details class="cfg-group" data-cfg-group="memory" id="cfg-group-memory">
+            <summary>
+                <span class="cfg-group-title">Memory</span>
+                <span class="cfg-group-value" data-cfg-value></span>
+                <span class="cfg-group-desc">The extra kinds of memory this agent keeps.</span>
+            </summary>
+        <div class="config-grid">
+            <div class="config-field config-field--toggle">
+                <label for="cfg-recall-across">Across conversations</label>
+                <input type="hidden" name="recall_across_present" value="1">
+                <label class="config-toggle-option">
+                    <input id="cfg-recall-across" name="recall_across" type="checkbox" value="1" {% if recall_scope == 'across' %}checked{% endif %} {% if recall_scope == 'sealed' %}disabled{% endif %}>
+                    <span>Remember what was said in this agent's other conversations</span>
+                </label>
+                {% if recall_scope == 'sealed' %}
+                <p class="form-hint">This agent's conversations are sealed: nothing crosses between them. Change that under Conversation privacy on <a href="/agents/{{ agent.agent_id }}/edit#section-memory">the agent's page</a>.</p>
+                {% else %}
+                <p class="form-hint">On: a chat can recall the others and is given a short list of them. Off: each conversation stands alone.</p>
+                {% endif %}
+            </div>
+            <div class="config-field config-field--toggle">
+                <label for="cfg-enable-entity-memory">Entity Memory</label>
+                <label class="config-toggle-option">
+                    <input id="cfg-enable-entity-memory" name="enable_entity_memory" type="checkbox" value="1" {% if enable_entity_memory %}checked{% endif %}>
+                    <span>Enable structured entity memory tools</span>
+                </label>
+                {% if entity_memory_status_error %}
+                <p class="form-hint sandbox-error-hint">{{ entity_memory_status_error }}</p>
+                {% endif %}
+            </div>
+            <div class="config-field config-field--toggle">
+                <label for="cfg-enable-workflow-memory">Workflow Memory</label>
+                <label class="config-toggle-option">
+                    <input id="cfg-enable-workflow-memory" name="enable_workflow_memory" type="checkbox" value="1" {% if enable_workflow_memory %}checked{% endif %}>
+                    <span>Enable workflow trace and step memory</span>
+                </label>
+            </div>
+        </div>
+        </details>
+        <details class="cfg-group" data-cfg-group="persona" id="cfg-group-persona">
+            <summary>
+                <span class="cfg-group-title">Instruction and persona</span>
+                <span class="cfg-group-value" data-cfg-value></span>
+                <span class="cfg-group-desc">What the agent is told and who it is.</span>
+            </summary>
+        <div class="config-grid">
+            <div class="config-field config-field--wide">
+                <label for="cfg-instruction">System Instruction</label>
+                <textarea id="cfg-instruction" name="instruction" rows="3" placeholder="System instruction...">{{ instruction }}</textarea>
+            </div>
+            <div class="config-field">
+                <label for="cfg-persona-name">Persona Name</label>
+                <input id="cfg-persona-name" name="persona_name" type="text" value="{{ persona_name }}" placeholder="Agent name">
+            </div>
+            <div class="config-field">
+                <label for="cfg-persona-role">Persona Role</label>
+                <input id="cfg-persona-role" name="persona_role" type="text" value="{{ persona_role }}" placeholder="e.g. assistant, researcher">
+            </div>
+            <div class="config-field config-field--wide">
+                <label for="cfg-persona-goals">Persona Goals</label>
+                <textarea id="cfg-persona-goals" name="persona_goals" rows="2" placeholder="What should the agent aim to achieve?">{{ persona_goals }}</textarea>
+            </div>
+            <div class="config-field config-field--wide">
+                <label for="cfg-persona-background">Persona Background</label>
+                <textarea id="cfg-persona-background" name="persona_background" rows="2" placeholder="Relevant experience, expertise, context...">{{ persona_background }}</textarea>
+            </div>
+        </div>
+        </details>
+        <details class="cfg-group" data-cfg-group="aware" id="cfg-group-aware">
+            <summary>
+                <span class="cfg-group-title">Self-awareness</span>
+                <span class="cfg-group-value" data-cfg-value></span>
+                <span class="cfg-group-desc">Whether it can read and change files on this computer.</span>
+            </summary>
+        <div class="config-grid">
+            <div class="config-field config-field--toggle">
+                <label for="cfg-self-aware">Self-Awareness</label>
+                <label class="config-toggle-option">
+                    <input id="cfg-self-aware" name="self_aware" type="checkbox" value="1" {% if self_aware %}checked{% endif %}>
+                    <span>Enable host codebase inspection tools</span>
+                </label>
+                <p class="form-hint"><a href="/agents/{{ agent.agent_id }}/source">Its own source, versions and fixes</a></p>
+            </div>
+            <div class="config-field config-field--toggle">
+                <label for="cfg-self-aware-writes">Self-Aware Writes</label>
+                <label class="config-toggle-option">
+                    <input id="cfg-self-aware-writes" name="self_aware_allow_writes" type="checkbox" value="1" {% if self_aware_allow_writes %}checked{% endif %}>
+                    <span>Allow write operations</span>
+                </label>
+            </div>
+            <div class="config-field config-field--toggle">
+                <label for="cfg-self-aware-deletes">Self-Aware Deletes</label>
+                <label class="config-toggle-option">
+                    <input id="cfg-self-aware-deletes" name="self_aware_allow_deletes" type="checkbox" value="1" {% if self_aware_allow_deletes %}checked{% endif %}>
+                    <span>Allow delete operations (requires writes)</span>
+                </label>
+            </div>
+            <div class="config-field config-field--wide">
+                <label for="cfg-self-aware-roots">Self-Aware Root Paths</label>
+                <textarea id="cfg-self-aware-roots" name="self_aware_root_paths" rows="3" placeholder="/path/to/project&#10;./relative/path">{{ self_aware_root_paths }}</textarea>
+                <p class="form-hint">One path per line (or comma-separated). Empty uses current working directory.</p>
+            </div>
+        </div>
+        </details>
+        <details class="cfg-group" data-cfg-group="auto" id="cfg-group-auto">
+            <summary>
+                <span class="cfg-group-title">Automations</span>
+                <span class="cfg-group-value" data-cfg-value></span>
+                <span class="cfg-group-desc">Scheduled work and its timezone.</span>
+            </summary>
+        <div class="config-grid">
+            <div class="config-field config-field--toggle">
+                <label for="cfg-automations-enabled">Automations</label>
+                <label class="config-toggle-option">
+                    <input id="cfg-automations-enabled" name="automations_enabled" type="checkbox" value="1" {% if automations_enabled %}checked{% endif %}>
+                    <span>Enable automation scheduling tools</span>
+                </label>
+            </div>
+            <div class="config-field">
+                <label for="cfg-default-timezone">Default Timezone</label>
+                <input id="cfg-default-timezone" name="default_timezone" type="text" value="{{ default_timezone }}" placeholder="America/New_York" list="memorizz-timezones" autocomplete="off" spellcheck="false">
+                <p class="form-hint">Optional IANA timezone name used when an automation does not specify timezone.</p>
+            </div>
+        </div>
+        </details>
         </div>
         <div class="config-actions">
             <span class="config-dirty" id="cfg-dirty" hidden>Unsaved changes</span>
@@ -1281,6 +1403,22 @@ function syncPlaygroundModelInputMode() {
     }
 }
 
+// Answer this page's messages with another model of the agent's provider.
+function pgUseModel(model) {
+    const select = document.getElementById('cfg-llm-model');
+    const customInput = document.getElementById('cfg-llm-model-custom');
+    if (!select || !customInput || !model) return;
+    const listed = Array.from(select.options).some(function(option) { return option.value === model; });
+    if (select.style.display !== 'none') select.value = listed ? model : CUSTOM_MODEL_VALUE;
+    customInput.value = model;
+    syncPlaygroundModelInputMode();
+    const chip = document.querySelector('button.pg-model-chip');
+    if (chip) {
+        chip.textContent = model;
+        chip.title = model + ' for this page \u00b7 change the model in Settings';
+    }
+}
+
 function populateModelSelect(provider) {
     const select = document.getElementById('cfg-llm-model');
     const customInput = document.getElementById('cfg-llm-model-custom');
@@ -1354,8 +1492,22 @@ function populateModelSelect(provider) {
     syncPlaygroundModelInputMode();
 }
 
+window.MemorizzRouting && MemorizzRouting.attach(
+    document.querySelector('[data-routing]'),
+    document.getElementById('cfg-llm-provider'),
+    {{ llm_routing|tojson }}
+);
+
 function onProviderChange() {
     const provider = document.getElementById('cfg-llm-provider').value;
+    // Another provider was chosen: its default model, not the last
+    // provider's model carried over as a custom one.
+    const customInput = document.getElementById('cfg-llm-model-custom');
+    const offered = Array.isArray(PROVIDER_MODELS[provider]) ? PROVIDER_MODELS[provider] : [];
+    const current = (customInput.value || '').trim();
+    if (!offered.some(function(model) { return model.value === current; })) {
+        customInput.value = (DEFAULT_MODELS_BY_PROVIDER[provider] || (offered[0] || {}).value || '').trim();
+    }
     populateModelSelect(provider);
     playgroundCheckLocalModel();
 }
@@ -2172,9 +2324,13 @@ function renderThreadMessages(messages, memoryId) {
                 const body = traceKind === 'memory_context'
                     ? pgMemoryContextText(content)
                     : formatTraceContent(content);
+                const step = pgStepOf(event);
+                const open = step && event.root_trace_id
+                    ? `<a class="pg-trace-open" href="${escapeHtml(pgTraceUrl({thread_id: event.thread_id, root_trace_id: event.root_trace_id, turn_id: event.turn_id, step: step}))}" title="Open this step in Traces">Open in Traces</a>`
+                    : '';
                 return `
                     <div class="pg-trace-item pg-trace-item--${traceKindClass}${outcomeMeta ? ` pg-trace-item--outcome-${outcomeMeta.status}` : ''}">
-                        <div class="pg-trace-title">${escapeHtml(title)}${outcomeBadge}</div>
+                        <div class="pg-trace-title">${escapeHtml(title)}${outcomeBadge}${open}</div>
                         <div class="pg-trace-content">${escapeHtml(body)}</div>
                     </div>
                 `;
@@ -2187,6 +2343,9 @@ function renderThreadMessages(messages, memoryId) {
                 </details>
             `;
             pgAddActivityHeader(traceMessage.querySelector('.pg-activity'), msg.trace_events);
+            msg.trace_events.forEach(function(event) {
+                if (event && event.display && window.pgDisplays) window.pgDisplays.render(traceMessage, event.display);
+            });
             pgPointTracesAt(msg.trace_events);
             container.appendChild(traceMessage);
             return;
@@ -2198,7 +2357,10 @@ function renderThreadMessages(messages, memoryId) {
         const useMarkdown = (role === 'assistant' || role === 'system');
         const renderedContent = useMarkdown ? renderMarkdown(content) : escapeHtml(content);
         const mdClass = useMarkdown ? ' md-rendered' : '';
-        container.appendChild(pgMessageElement(role, `<div class="pg-message-text${mdClass}">${renderedContent}</div>`, content));
+        const stored = pgMessageElement(role, `<div class="pg-message-text${mdClass}">${renderedContent}</div>`, content);
+        container.appendChild(stored);
+        // An answer a harness gave keeps the way back to its run.
+        if (msg.harness_run && window.pgHarness) window.pgHarness.stored(stored, msg.harness_run);
     });
     scrollToBottom();
 }
@@ -2476,7 +2638,10 @@ async function loadAgentPromptCache() {
     const hitEl = document.getElementById('pg-cache-hit');
     try {
         const res = await fetch(
-            `/traces/usage.json?agent_id=${encodeURIComponent(AGENT_ID)}&max_events=5000`,
+            // The last week says whether caching works now, and keeps the
+            // read small: every recorded call ever is a long read on a store
+            // that answers a page at a time (Notion).
+            `/traces/usage.json?agent_id=${encodeURIComponent(AGENT_ID)}&window=7d&max_events=5000`,
             { cache: 'no-store' },
         );
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -2485,13 +2650,13 @@ async function loadAgentPromptCache() {
         readEl.textContent = cache.read_percent == null ? 'Unknown' : `${cache.read_percent.toFixed(1)}%`;
         hitEl.textContent = measured ? `${((100 * cache.hit) / measured).toFixed(1)}%` : 'Unknown';
         note.textContent = measured
-            ? `${cache.hit} of ${measured} recorded calls read from cache · `
+            ? `${cache.hit} of ${measured} recorded calls in the last 7 days read from cache · `
                 + `${formatCacheCount(cache.cached_tokens)} cached input tokens · `
                 + `${formatCacheCount(cache.cache_write_tokens)} written`
                 + (cache.attention && cache.warnings && cache.warnings.length
                     ? ` · ${cache.warnings[0].message}${cache.warnings[0].count > 1 ? ` (${cache.warnings[0].count}×)` : ''}`
                     : (cache.attention ? ' · needs attention, see details' : ''))
-            : 'No model calls with reported cache usage yet.';
+            : 'No model calls with reported cache usage in the last 7 days.';
     } catch (err) {
         readEl.textContent = hitEl.textContent = '—';
         note.textContent = 'Usage analytics are unavailable.';
@@ -2500,6 +2665,7 @@ async function loadAgentPromptCache() {
 
 // Plain-language reasons for the safe failure codes the stream reports.
 const PG_AGENT_ID = {{ (agent.agent_id if agent else '')|tojson }};
+window.PG_DISPLAY_AGENT_ID = PG_AGENT_ID;
 const PG_TOOL_REASONS = {
     invalid_tool_invocation: 'not callable here: undisclosed, unregistered in this process, or bad arguments',
     tool_budget_exhausted: 'per-turn tool budget used up',
@@ -2531,7 +2697,18 @@ function pgLiveActivity(messageEl, event) {
     const waiting = done && String(event.status) === 'approval_required';
     const failed = done && !waiting && event.status && !['success', 'completed', 'ok'].includes(String(event.status));
     item.className = done ? (failed ? 'is-failed' : waiting ? 'is-running' : 'is-done') : 'is-running';
-    item.textContent = (done ? (failed ? 'Failed ' : waiting ? 'Waiting for approval: ' : 'Used ') : 'Using ') + event.tool_name;
+    const said = (done ? (failed ? 'Failed ' : waiting ? 'Waiting for approval: ' : 'Used ') : 'Using ') + event.tool_name;
+    // A finished step is a link to its own row in Traces.
+    if (done && event.span_id && pgLiveTurn.root_trace_id) {
+        const link = document.createElement('a');
+        link.className = 'pg-live-link';
+        link.href = pgTraceUrl(Object.assign({}, pgLiveTurn, {step: event.span_id}));
+        link.title = 'Open this step in Traces';
+        link.textContent = said;
+        item.replaceChildren(link);
+    } else {
+        item.textContent = said;
+    }
     if (failed && event.reason_code) {
         const reason = document.createElement('span');
         reason.className = 'pg-live-reason';
@@ -2539,6 +2716,8 @@ function pgLiveActivity(messageEl, event) {
         item.appendChild(reason);
     }
     list.hidden = false;
+    // What the tool found: pages, a table, a monitor (playground-displays.js).
+    if (done && event.display && window.pgDisplays) window.pgDisplays.render(messageEl, event.display);
 }
 
 // A coordinator's delegates: a row each with what it is doing, how long it
@@ -2732,6 +2911,15 @@ function pgTurnFootnote(messageEl, usage, model) {
         (actions || messageEl).prepend(note);
     }
     note.textContent = parts.join(' · ');
+    // The turn that just ran, in Traces.
+    if (pgLiveTurn.root_trace_id) {
+        const link = document.createElement('a');
+        link.className = 'pg-turn-trace';
+        link.href = pgTraceUrl(pgLiveTurn);
+        link.textContent = 'Trace';
+        link.title = 'Open this turn in Traces';
+        note.append(' · ', link);
+    }
 }
 
 // Per-turn summary from the stream's terminal run.done event.
@@ -2826,8 +3014,125 @@ document.addEventListener('DOMContentLoaded', function() {
     form.addEventListener('submit', function() { dirty.textContent = 'Saving…'; });
 });
 
-function pgEditContextWindow() {
+// The list of an agent's tools: type to narrow it.
+(function() {
+    const filter = document.getElementById('cfg-tools-filter');
+    if (!filter) return;
+    const rows = Array.from(document.querySelectorAll('#cfg-tools-rows .tools-row'));
+    filter.addEventListener('input', function(event) {
+        // This field narrows a list; it is not a setting to save.
+        event.stopPropagation();
+        const words = filter.value.toLowerCase().split(/\s+/).filter(Boolean);
+        let shown = 0;
+        rows.forEach(function(row) {
+            const match = words.every(function(word) { return row.dataset.text.indexOf(word) >= 0; });
+            row.hidden = !match;
+            if (match) shown += 1;
+        });
+        document.getElementById('cfg-tools-count').textContent = words.length ? shown + ' of ' + rows.length : String(rows.length);
+        document.getElementById('cfg-tools-none').hidden = shown > 0;
+    });
+    filter.addEventListener('change', function(event) { event.stopPropagation(); });
+    filter.addEventListener('keydown', function(event) { if (event.key === 'Enter') event.preventDefault(); });
+})();
+
+// The settings groups: each header says what is set, so nothing has to be
+// opened to read it. One group is open at a time and the choice is kept.
+function pgOpenSettingsGroup(key, focusId) {
     openInspectorTab('settings');
+    const group = document.getElementById('cfg-group-' + key);
+    if (!group) return;
+    group.open = true;
+    group.scrollIntoView({ block: 'start' });
+    const field = focusId && document.getElementById(focusId);
+    if (field && !field.disabled) field.focus({ preventScroll: true });
+}
+
+(function() {
+    const groups = Array.from(document.querySelectorAll('.cfg-group'));
+    if (!groups.length) return;
+    const value = function(id) { const el = document.getElementById(id); return el ? el.value : ''; };
+    const label = function(id) {
+        const el = document.getElementById(id);
+        if (!el || !el.value) return '';
+        const option = el.options && el.options[el.selectedIndex];
+        return option ? option.textContent.replace(/\s*\(.*\)\s*$/, '').trim() : el.value;
+    };
+    const on = function(id) { const el = document.getElementById(id); return !!(el && el.checked); };
+    const count = function(selector) { return document.querySelectorAll(selector).length; };
+    const say = {
+        model: function() {
+            const model = (typeof pgCurrentModel === 'function' && pgCurrentModel()) || value('cfg-llm-model-custom');
+            const rules = (function() { try { return Object.keys(JSON.parse(document.querySelector('[data-routing-json]').value || '{}')).length; } catch (e) { return 0; } })();
+            return [[model || 'No model', label('cfg-llm-provider')].filter(Boolean).join(' · ')]
+                .concat(value('cfg-llm-provider') === 'openrouter' && rules ? ['routing set'] : []);
+        },
+        web: function() {
+            const servers = count('#cfg-mcp-servers li:not(.catalog-empty)');
+            return [
+                'Web search: ' + (label('cfg-internet-provider') || 'off'),
+                'Code: ' + (function() {
+                    const field = document.getElementById('cfg-sandbox-provider');
+                    if (!field || field.value === 'none') return 'off';
+                    if (field.value) return label('cfg-sandbox-provider');
+                    // Nothing chosen: the console's default, named in the option.
+                    const named = (field.options[field.selectedIndex].textContent.match(/\(([^,)]+)/) || [])[1];
+                    return named ? named + ' (default)' : 'off';
+                })(),
+                'Browser: ' + (label('cfg-browser-control-provider') || 'off'),
+            ].concat(servers ? [servers + (servers === 1 ? ' MCP server' : ' MCP servers')] : []);
+        },
+        memory: function() {
+            const kinds = [on('cfg-enable-entity-memory') && 'Entity', on('cfg-enable-workflow-memory') && 'Workflow'].filter(Boolean);
+            const across = document.getElementById('cfg-recall-across');
+            return [
+                across && across.disabled ? 'Conversations sealed' : on('cfg-recall-across') ? 'Recalls across conversations' : 'Each conversation on its own',
+                kinds.length ? kinds.join(' and ') + ' memory on' : 'Entity and workflow memory off',
+            ];
+        },
+        persona: function() {
+            const name = value('cfg-persona-name').trim(), role = value('cfg-persona-role').trim();
+            const words = value('cfg-instruction').trim().split(/\s+/).filter(Boolean).length;
+            return [[name, role].filter(Boolean).join(', ') || 'No persona', words ? words + '-word instruction' : 'No instruction'];
+        },
+        aware: function() {
+            if (!on('cfg-self-aware')) return ['Off'];
+            return ['On', on('cfg-self-aware-writes') ? (on('cfg-self-aware-deletes') ? 'can write and delete' : 'can write') : 'read only'];
+        },
+        auto: function() {
+            return [on('cfg-automations-enabled') ? 'On' : 'Off'].concat(value('cfg-default-timezone').trim() ? [value('cfg-default-timezone').trim()] : []);
+        },
+    };
+    const refresh = function() {
+        groups.forEach(function(group) {
+            const make = say[group.dataset.cfgGroup], slot = group.querySelector('[data-cfg-value]');
+            if (!make || !slot) return;
+            slot.textContent = make().join(' · ');
+            // A setting that cannot work as chosen is flagged on the folded group.
+            group.classList.toggle('has-problem', !!group.querySelector('.sandbox-error-hint'));
+        });
+    };
+    let remembered = '';
+    try { remembered = window.localStorage.getItem('memorizz.settingsGroup') || ''; } catch (error) { /* none */ }
+    groups.forEach(function(group) {
+        group.open = group.dataset.cfgGroup === remembered;
+        group.addEventListener('toggle', function() {
+            if (group.open) groups.forEach(function(other) { if (other !== group) other.open = false; });
+            const open = groups.find(function(item) { return item.open; });
+            try { window.localStorage.setItem('memorizz.settingsGroup', open ? open.dataset.cfgGroup : ''); } catch (error) { /* not kept */ }
+        });
+    });
+    const form = document.querySelector('.playground-config-form');
+    form.addEventListener('input', refresh);
+    form.addEventListener('change', refresh);
+    refresh();
+    // The model list is filled after load; read it again once it is.
+    window.setTimeout(refresh, 400);
+    window.setTimeout(refresh, 1500);
+})();
+
+function pgEditContextWindow() {
+    pgOpenSettingsGroup('model');
     const field = document.getElementById('cfg-context-window');
     if (field && !field.disabled) {
         field.scrollIntoView({block: 'center'});
@@ -3034,6 +3339,17 @@ function initThreadTabs() {
     // conversation with it. The parameter is dropped first, so a reload or
     // the back button never sends it twice.
     const params = new URLSearchParams(window.location.search);
+    // A model picked on the Playground home arrives as ?model=: this page's
+    // messages run on it. The agent's saved model is not changed.
+    const askedModel = (params.get('model') || '').trim();
+    if (askedModel) {
+        params.delete('model');
+        pgUseModel(askedModel);
+        if (!params.get('prompt')) {
+            const left = params.toString();
+            window.history.replaceState(null, '', window.location.pathname + (left ? '?' + left : ''));
+        }
+    }
     const handoff = (params.get('prompt') || '').trim();
     const queryEl = document.getElementById('pg-query');
     if (handoff && queryEl) {
@@ -3151,13 +3467,16 @@ function pgRenderLiveEvent(event, replaying) {
         const user = appendMessage('user', event.query || '');
         const stream = createStreamingMessage();
         if (!user || !stream) return;
-        user.appendChild(pgEl('div', 'pg-message-source', 'Sent from the CLI'));
+        // A harness turn of this page that carried on through a reload, or a
+        // turn the CLI is running.
+        const here = event.source === 'playground';
+        if (!here) user.appendChild(pgEl('div', 'pg-message-source', 'Sent from the CLI'));
         const head = stream.container.querySelector('.pg-message-head');
-        if (head) head.appendChild(pgEl('span', 'pg-live-badge', 'CLI · live'));
-        const status = pgEl('div', 'pg-stream-status', 'Running in the CLI');
+        if (head) head.appendChild(pgEl('span', 'pg-live-badge', here ? 'Still working' : 'CLI · live'));
+        const status = pgEl('div', 'pg-stream-status', here ? 'Carried on while the page was away' : 'Running in the CLI');
         status.setAttribute('role', 'status');
         stream.container.appendChild(status);
-        view = {user: user, stream: stream, status: status, text: '', paint: null};
+        view = {user: user, stream: stream, status: status, text: '', paint: null, here: here};
         pgLive.views.set(event.turn_id, view);
         return;
     }
@@ -3175,8 +3494,10 @@ function pgRenderLiveEvent(event, replaying) {
             });
         }
     } else if (event.type === 'status') {
+        if (event.root_trace_id) pgLiveTurn = {thread_id: event.thread_id, root_trace_id: event.root_trace_id, turn_id: event.turn_id};
         view.status.textContent = event.message || '';
         if (event.span_id) pgLiveActivity(view.stream.container, event);
+        else if (event.harness_run_id && window.pgHarness) window.pgHarness.job(view.stream.container, event);
     } else if (event.type === 'tool.started' || event.type === 'tool.completed') {
         view.status.textContent = (event.type === 'tool.started' ? 'Running ' : 'Finished ') + event.tool_name;
         pgLiveActivity(view.stream.container, event);
@@ -3184,7 +3505,9 @@ function pgRenderLiveEvent(event, replaying) {
         if (view.paint !== null) cancelAnimationFrame(view.paint);
         view.stream.container.classList.remove('is-streaming');
         const badge = view.stream.container.querySelector('.pg-live-badge');
-        if (badge) badge.textContent = 'CLI';
+        // A turn of this page that carried on needs no mark once it is done.
+        if (badge) { if (view.here) badge.remove(); else badge.textContent = 'CLI'; }
+        if (window.pgHarness) window.pgHarness.finish(view.stream.container);
         if (view.text) {
             target.innerHTML = renderMarkdown(view.text);
             target.classList.add('md-rendered');
@@ -3192,7 +3515,7 @@ function pgRenderLiveEvent(event, replaying) {
             target.textContent = '';
         }
         view.stream.container.dataset.raw = view.text;
-        view.status.textContent = event.status === 'completed' ? '' : `Ended in the CLI: ${String(event.status).replace(/_/g, ' ')}.`;
+        view.status.textContent = event.status === 'completed' ? '' : `${view.here ? 'Ended' : 'Ended in the CLI'}: ${String(event.status).replace(/_/g, ' ')}.`;
         pgLive.views.delete(event.turn_id);
         if (replaying) return;
         // The stored conversation is the record: show it once it is saved.
@@ -3308,7 +3631,7 @@ function pgCapabilityRow(card, row, ids, options, query) {
         return section;
     }
     const heading = row.status === 'needs_sign_in'
-        ? `${row.title} is connected (${row.via}) but not signed in.`
+        ? `${row.service || row.title} is connected but not signed in.`
         : options.suggested
             ? `This looks like it needs ${row.title.toLowerCase()}, which isn't enabled for this agent.`
             : `${row.title} isn't enabled for this agent.`;
@@ -3384,22 +3707,7 @@ function pgCapabilityOffer(row, offer, status, rerender) {
         }
         const button = pgEl('button', 'btn btn-primary btn-sm', offer.title);
         button.type = 'button';
-        button.addEventListener('click', async function() {
-            button.disabled = true;
-            status.textContent = 'Opening sign-in…';
-            try {
-                const body = await pgCapabilityFetch(`/api/mcp/agents/${agent}/servers/${encodeURIComponent(offer.server)}/authorize`, {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({return_to: window.location.pathname}),
-                });
-                if (body.authorization_url) { window.location.assign(body.authorization_url); return; }
-                status.textContent = body.already_authenticated ? 'Already signed in.' : (body.message || 'Sign-in did not start.');
-                rerender();
-            } catch (error) {
-                status.textContent = error.message;
-                button.disabled = false;
-            }
-        });
+        button.addEventListener('click', function() { pgSignIn(offer.server, status, button, rerender); });
         return button;
     }
     if (offer.kind === 'mcp_search') {
@@ -3410,6 +3718,129 @@ function pgCapabilityOffer(row, offer, status, rerender) {
     }
     return pgEl('span', '', '');
 }
+
+// Sign in to a connected app without leaving the conversation: the app's
+// sign-in opens in a small window, and this page hears how it went. Where a
+// window cannot be opened (a blocked pop-up), the page goes there and comes
+// back, as it did before.
+const pgSignIns = new Map();
+const PG_SIGNIN_AGENT = {{ ((agent.name if agent else '') or 'The agent')|tojson }};
+
+async function pgSignIn(server, status, button, after) {
+    const agent = encodeURIComponent(AGENT_ID);
+    const say = function(text) { if (status) status.textContent = text; };
+    // Opened in the click itself, or the browser treats it as a pop-up.
+    const popup = window.open('', 'memorizz-sign-in', 'popup=yes,width=560,height=760');
+    if (popup) {
+        try { popup.document.title = 'Sign in'; popup.document.body.textContent = 'Opening sign-in\u2026'; } catch (_) {}
+    }
+    if (button) button.disabled = true;
+    say('Opening sign-in\u2026');
+    const giveUp = function(text) {
+        pgSignIns.delete(server);
+        if (popup && !popup.closed) popup.close();
+        say(text);
+        if (button) button.disabled = false;
+    };
+    let body;
+    try {
+        body = await pgCapabilityFetch(`/api/mcp/agents/${agent}/servers/${encodeURIComponent(server)}/authorize`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({return_to: popup ? '/mcp/oauth/done' : window.location.pathname}),
+        });
+    } catch (error) {
+        giveUp(error.message);
+        return;
+    }
+    if (!body.authorization_url) {
+        giveUp(body.already_authenticated ? 'Already signed in.' : (body.message || 'Sign-in did not start.'));
+        if (body.already_authenticated) { pgRefreshSignIn(); if (after) after(); }
+        return;
+    }
+    if (!popup) { window.location.assign(body.authorization_url); return; }
+    popup.location.replace(body.authorization_url);
+    say(`Finish signing in to ${server} in the window that opened.`);
+    // The window was closed before it finished: let them try again.
+    const watch = setInterval(function() {
+        if (!popup.closed) return;
+        clearInterval(watch);
+        setTimeout(function() {
+            if (!pgSignIns.has(server)) return;
+            pgSignIns.delete(server);
+            say('The sign-in window was closed before it finished.');
+            if (button) button.disabled = false;
+        }, 1200);
+    }, 700);
+    pgSignIns.set(server, {
+        done: function(outcome) {
+            clearInterval(watch);
+            pgSignIns.delete(server);
+            if (!popup.closed) popup.close();
+            if (outcome === 'success') say(`Signed in to ${server}.`);
+            else say(outcome === 'pending' ? `Sign-in to ${server} is still finishing. Try again in a moment.` : `Sign-in to ${server} failed. Check its connection on MCP connections.`);
+            if (button) button.disabled = outcome === 'success';
+            // Signed in: redraw (the card says it is on and offers to ask
+            // again). Otherwise the message above stays where it is.
+            if (after && outcome === 'success') after();
+        },
+    });
+}
+
+function pgSignInHeard(message) {
+    if (!message || message.type !== 'memorizz-oauth') return;
+    const waiting = pgSignIns.get(message.server);
+    if (waiting) waiting.done(message.outcome);
+    // Signed in: the bar goes. Otherwise it stays, saying what happened.
+    if (message.outcome === 'success') pgRefreshSignIn(message.server);
+}
+window.addEventListener('message', function(event) {
+    if (event.origin === window.location.origin) pgSignInHeard(event.data);
+});
+try { new BroadcastChannel('memorizz-oauth').addEventListener('message', function(event) { pgSignInHeard(event.data); }); } catch (_) {}
+
+// The bar above the message box: every connected app that is not signed in,
+// each with its button. It is read from live state, so it is there after a
+// reload and goes once the sign-in is done.
+async function pgRefreshSignIn(justSignedIn) {
+    if (!document.getElementById('pg-signin') || !AGENT_ID) return;
+    try {
+        const data = await pgCapabilityFetch(`/api/agents/${encodeURIComponent(AGENT_ID)}/capabilities`);
+        pgDrawSignIn(data.capabilities || [], justSignedIn);
+    } catch (_) { /* the bar keeps what it shows */ }
+}
+
+function pgDrawSignIn(capabilities, justSignedIn) {
+    const bar = document.getElementById('pg-signin');
+    if (!bar) return;
+    const rows = (capabilities || []).filter(function(row) {
+        return row.status === 'needs_sign_in' && (row.offers || []).some(function(offer) { return offer.kind === 'mcp_sign_in'; });
+    });
+    bar.textContent = '';
+    if (justSignedIn && !rows.some(function(row) { return row.via === justSignedIn; })) {
+        const done = pgEl('p', 'pg-signin-done', `Signed in to ${justSignedIn}. Ask again and it can be used.`);
+        done.setAttribute('role', 'status');
+        bar.append(done);
+        setTimeout(function() { if (done.isConnected) { done.remove(); bar.hidden = !bar.children.length; } }, 8000);
+    }
+    rows.forEach(function(row) {
+        const offer = row.offers.find(function(item) { return item.kind === 'mcp_sign_in'; });
+        const line = pgEl('div', 'pg-signin-row');
+        const text = pgEl('div', 'pg-signin-text');
+        text.append(
+            pgEl('strong', '', `${row.service || row.via} is connected but not signed in.`),
+            pgEl('span', '', offer.needs_client ? ' It needs an OAuth client first.' : ` ${PG_SIGNIN_AGENT} cannot use it until you sign in.`)
+        );
+        const status = pgEl('p', 'pg-signin-status');
+        status.setAttribute('role', 'status');
+        line.append(text, pgCapabilityOffer(row, offer, status, function() { pgRefreshSignIn(); }), status);
+        bar.append(line);
+    });
+    bar.hidden = !bar.children.length;
+}
+// What needs signing in comes with the page, so the bar is there at once.
+document.addEventListener('DOMContentLoaded', function() {
+    pgDrawSignIn({{ (sign_ins_needed|default([], true))|tojson }});
+});
 
 // Coming back from sign-in started on a capability card.
 document.addEventListener('DOMContentLoaded', function() {
@@ -3539,10 +3970,27 @@ function renderApprovalCard(messageContainer, payload) {
             const resultValue = evidence && typeof evidence === 'object'
                 ? (evidence.assistant_response ?? evidence.tool_result ?? evidence)
                 : evidence;
-            const resultText = typeof resultValue === 'string'
-                ? resultValue
-                : JSON.stringify(resultValue, null, 2);
-            appendMessage('assistant', resultText || 'The approved action completed.');
+            // The resumed turn can stop at another call that needs approval.
+            // That is a card to answer, not a result to print.
+            let waiting = null;
+            [resultValue, evidence && evidence.tool_result, evidence].forEach(function(value) {
+                if (waiting || !value) return;
+                if (typeof value === 'string' && value.trim().startsWith('{')) {
+                    try { value = JSON.parse(value); } catch (_) { return; }
+                }
+                if (value && typeof value === 'object' && value.error_code === 'approval_required' && value.proposal) waiting = value.proposal;
+            });
+            const resultText = waiting
+                ? `The approved step ran. The next step, \`${waiting.tool_name || 'a tool call'}\`, also needs your approval.`
+                : typeof resultValue === 'string'
+                    ? resultValue
+                    : JSON.stringify(resultValue, null, 2);
+            const resumedMessage = appendMessage('assistant', resultText || 'The approved action completed.');
+            if (waiting && resumedMessage) renderApprovalCard(resumedMessage, waiting);
+            // What the approved tools found: a table, a monitor (playground-displays.js).
+            (resumed.displays || []).forEach(function(display) {
+                if (window.pgDisplays && resumedMessage) window.pgDisplays.render(resumedMessage, display);
+            });
         } catch (err) {
             status.textContent = `Approval action failed: ${err.message}`;
             approveButton.disabled = false;
@@ -3701,8 +4149,21 @@ function pgTraceUrl(ids) {
     ['thread_id', 'root_trace_id', 'turn_id'].forEach(function(key) {
         if (ids && ids[key]) params.set(key, ids[key]);
     });
+    // A step (a tool call, a model call) opens Traces on that row.
+    if (ids && ids.step) {
+        params.set('step', ids.step);
+        return `/traces?${params}`;
+    }
     return `/traces?${params}#trace-failures`;
 }
+
+// What a stored step is known by in Traces.
+function pgStepOf(event) {
+    return String((event && (event.event_id || event.span_id || event.tool_call_id || event.trace_id)) || '');
+}
+
+// The turn being streamed: its ids arrive once, before its steps.
+let pgLiveTurn = {};
 
 // The header's Traces button follows the conversation on screen.
 function pgPointTracesAt(events) {
@@ -3871,6 +4332,8 @@ function setLoading(loading) {
 }
 
 function stopStreaming() {
+    // A harness turn outlives a dropped connection, so it is stopped by name.
+    if (window.pgHarness && window.pgHarness.working()) { window.pgHarness.stop(); return; }
     if (currentAbortController) {
         currentAbortController.abort();
         currentAbortController = null;
@@ -4241,6 +4704,10 @@ async function sendMessage() {
 
     if (!memoryEl.value.trim()) {
         const newMemoryId = generateThreadId();
+        // What was chosen before the first message (the folder and access
+        // allowed, who answers) belongs to the conversation it starts.
+        if (window.pgHarnessAccess) window.pgHarnessAccess.adopt('', newMemoryId);
+        if (window.pgHarness) window.pgHarness.adopt('', newMemoryId);
         memoryEl.value = newMemoryId;
         createThreadTab(newMemoryId, 0);
         setActiveThreadTab(newMemoryId);
@@ -4315,6 +4782,12 @@ async function sendMessage() {
             if (access.grant) formData.append('harness_grant', access.grant);
             if (access.workspace) formData.append('harness_workspace', access.workspace);
         }
+        // Answered by a harness for this conversation, when one is chosen.
+        const answeredBy = window.pgHarness ? window.pgHarness.current() : null;
+        if (answeredBy) {
+            formData.append('answer_harness', answeredBy.harness);
+            if (answeredBy.model) formData.append('answer_model', answeredBy.model);
+        }
 
         // Create AbortController for this request
         currentAbortController = new AbortController();
@@ -4328,6 +4801,7 @@ async function sendMessage() {
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
+        window.dispatchEvent(new Event('memorizz:agent-activity'));
 
         // One ordered SDK contract; never append tool/private candidate text.
         let runId = null, sequence = 0, lastPromptTokens = 0, answeringModel = null;
@@ -4339,6 +4813,7 @@ async function sendMessage() {
             runId = event.run_id; sequence = event.seq;
             if (event.memory_id) {
                 if (window.pgHarnessAccess) window.pgHarnessAccess.adopt(memoryEl.value.trim(), event.memory_id);
+                if (window.pgHarness) window.pgHarness.adopt(memoryEl.value.trim(), event.memory_id);
                 memoryEl.value = event.memory_id;
             }
             if (event.type === 'status' && event.scope === 'harness_access' && window.pgHarnessAccess) {
@@ -4358,6 +4833,7 @@ async function sendMessage() {
                 const body = streamMessage.container.querySelector('.pg-message-body');
                 if (body) body.prepend(note);
             } else if (event.type === 'run.done') {
+                if (window.pgHarness) window.pgHarness.finish(streamMessage.container);
                 pgShowMeasured(lastPromptTokens);
                 paint(true);
                 renderLastTurnCache(event.usage);
@@ -4365,15 +4841,22 @@ async function sendMessage() {
                 const failedWrites = Object.values(event.persistence || {}).includes('failed');
                 showStatus(event.status === 'completed'
                     ? (failedWrites ? 'Answer complete; a state write failed.' : '')
-                    : (event.status === 'approval_required' ? 'Waiting for approval.' : 'Run ' + event.status + '. Partial answer retained.'));
+                    : (event.status === 'approval_required' ? 'Waiting for approval.'
+                        // A failure the person can act on says what to do.
+                        : (event.error_message ? 'Run failed: ' + event.error_message
+                            : 'Run ' + event.status + '. Partial answer retained.')));
             } else if (event.type === 'approval.required') {
                 renderApprovalCard(streamMessage.container, event.proposal || event);
                 showStatus('Execution paused for approval.');
             } else if (event.type === 'status') {
+                if (event.root_trace_id) pgLiveTurn = {thread_id: event.thread_id, root_trace_id: event.root_trace_id, turn_id: event.turn_id};
                 showStatus(event.message || PG_STAGE_LABELS[event.stage] || String(event.stage || '').replaceAll('_', ' '));
                 if (event.span_id) pgLiveActivity(streamMessage.container, event);
+                // A harness answering the turn: show it as the job it is.
+                else if (event.harness_run_id && window.pgHarness) window.pgHarness.job(streamMessage.container, event);
             } else if (event.type === 'capability.requested') {
                 renderCapabilityCard(streamMessage.container, [event.capability], {query: query});
+                pgRefreshSignIn();
             } else if (event.type === 'capability.suggested') {
                 renderCapabilityCard(streamMessage.container, event.capabilities || [], {suggested: true, query: query});
             } else if (event.type === 'tool.started' || event.type === 'tool.completed') {
@@ -4485,12 +4968,12 @@ window.pgHarnessAccess = document.getElementById('pg-hx') ? (function() {
         try {
             const body = await request('/api/agents/' + encodeURIComponent(AGENT_ID) + '/harness-access', {
                 method: 'POST',
-                body: JSON.stringify({workspace: document.getElementById('pg-hx-workspace').value.trim(), network: network, write: edits, approver_id: name}),
+                body: JSON.stringify({workspace: document.getElementById('pg-hx-workspace').value.trim(), network: network, write: edits, approver_id: name, answer_harness: (window.pgHarness && window.pgHarness.current() || {}).harness || ''}),
             });
             if (name) { try { localStorage.setItem(APPROVER_KEY, name); } catch (_) {} }
             const memory = memoryId();
             write(memory, Object.assign({}, read(memory) || {}, {grant: body.grant}));
-            say('Allowed for this conversation. Harness delegates use it from your next message.');
+            say('Allowed for this conversation, from your next message.');
             render();
         } catch (error) {
             say(error.message, true);
@@ -4501,7 +4984,7 @@ window.pgHarnessAccess = document.getElementById('pg-hx') ? (function() {
     document.getElementById('pg-hx-clear').addEventListener('click', function() {
         const memory = memoryId();
         write(memory, Object.assign({}, read(memory) || {}, {grant: null}));
-        say('Stopped. Harness delegates go back to this conversation\u2019s own folder without web access.');
+        say('Stopped. Harness work goes back to this conversation\u2019s own folder without web access.');
         render();
     });
     try { approver.value = localStorage.getItem(APPROVER_KEY) || ''; } catch (_) {}
@@ -4520,7 +5003,7 @@ window.pgHarnessAccess = document.getElementById('pg-hx') ? (function() {
                     write(memory, state);
                     render();
                 } catch (error) {
-                    say('Could not make a folder for harness delegates: ' + error.message, true);
+                    say('Could not make a folder for harness work: ' + error.message, true);
                 }
             }
             return {grant: '', workspace: state.workspace || ''};

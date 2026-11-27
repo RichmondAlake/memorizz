@@ -70,14 +70,24 @@ def connected(tmp_path):
         yield provider
 
 
+# The playground is the console's home: a greeting and a composer.
+HERO_PAGES = frozenset({"/playground"})
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize("path", CONSOLE_PAGES)
 def test_console_pages_share_one_header_and_stylesheet(client, connected, path):
     response = client.get(path)
     assert response.status_code == 200, f"{path} -> {response.status_code}"
     html = response.text
-    assert html.count('class="page-header"') == 1, path
-    assert 'class="page-header-text"' in html, path
+    if path in HERO_PAGES:
+        # A page that opens on a centred greeting and a composer, with or
+        # without agents in the store, has its title there instead.
+        assert 'class="page-header"' not in html, path
+        assert html.count('<section class="chat-home') == 1, path
+    else:
+        assert html.count('class="page-header"') == 1, path
+        assert 'class="page-header-text"' in html, path
     assert len(re.findall(r"<h1[\s>]", html)) == 1, path
     assert "/static/css/console.css" in html, path
     for crumb in re.findall(r'<span class="page-eyebrow">([^<]+)</span>', html):

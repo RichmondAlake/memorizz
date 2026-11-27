@@ -440,7 +440,9 @@ def test_from_env_registers_deepseek_pi_and_hermes(tmp_path: Path, monkeypatch) 
         assert service.adapters["pi"].provider == "deepseek"
         assert service.adapters["pi"].external_isolation is True
         assert service.adapters["deepseek"].default_model == "deepseek-flash"
-        assert service.router.preference[-3:] == ["deepseek", "pi", "hermes"]
+        # Droid is tried last: it needs full network access and a Factory key.
+        assert service.router.preference[-4:] == ["deepseek", "pi", "hermes", "droid"]
+        assert "droid" in service.adapters
     finally:
         service.close()
 

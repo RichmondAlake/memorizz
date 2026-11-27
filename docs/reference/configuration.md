@@ -45,7 +45,7 @@ isolation declaration. Create it with `memorizz harness init`; see the
 
 | Variable | Example |
 |---|---|
-| `MEMORIZZ_DEFAULT_LLM_PROVIDER` | `openai`, `anthropic`, `ollama`, `azure` |
+| `MEMORIZZ_DEFAULT_LLM_PROVIDER` | `openai`, `anthropic`, `ollama`, `azure`, `openrouter` |
 | `MEMORIZZ_DEFAULT_LLM_MODEL` | Provider model or deployment name |
 | `MEMORIZZ_DEFAULT_EMBEDDING_PROVIDER` | `openai`, `ollama`, `huggingface` (a local Sentence Transformers model or folder), or another registered provider |
 | `MEMORIZZ_DEFAULT_EMBEDDING_MODEL` | Embedding model name |
@@ -113,6 +113,9 @@ the size you choose, so changing it means re-embedding the store.
 | `MEMORIZZ_HARNESS_CONTEXT_MAX_CHARS` | Bounded memory-context size |
 | `MEMORIZZ_MCP_SERVER_ALLOW_HARNESS_EXECUTION` | Enables first-party MCP harness tools |
 | `MEMORIZZ_MCP_SERVER_HARNESS_WORKSPACE_ROOTS` | Comma-separated MCP workspace roots |
+| `MEMORIZZ_MCP_SERVER_MEMORY_IDS` | Comma-separated memories the MCP server is limited to. Reads and writes elsewhere are refused, and operations that read across memories are not available. A harness run's server is given its own `memory_id` |
+| `MEMORIZZ_MCP_SERVER_READ_MEMORY_IDS` | Comma-separated memories the server may also read and never write; needs `MEMORIZZ_MCP_SERVER_MEMORY_IDS` |
+| `MEMORIZZ_MCP_SERVER_APP_MEMORY_ID` | The memory a connected app (Muse, Grok Bot, a dot) saves to when it names none. Default `personal`. `memorizz mcp apps serve --memory-id` sets it and limits the server to that memory |
 
 ## Coding-agent plugins
 
@@ -157,8 +160,12 @@ Set only the providers you use:
 ```dotenv
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
+GEMINI_API_KEY=
+OPENROUTER_API_KEY=
 TAVILY_API_KEY=
 FIRECRAWL_API_KEY=
+EXA_API_KEY=
+EXA_MONITOR_WEBHOOK_URL=
 E2B_API_KEY=
 MONGODB_URI=
 ORACLE_USER=
@@ -171,14 +178,20 @@ LIVEKIT_API_SECRET=
 ELEVENLABS_API_KEY=
 VAPI_API_KEY=
 VAPI_PUBLIC_KEY=
+SENTRY_DSN=
 ```
 
-The last six are for agents with a voice; see [Voice](../guides/voice.md).
-`MEMORIZZ_PUBLIC_URL` (not a secret) is the https address of the local UI
-that Vapi calls.
+The six before `SENTRY_DSN` are for agents with a voice; see
+[Voice](../guides/voice.md). `MEMORIZZ_PUBLIC_URL` (not a secret) is the https
+address of the local UI that Vapi calls.
+
+`SENTRY_DSN` is for agents whose traces are also sent to Sentry; see
+[Observability Providers](../guides/observability-providers.md).
+`MEMORIZZ_SENTRY_DSN` is read first when both are set, and `SENTRY_ORG` (not a
+secret) is the organisation slug used in links to Sentry.
 
 Use a deployment secret manager for production. Do not put secrets in
-`llm_config`, `mcp_servers`, `voice_config`, browser-control configuration, agent metadata,
+`llm_config`, `mcp_servers`, `voice_config`, `observability_provider`, browser-control configuration, agent metadata,
 benchmark results, or committed `.env` files.
 
 MCP client tokens and OAuth credentials use the encrypted credential store.

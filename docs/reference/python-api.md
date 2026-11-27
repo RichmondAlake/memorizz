@@ -27,6 +27,10 @@ This page covers the stable, high-value Python surface. Import public types from
         - with_memory_consolidation
         - with_persona_learning
         - with_voice
+        - with_observability
+        - observability_status
+        - observability_url
+        - flush_observability
         - voice_status
         - speak
         - listen
@@ -253,6 +257,8 @@ authenticated runtime reads never adopt them automatically.
         - retry
         - run_plan
         - compare
+        - continue_conversation
+        - refine_memory
         - recover_interrupted_runs
         - close
       show_source: false
@@ -262,6 +268,39 @@ authenticated runtime reads never adopt them automatically.
     options:
       show_source: false
       show_root_heading: true
+
+::: memorizz.metaharness.models.HarnessPermissions
+    options:
+      show_source: false
+      show_root_heading: true
+
+A run reads and writes one memory, its task's `memory_id`. Two fields of
+`HarnessPermissions` change that: `mcp_read_memory_ids` names up to 5 other
+memories the run may read and never write, and `mcp_memory_scope="all"`
+opens it to every memory of the user (`"run"` is the default). A run with no
+`memory_id` is private: it starts with nothing from memory and its answer is
+not saved.
+
+::: memorizz.metaharness.memory_refine.HarnessMemoryRefine
+    options:
+      members:
+        - answers
+        - findings
+        - plan
+        - run
+        - list_runs
+        - maybe_start
+      show_source: false
+      show_root_heading: true
+
+::: memorizz.metaharness.memory_refine.RefineSettings
+    options:
+      show_source: false
+      show_root_heading: true
+
+`meta.memory_refine` is the `HarnessMemoryRefine` of a `MetaHarness`, and
+`meta.refine_memory(memory_id)` runs one cycle. Both classes are exported
+from `memorizz.metaharness`.
 
 ::: memorizz.metaharness.base.AgentHarness
     options:

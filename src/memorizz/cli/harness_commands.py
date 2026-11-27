@@ -245,7 +245,22 @@ ALLOW_DIRTY = typer.Option(
     help="Let an edit run start on a Git folder with uncommitted changes.",
 )
 MEMORY_ID = typer.Option(
-    None, "--memory-id", help="Save answers to this memory, and recall from it."
+    None,
+    "--memory-id",
+    help=(
+        "Save answers to this memory, and recall from it. The run reads and "
+        "writes this memory only; without one it is private."
+    ),
+)
+READ_MEMORY = typer.Option(
+    None,
+    "--read-memory",
+    help="Another memory the run may read and never write; repeat, up to 5.",
+)
+MEMORY_SCOPE = typer.Option(
+    "run",
+    "--memory-scope",
+    help="run: only --memory-id and --read-memory. all: every memory of the user.",
 )
 USER_ID = typer.Option(None, "--user-id", help="End user the run is for.")
 THREAD_ID = typer.Option(None, "--thread-id", help="Conversation thread in the memory.")
@@ -378,6 +393,8 @@ def run_harness(
     execution_backend: str = EXECUTION_BACKEND,
     network: str = NETWORK,
     mcp_access: str = MCP_ACCESS,
+    read_memory: Optional[List[str]] = READ_MEMORY,
+    memory_scope: str = MEMORY_SCOPE,
     allowed_env: Optional[List[str]] = ALLOW_ENV,
     allowed_tools: Optional[List[str]] = ALLOW_TOOL,
     denied_tools: Optional[List[str]] = DENY_TOOL,
@@ -420,6 +437,8 @@ def run_harness(
             allow_dirty_workspace=allow_dirty,
             network=network,
             mcp_access=mcp_access,
+            mcp_read_memory_ids=read_memory,
+            mcp_memory_scope=memory_scope,
             allowed_env=allowed_env,
             allowed_tools=allowed_tools,
             denied_tools=denied_tools,
@@ -577,6 +596,8 @@ def plan(
     execution_backend: str = EXECUTION_BACKEND,
     network: str = NETWORK,
     mcp_access: str = MCP_ACCESS,
+    read_memory: Optional[List[str]] = READ_MEMORY,
+    memory_scope: str = MEMORY_SCOPE,
     allowed_env: Optional[List[str]] = ALLOW_ENV,
     allowed_tools: Optional[List[str]] = ALLOW_TOOL,
     denied_tools: Optional[List[str]] = DENY_TOOL,
@@ -629,6 +650,8 @@ def plan(
             allow_dirty_workspace=allow_dirty,
             network=network,
             mcp_access=mcp_access,
+            mcp_read_memory_ids=read_memory,
+            mcp_memory_scope=memory_scope,
             allowed_env=allowed_env,
             allowed_tools=allowed_tools,
             denied_tools=denied_tools,
@@ -668,6 +691,8 @@ def compare(
     execution_backend: str = EXECUTION_BACKEND,
     network: str = NETWORK,
     mcp_access: str = MCP_ACCESS,
+    read_memory: Optional[List[str]] = READ_MEMORY,
+    memory_scope: str = MEMORY_SCOPE,
     allowed_env: Optional[List[str]] = ALLOW_ENV,
     allowed_tools: Optional[List[str]] = ALLOW_TOOL,
     denied_tools: Optional[List[str]] = DENY_TOOL,
@@ -714,6 +739,8 @@ def compare(
             allow_dirty_workspace=allow_dirty,
             network=network,
             mcp_access=mcp_access,
+            mcp_read_memory_ids=read_memory,
+            mcp_memory_scope=memory_scope,
             allowed_env=allowed_env,
             allowed_tools=allowed_tools,
             denied_tools=denied_tools,
@@ -919,6 +946,181 @@ def delete_runs(
             raise typer.Exit(1)
 
 
+def _refine_lines(report: dict) -> List[str]:
+    """A refine report as the lines a person reads."""
+    labels = {
+        "added": "New",
+        "confirmed": "Agrees",
+        "replaced": "Replaces",
+        "not_taken": "Not taken",
+    }
+    lines = []
+    status = str(report.get("status") or "")
+    if status == "failed":
+        lines.append(f"The cycle did not run: {report.get('reason') or 'it failed'}.")
+    elif status == "skipped":
+        lines.append("Nothing new to distil.")
+    elif status == "dry_run":
+        lines.append("This is what a cycle would change. Nothing was written.")
+    for job in report.get("jobs") or []:
+        for item in job.get("items") or []:
+            lines.append(f"  {labels.get(item['kind'], item['kind'])}: {item['text']}")
+            if item.get("detail"):
+                lines.append(f"      {item['detail']}")
+        counts = ", ".join(
+            f"{count} {kind.replace('_', ' ')}"
+            for kind, count in (job.get("changes") or {}).items()
+        )
+        if counts:
+            lines.append(f"{job.get('label') or job.get('name')}: {counts}")
+        lines.extend(f"  ({note})" for note in job.get("notes") or [])
+    return lines
+
+
+@harness_app.command("refine")
+def refine_memory(
+    memory_id: str = typer.Argument(..., help="The memory harness runs share."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what a cycle would change; write nothing."
+    ),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        help="Model provider for this cycle (default: the saved one).",
+    ),
+    model: Optional[str] = typer.Option(
+        None, "--model", help="Model for this cycle (default: the saved one)."
+    ),
+    user_id: Optional[str] = USER_ID,
+    raw_json: bool = JSON_OUT,
+):
+    """Distil the raw answers harness runs saved to a memory into findings.
+
+    Each finding is quoted from the answer it came from. A fact several runs
+    state is one finding with the runs that agree; a corrected one is
+    replaced and kept. Every raw answer stays in the memory.
+    """
+    with _session() as (service, _warnings):
+        chosen = None
+        if provider or model:
+            saved = service.memory_refine.settings.get()
+            from ..llms.llm_factory import create_llm_provider
+
+            chosen = create_llm_provider(
+                {
+                    "provider": provider or saved["provider"],
+                    "model": model or saved["model"],
+                }
+            )
+        report = service.refine_memory(
+            memory_id, user_id=user_id, dry_run=dry_run, model=chosen
+        )
+        if raw_json:
+            _print({"ok": report.get("status") != "failed", "report": report}, True)
+        else:
+            for line in _refine_lines(report):
+                typer.echo(line)
+        if report.get("status") == "failed":
+            raise typer.Exit(1)
+
+
+@harness_app.command("findings")
+def memory_findings(
+    memory_id: str = typer.Argument(..., help="The memory harness runs share."),
+    raw: bool = typer.Option(
+        False, "--raw", help="List the raw answers instead of the findings."
+    ),
+    replaced: bool = typer.Option(
+        False, "--replaced", help="Include findings a newer one replaced."
+    ),
+    user_id: Optional[str] = USER_ID,
+    raw_json: bool = JSON_OUT,
+):
+    """Show what a shared memory knows, or the raw answers it was made from."""
+    with _session() as (service, _warnings):
+        refine = service.memory_refine
+        if raw:
+            rows = refine.answers(memory_id, user_id)
+            if raw_json:
+                _print({"ok": True, "answers": rows, "count": len(rows)}, True)
+                return
+            for row in rows:
+                state = "distilled" if row.get("distilled") else "new"
+                typer.echo(
+                    f"{row['at'][:16]}  {row['harness']}  run {row['run_id'][:8]}  ({state})"
+                )
+                typer.echo("    " + " ".join(row["text"].split())[:200])
+            typer.echo(f"{len(rows)} raw answer{'' if len(rows) == 1 else 's'}.")
+            return
+        rows = refine.findings(memory_id, user_id, include_replaced=replaced)
+        if raw_json:
+            _print({"ok": True, "findings": rows, "count": len(rows)}, True)
+            return
+        for row in rows:
+            agree = (
+                f"{row['confirmations']} runs agree"
+                if row["confirmations"] > 1
+                else "1 run"
+            )
+            mark = "  (replaced)" if row.get("replaced_by") else ""
+            typer.echo(f"- {row['text']}{mark}")
+            typer.echo(f"    {agree}: {', '.join(row['harnesses'])}")
+        waiting = len(refine.answers(memory_id, user_id, only_new=True))
+        typer.echo(
+            f"{len(rows)} finding{'' if len(rows) == 1 else 's'}; "
+            f"{waiting} new answer{'' if waiting == 1 else 's'} not distilled yet."
+        )
+
+
+@harness_app.command("refine-settings")
+def refine_settings(
+    provider: Optional[str] = typer.Option(None, "--provider", help="Model provider."),
+    model: Optional[str] = typer.Option(None, "--model", help="Model that distils."),
+    auto: Optional[bool] = typer.Option(
+        None,
+        "--auto/--manual",
+        help="Start a cycle by itself once enough new answers wait.",
+    ),
+    after_answers: Optional[int] = typer.Option(
+        None, "--after", min=1, max=50, help="New answers before a cycle starts."
+    ),
+    raw_json: bool = JSON_OUT,
+):
+    """Show or change the model that refines shared harness memory.
+
+    With no option, shows the settings. A cycle spends tokens, so it never
+    starts by itself until a provider and a model are set.
+    """
+    with _session() as (service, _warnings):
+        settings = service.memory_refine.settings
+        changes = {
+            key: value
+            for key, value in (
+                ("provider", provider),
+                ("model", model),
+                ("auto", auto),
+                ("after_answers", after_answers),
+            )
+            if value is not None
+        }
+        try:
+            value = settings.set(changes) if changes else settings.get()
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        if raw_json:
+            _print({"ok": True, "settings": value}, True)
+            return
+        if not value["model"]:
+            typer.echo("No model is set. Set one with --provider and --model.")
+            return
+        typer.echo(f"Model: {value['provider']} · {value['model']}")
+        typer.echo(
+            f"Starts by itself after {value['after_answers']} new answers."
+            if value["auto"]
+            else "Runs only when asked (memorizz harness refine <memory-id>)."
+        )
+
+
 @harness_app.command("conversation")
 def conversation(
     conversation: str = typer.Argument(
@@ -1015,6 +1217,8 @@ def continue_conversation(
             allow_dirty_workspace=setup["allow_dirty_workspace"],
             network=network or setup["network"],
             mcp_access=mcp_access or setup["mcp_access"],
+            mcp_read_memory_ids=setup.get("mcp_read_memory_ids") or None,
+            mcp_memory_scope=setup.get("mcp_memory_scope") or "run",
             allow_subagents=setup["allow_subagents"]
             if allow_subagents is None
             else allow_subagents,

@@ -141,6 +141,20 @@ def _cursor_app(redirect_uri: str) -> Optional[str]:
     return None
 
 
+# Meta's Muse registers itself for each connector it adds, and its sign-in
+# returns to Meta's agent host. That host says which app is connecting.
+_MUSE_CALLBACK_HOSTS = {"agent.meta.ai"}
+
+
+def _muse_app(redirect_uri: str) -> Optional[str]:
+    parsed = urlparse(redirect_uri)
+    if parsed.scheme == "https" and (parsed.hostname or "").lower() in (
+        _MUSE_CALLBACK_HOSTS
+    ):
+        return "Muse"
+    return None
+
+
 def app_label(
     client: OAuthClientInformationFull, redirect_uri: Optional[str] = None
 ) -> str:
@@ -148,6 +162,9 @@ def app_label(
     name = str(client.client_name or "").strip()
     if name == "Cursor" and redirect_uri:
         name = _cursor_app(str(redirect_uri)) or name
+    callbacks = [redirect_uri] if redirect_uri else list(client.redirect_uris or [])
+    if any(_muse_app(str(url)) for url in callbacks if url):
+        return "Muse"
     if name:
         return name[:80]
     for url in (client.client_uri, client.client_id, *(client.redirect_uris or [])):

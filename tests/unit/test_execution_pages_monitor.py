@@ -492,6 +492,12 @@ def test_playground_launcher_page_lists_agents_as_rows(provider):
     assert 'id="pg-table"' in html and 'data-key="agent-launch"' in html
     assert 'href="/agents/agent-launch/playground"' in html
     assert "Launcher agent" in html and "Create agent" in html
+    # The whole row opens the agent, through one click handler that leaves
+    # links, new-tab clicks and text selection alone and says it is opening.
+    assert html.count("table.tBodies[0].addEventListener('click'") == 1
+    assert "event.target.closest('tr[data-key]')" in html
+    assert "window.open(address(row), '_blank', 'noopener')" in html
+    assert "window.getSelection" in html and "Opening…" in html
 
 
 @pytest.mark.unit

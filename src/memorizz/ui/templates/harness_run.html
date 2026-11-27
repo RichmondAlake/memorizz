@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Run evidence · {{ run.run_id }} - Memorizz{% endblock %}
 {% block head %}
-<link rel="stylesheet" href="/static/css/pages/harnesses.css?v=26">
+<link rel="stylesheet" href="/static/css/pages/harnesses.css?v=32">
 <link rel="stylesheet" href="/static/css/pages/memory-evolution.css?v=8">
-<script src="/static/js/harness-trajectory.js?v=15" defer></script>
+<script src="/static/js/harness-trajectory.js?v=16" defer></script>
 <script src="/static/js/memory-evolution.js?v=8" defer></script>
-<script src="/static/js/harness-run.js?v=1" defer></script>
+<script src="/static/js/harness-run.js?v=2" defer></script>
 {% endblock %}
 {% block content %}
 {% from '_ui.html' import page_header %}
@@ -26,6 +26,7 @@
     <nav class="hx-evidence-tabs" role="tablist" aria-label="Evidence views">
         <a id="tab-trajectory" href="#trajectory" role="tab" aria-controls="evidence-trajectory" aria-selected="true">Trajectory</a>
         <a id="tab-record" href="#record" role="tab" aria-controls="evidence-record" aria-selected="false" tabindex="-1">Raw record</a>
+        <a id="tab-used" href="#used" role="tab" aria-controls="evidence-used" aria-selected="false" tabindex="-1">Memory<span id="evidence-refused" class="hx-refused-count" hidden></span></a>
         <a id="tab-memory" href="#memory" role="tab" aria-controls="evidence-memory" aria-selected="false" tabindex="-1">Memory evolution</a>
     </nav>
     <p id="evidence-load-status" class="hx-evidence-note" role="status" aria-live="polite">Loading recorded activity…</p>
@@ -34,6 +35,9 @@
     </section>
     <section id="evidence-record" role="tabpanel" aria-labelledby="tab-record" tabindex="0" hidden>
         <pre id="evidence-json" class="hx-evidence-json">Loading…</pre>
+    </section>
+    <section id="evidence-used" role="tabpanel" aria-labelledby="tab-used" tabindex="0" hidden>
+        <div id="evidence-used-body" class="hx-used"><p class="hx-evidence-note">Loading…</p></div>
     </section>
     <section id="evidence-memory" role="tabpanel" aria-labelledby="tab-memory" tabindex="0" hidden>
         <a class="btn btn-sm" href="/traces/memory-evolution?run_id={{ run.run_id }}">Open full timeline</a>

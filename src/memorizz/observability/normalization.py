@@ -27,6 +27,8 @@ TRACE_METADATA_FIELDS = (
         "schema_version",
         "application_id",
         "agent_id",
+        # The observability provider a turn was also sent to (on its result).
+        "trace_export",
         "run_id",
         "turn_id",
         "root_trace_id",

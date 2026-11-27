@@ -2,14 +2,14 @@
 {% from '_ui.html' import page_header, empty_state %}
 {% from '_run_health.html' import range_picker, runs_chart, attention_panel, recent_runs with context %}
 
-{% block title %}Overview - Memorizz{% endblock %}
+{% block title %}Dashboard - Memorizz{% endblock %}
 
 {% block content %}
 {% set window_labels = {'24h': 'Last 24 hours', '7d': 'Last 7 days', '30d': 'Last 30 days', '90d': 'Last 90 days'} %}
 {% set window_label = window_labels.get(window) or fmt_range(span) %}
 {% set keep = {'load': 1} if loaded else {} %}
 {% if compare_to != 'previous' %}{% set _ = keep.update({'compare': compare_to}) %}{% endif %}
-{% call page_header('Overview', 'Runs, failures, run time, tokens and spend across every agent on this platform.', 'Home') %}
+{% call page_header('Dashboard', 'Runs, failures, run time, tokens and spend across every agent on this platform.', 'Operate') %}
     {{ range_picker('/dashboard', window, windows, span, keep) }}
     <a class="btn" href="/traces">Observability</a>
     <a class="btn btn-primary" href="/agents/new" data-mutates>Create agent</a>

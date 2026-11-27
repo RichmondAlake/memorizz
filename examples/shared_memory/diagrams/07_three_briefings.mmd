@@ -1,0 +1,14 @@
+flowchart LR
+    D[(The decision<br/>lives with the business)]:::mem
+    Y([You]):::person
+    D -. "you read it" .-> Y
+    Y -- "paste the rules" --> A[Codex]:::harness
+    Y -- "paste them again" --> B[Claude Code]:::harness
+    Y -- "and again,<br/>slightly differently" --> C[pi]:::harness
+    A --- AC[(its own session)]:::empty
+    B --- BC[(its own session)]:::empty
+    C --- CC[(its own session)]:::empty
+    classDef harness fill:#1a1408,stroke:#ffb454,color:#fff5e6;
+    classDef mem fill:#0f2a1f,stroke:#3ddc97,color:#eafff5;
+    classDef empty fill:#1b1b1f,stroke:#5a5f6b,color:#9aa1ad,stroke-dasharray: 4 3;
+    classDef person fill:#000000,stroke:#aab2c0,color:#f2f4f7;

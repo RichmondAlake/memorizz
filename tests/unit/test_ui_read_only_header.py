@@ -264,3 +264,59 @@ def test_restricted_trace_accounts_see_only_the_provider(provider):
         admin = connection.connection_header()
     assert admin["target"] == "EVAL@db:1521/FREEPDB1" and admin["href"] == "/connect"
     assert admin["embedding_warning"] == "differs"
+
+
+NOTION_INFO = {
+    "data_source_id": "4230b4b3-4fc8-81f2-9600-000b7856b21c",
+    "semantic_backend": "filesystem",
+    "notion_url": "https://app.notion.com/p/4230b4b34fc881ef8152c6051e81f7dc",
+}
+
+
+def test_the_notion_badge_opens_the_memory_database_in_notion(provider):
+    from memorizz.ui.trace_access import TracePrincipal, current_principal
+
+    client = TestClient(create_app(), follow_redirects=False)
+    with _connected(provider, NOTION_INFO, provider_type="notion"):
+        header = connection.connection_header()
+        page = client.get("/settings").text
+    assert header["opens"] == NOTION_INFO["notion_url"]
+    chip = re.search(r'<a class="ui-conn"[^>]*>', page).group(0)
+    assert f'href="{NOTION_INFO["notion_url"]}"' in chip
+    assert 'target="_blank"' in chip and 'rel="noopener noreferrer"' in chip
+    assert "Open the memory database in Notion" in chip
+    # It leaves the app, so it is not the store switch; the sidebar still is.
+    assert "data-store-switch" not in chip
+    assert 'class="status-text" type="button" data-store-switch' in page
+
+    # Other stores have nowhere to open, and neither does an address that is
+    # not a web link.
+    with _connected(provider, {"path": "/srv/store"}):
+        assert connection.connection_header()["opens"] is None
+    for bad in (None, "javascript:alert(1)", "http://app.notion.com/p/x"):
+        with _connected(provider, {**NOTION_INFO, "notion_url": bad}, "notion"):
+            assert connection.connection_header()["opens"] is None
+
+    # An account that only inspects traces is not told where the store is.
+    token = current_principal.set(TracePrincipal(principal_id="viewer", role="viewer"))
+    try:
+        with _connected(provider, NOTION_INFO, provider_type="notion"):
+            assert connection.connection_header()["opens"] is None
+    finally:
+        current_principal.reset(token)
+
+
+def test_the_notion_address_is_the_one_notion_reports_or_built_from_the_id():
+    from memorizz.memory_provider.notion.provider import _notion_page_url
+
+    database = "4230b4b3-4fc8-81ef-8152-c6051e81f7dc"
+    reported = "https://app.notion.com/p/4230b4b34fc881ef8152c6051e81f7dc"
+    built = "https://www.notion.so/4230b4b34fc881ef8152c6051e81f7dc"
+    assert _notion_page_url(reported, database) == reported
+    assert _notion_page_url("https://www.notion.so/x", database) == (
+        "https://www.notion.so/x"
+    )
+    for odd in (None, "", "https://notion.so.example.com/p/x", "http://notion.so/x"):
+        assert _notion_page_url(odd, database) == built
+    assert _notion_page_url(None, None) is None
+    assert _notion_page_url("https://example.com", "not-an-id") is None

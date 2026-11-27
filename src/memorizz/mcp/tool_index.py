@@ -68,6 +68,18 @@ class MCPToolIndex:
         embedder, model = self._embedder()
         catalog = self._catalog(server_name)
         written = catalog.get("tools") or {}
+        if embedder is not None and self._embedder_mismatches_store():
+            # The app was started with an embedding model that is not the
+            # one this store's vectors came from. An index built with the
+            # right model is kept as it is; a new one waits without vectors.
+            if written:
+                logger.warning(
+                    "MCP tools from %s were left as indexed: the configured "
+                    "embedding model does not match this store's vectors",
+                    server_name,
+                )
+                return {"stored": 0, "removed": 0}
+            embedder, model = None, "none"
         current = written if catalog.get("embedder") == model else {}
         changed = [name for name, mark in wanted.items() if current.get(name) != mark]
         removed = sorted(set(written) - set(wanted))
@@ -190,6 +202,18 @@ class MCPToolIndex:
             logger.debug("MCP tool row %s not deleted: %s", row_id, exc)
 
     # ------------------------------------------------------------ embeddings
+
+    def _embedder_mismatches_store(self) -> bool:
+        """Whether the app that connected this provider found its embedding
+        model at odds with the store's vectors (the local UI checks this)."""
+        provider = self.memory_provider
+        for _ in range(4):
+            if provider is None:
+                return False
+            if getattr(provider, "embedding_mismatch", None) is True:
+                return True
+            provider = getattr(provider, "wrapped_provider", None)
+        return False
 
     def _embedder(self) -> Tuple[Any, str]:
         """The embedder the provider searches with, and a name for its model.

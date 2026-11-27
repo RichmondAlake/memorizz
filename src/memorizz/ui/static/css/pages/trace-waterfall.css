@@ -232,6 +232,13 @@ body.theme-light #trace-waterfall {
     font-variant-numeric: tabular-nums;
 }
 
+/* A turn that was also sent to an observability provider links there. */
+.wf-turn-export {
+    margin-left: auto;
+    font-size: 12.5px;
+    white-space: nowrap;
+}
+
 .wf-failed-count {
     color: var(--wf-danger);
     font-size: 12.5px;

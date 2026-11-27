@@ -81,6 +81,14 @@ class InternetAccessProvider(ABC):
     def fetch_url(self, url: str, **kwargs) -> InternetPageContent:
         """Fetch and parse the contents of a specific URL."""
 
+    def agent_tools(self, agent: Any) -> list:
+        """Tools this provider adds to an agent beyond search and open page.
+
+        Returned callables are registered while this provider is the agent's
+        internet provider and removed when it is changed. None by default.
+        """
+        return []
+
     def close(self) -> None:
         """Cleanup resources (override when necessary)."""
         return None

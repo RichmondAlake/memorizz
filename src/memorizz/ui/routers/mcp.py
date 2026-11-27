@@ -397,6 +397,49 @@ async def api_mcp_disconnect(agent_id: str, server_name: str):
     }
 
 
+_OAUTH_DONE_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign-in</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+         font: 15px/1.5 system-ui, sans-serif; color: #e8e8ea; background: #0d0e11; }
+  main { max-width: 22rem; padding: 2rem; text-align: center; }
+  h1 { margin: 0 0 .5rem; font-size: 1.15rem; }
+  p { margin: 0; color: #a3a6ad; }
+  @media (prefers-color-scheme: light) { body { color: #17181c; background: #fff; } p { color: #5d6068; } }
+</style></head>
+<body><main><h1 id="title">Finishing sign-in…</h1><p id="note"></p></main>
+<script>
+(function() {
+  var params = new URLSearchParams(location.search);
+  var outcome = params.get('oauth') || 'error';
+  var server = params.get('server') || '';
+  var message = { type: 'memorizz-oauth', outcome: outcome, server: server };
+  // The page that opened this window hears it either way: some sign-in
+  // pages cut the link back to the opener, a channel still reaches it.
+  try { var channel = new BroadcastChannel('memorizz-oauth'); channel.postMessage(message); channel.close(); } catch (_) {}
+  try { if (window.opener) window.opener.postMessage(message, location.origin); } catch (_) {}
+  var name = server || 'the app';
+  document.getElementById('title').textContent = outcome === 'success' ? 'Signed in to ' + name
+    : outcome === 'pending' ? 'Sign-in to ' + name + ' is still finishing' : 'Sign-in to ' + name + ' failed';
+  document.getElementById('note').textContent = 'You can close this window and go back to MemoRizz.';
+  setTimeout(function() { try { window.close(); } catch (_) {} }, outcome === 'success' ? 400 : 4000);
+})();
+</script></body></html>
+"""
+
+
+@router.get("/mcp/oauth/done", response_class=HTMLResponse)
+async def mcp_oauth_done():
+    """Where a sign-in opened in its own window ends: it tells the page that
+    opened it (the playground) how the sign-in went, then closes."""
+    return HTMLResponse(
+        _OAUTH_DONE_PAGE,
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    )
+
+
 @router.get("/api/mcp/oauth/handoff")
 async def api_mcp_oauth_handoff():
     """Tells a terminal sign-in that this app passes its callback on."""

@@ -18,9 +18,10 @@ import asyncio
 import io
 import logging
 import os
+import re
 import threading
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from ..base import Brain, VoiceAudio, VoiceError, VoiceProvider, speakable
 from ..config import VoiceConfig
@@ -34,6 +35,22 @@ DEFAULT_STT_MODEL = "assemblyai/universal-3-6-pro"
 STT_SAMPLE_RATE = 16000
 #: A live call is closed after this long even if the browser never leaves.
 MAX_CALL_SECONDS = 30 * 60
+#: Every voice in a group call is asked for at this rate, so one stream of
+#: audio can carry them all.
+CALL_SAMPLE_RATE = 24000
+#: Voices lent, in turn, to agents in a group call that have none of their
+#: own on LiveKit. From LiveKit's suggested voices for these models.
+GROUP_VOICES = (
+    ("cartesia/sonic-3", "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"),  # Jacqueline
+    ("cartesia/sonic-3", "a167e0f3-df7e-4d52-a9c3-f949145efdab"),  # Blake
+    ("deepgram/aura-2", "athena"),
+    ("deepgram/aura-2", "odysseus"),
+    ("cartesia/sonic-3", "f31cc6a7-c1e8-4764-980c-60a361443dd1"),  # Robyn
+    ("deepgram/aura-2", "apollo"),
+)
+#: How one speaker's words are marked in the text a group call's round
+#: yields, so the speech step knows whose voice says them.
+_SEGMENT = re.compile(r"⟦([^⟧]+)⟧(.*?)⟦/⟧", re.DOTALL)
 
 
 class _Loop:
@@ -235,7 +252,13 @@ class LiveKitVoice(VoiceProvider):
             .to_jwt()
         )
         _loop.run(
-            self._start_call(room, agent_token, agent_name, reply, greeting), 45.0
+            self._start_call(
+                room,
+                agent_token,
+                lambda http: _brain_agent(agent_name, reply),
+                greeting,
+            ),
+            45.0,
         )
         return {
             "provider": self.name,
@@ -245,13 +268,132 @@ class LiveKitVoice(VoiceProvider):
             "participant_token": visitor_token,
         }
 
+    def group_session(
+        self,
+        *,
+        speakers: List[Dict[str, Any]],
+        round: Callable[[str], Iterable[Tuple[str, str]]],
+        name: str = "Everyone",
+        greeting: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Start one live call with several agents and return what the
+        browser needs to join it.
+
+        LiveKit hears the caller and decides when they have finished. Then
+        ``round(said)`` is asked for the answers: it yields ``(speaker_id,
+        text)`` in the order they are to be spoken, and each is said in that
+        speaker's own voice, one after another on a single stream, so two
+        agents never talk at once. When the caller speaks, whatever is left
+        of the round is dropped.
+
+        ``speakers`` is ``[{"id", "name", "voice_config"}, ...]``; a speaker
+        with no LiveKit voice of its own is lent one.
+        """
+        self.require_ready()
+        from livekit import api
+
+        if not speakers:
+            raise VoiceError("Nobody is here to call", code="voice_empty_call")
+        room = f"memorizz-group-{uuid.uuid4().hex[:12]}"
+        key, secret = os.environ["LIVEKIT_API_KEY"], os.environ["LIVEKIT_API_SECRET"]
+        visitor_token = (
+            api.AccessToken(key, secret)
+            .with_identity(f"visitor-{uuid.uuid4().hex[:8]}")
+            .with_name("Visitor")
+            .with_grants(api.VideoGrants(room_join=True, room=room))
+            .to_jwt()
+        )
+        agent_token = (
+            api.AccessToken(key, secret)
+            .with_identity(f"agents-{uuid.uuid4().hex[:8]}")
+            .with_name(name)
+            .with_kind("agent")
+            .with_grants(api.VideoGrants(room_join=True, room=room, agent=True))
+            .to_jwt()
+        )
+        voices = self.group_voices(speakers)
+        _loop.run(
+            self._start_call(
+                room,
+                agent_token,
+                lambda http: _group_agent(
+                    name,
+                    round,
+                    {
+                        speaker_id: self._voice_tts(http, model, voice)
+                        for speaker_id, (model, voice) in voices.items()
+                    },
+                    {str(row["id"]): str(row.get("name") or "") for row in speakers},
+                ),
+                greeting,
+                # The round's markers must reach the speech step as written.
+                tts_text_transforms=None,
+                # A round of several agents is costly to cut short: wait a
+                # little longer than a one-to-one call before deciding the
+                # caller has finished, so a pause for breath is not a turn.
+                min_endpointing_delay=float(
+                    self.config.option("group_endpointing_delay", 1.0)
+                ),
+            ),
+            45.0,
+        )
+        return {
+            "provider": self.name,
+            "session_id": room,
+            "room": room,
+            "server_url": os.environ["LIVEKIT_URL"],
+            "participant_token": visitor_token,
+            "voices": {
+                speaker_id: {"model": model, "voice": voice}
+                for speaker_id, (model, voice) in voices.items()
+            },
+        }
+
+    @staticmethod
+    def group_voices(speakers: List[Dict[str, Any]]) -> Dict[str, Tuple[str, str]]:
+        """Each speaker's speech model and voice for a group call: its own
+        when it has one on LiveKit, else the next of the lent voices that
+        nobody here is using."""
+        chosen: Dict[str, Tuple[str, str]] = {}
+        for row in speakers:
+            config = row.get("voice_config")
+            if isinstance(config, VoiceConfig) and config.provider == "livekit":
+                model, voice = split_model(config.tts_model, DEFAULT_TTS_MODEL)
+                voice = config.voice or voice
+                if voice is None and model == DEFAULT_TTS_MODEL:
+                    voice = DEFAULT_TTS_VOICE
+                if voice:
+                    chosen[str(row["id"])] = (model, voice)
+        spare = [voice for voice in GROUP_VOICES if voice not in chosen.values()]
+        turn = 0
+        for row in speakers:
+            speaker_id = str(row["id"])
+            if speaker_id in chosen:
+                continue
+            pool = spare or list(GROUP_VOICES)
+            chosen[speaker_id] = pool[turn % len(pool)]
+            turn += 1
+        return chosen
+
+    def _voice_tts(self, http_session: Any, model: str, voice: str) -> Any:
+        from livekit.agents import inference
+
+        kwargs: Dict[str, Any] = {
+            "http_session": http_session,
+            "voice": voice,
+            "sample_rate": CALL_SAMPLE_RATE,
+        }
+        if self.config.language:
+            kwargs["language"] = self.config.language
+        return inference.TTS(model, **kwargs)
+
     async def _start_call(
         self,
         room_name: str,
         agent_token: str,
-        agent_name: str,
-        reply: Brain,
+        make_agent: Callable[[Any], Any],
         greeting: Optional[str],
+        **session_options: Any,
     ) -> None:
         import aiohttp
         from livekit import rtc
@@ -283,9 +425,17 @@ class LiveKitVoice(VoiceProvider):
         try:
             await room.connect(os.environ["LIVEKIT_URL"], agent_token)
             session = AgentSession(
-                stt=self._stt(http), llm=_brain_llm(), tts=self._tts(http)
+                stt=self._stt(http),
+                llm=_brain_llm(),
+                tts=self._tts(http),
+                # LiveKit can start on an answer before the caller has
+                # finished and throw it away if they go on. Here an answer is
+                # a real agent turn (it is remembered and shown), so it is
+                # only asked for once the turn is over.
+                preemptive_generation=False,
+                **session_options,
             )
-            await session.start(agent=_brain_agent(agent_name, reply), room=room)
+            await session.start(agent=make_agent(http), room=room)
         except Exception as exc:
             await end()
             raise _provider_error(exc) from exc
@@ -352,6 +502,99 @@ def _brain_agent(agent_name: str, reply: Brain) -> Any:
                 yield spoken
 
     return BrainAgent()
+
+
+def mark_speaker(speaker_id: str, text: str) -> str:
+    """One speaker's words, marked for a group call's speech step."""
+    return f"⟦{speaker_id}⟧{text}⟦/⟧"
+
+
+def split_speakers(text: str) -> Tuple[List[Tuple[str, str]], str]:
+    """The complete ``(speaker_id, words)`` parts at the start of ``text``,
+    and what is left over (a part still being written)."""
+    parts: List[Tuple[str, str]] = []
+    end = 0
+    for found in _SEGMENT.finditer(text):
+        parts.append((found.group(1), found.group(2).strip()))
+        end = found.end()
+    return parts, text[end:]
+
+
+def _group_agent(
+    name: str,
+    round: Callable[[str], Iterable[Tuple[str, str]]],
+    voices: Dict[str, Any],
+    names: Dict[str, str],
+) -> Any:
+    """A LiveKit agent that answers a turn with a round of several speakers,
+    each in its own voice, one after another."""
+    from livekit.agents import Agent
+
+    done = object()
+
+    class GroupAgent(Agent):
+        def __init__(self) -> None:
+            super().__init__(instructions=f"You are {name}.")
+
+        async def llm_node(self, chat_ctx: Any, tools: Any, model_settings: Any):
+            said = last_user_text(chat_ctx)
+            if not said:
+                return
+            loop = asyncio.get_running_loop()
+            answers: asyncio.Queue = asyncio.Queue()
+            stop = threading.Event()
+
+            def pump() -> None:
+                # The round blocks while each agent thinks: off the room's loop.
+                try:
+                    for speaker_id, text in round(said):
+                        if stop.is_set():
+                            break
+                        loop.call_soon_threadsafe(
+                            answers.put_nowait, (str(speaker_id), str(text or ""))
+                        )
+                except Exception:
+                    logger.exception("A group call's round failed")
+                finally:
+                    loop.call_soon_threadsafe(answers.put_nowait, done)
+
+            threading.Thread(
+                target=pump, name="memorizz-call-round", daemon=True
+            ).start()
+            try:
+                while True:
+                    answer = await answers.get()
+                    if answer is done:
+                        return
+                    spoken = speakable(answer[1])
+                    if spoken and answer[0] in voices:
+                        yield mark_speaker(answer[0], spoken)
+            finally:
+                # The caller spoke, or hung up: the rest of the round is not said.
+                stop.set()
+
+        async def tts_node(self, text: Any, model_settings: Any):
+            waiting = ""
+            async for chunk in text:
+                waiting += chunk if isinstance(chunk, str) else str(chunk)
+                parts, waiting = split_speakers(waiting)
+                for speaker_id, words in parts:
+                    voice = voices.get(speaker_id)
+                    if voice is None or not words:
+                        continue
+                    # One voice at a time: the next waits for this one to end.
+                    async for event in voice.synthesize(words):
+                        yield event.frame
+
+        async def transcription_node(self, text: Any, model_settings: Any):
+            waiting = ""
+            async for chunk in text:
+                waiting += chunk if isinstance(chunk, str) else str(chunk)
+                parts, waiting = split_speakers(waiting)
+                for speaker_id, words in parts:
+                    yield f"{names.get(speaker_id) or speaker_id}: {words}\n"
+
+    return GroupAgent()
 
 
 def _brain_llm() -> Any:

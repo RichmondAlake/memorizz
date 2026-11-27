@@ -4,6 +4,7 @@ from .adapters import (
     ClaudeCodeHarness,
     CodexHarness,
     DeepSeekHarness,
+    DroidHarness,
     HermesHarness,
     NativeMemAgentHarness,
     OpenHandsHarness,
@@ -12,6 +13,7 @@ from .adapters import (
 )
 from .base import AdapterOutcome, AgentHarness
 from .context import HarnessContextBuilder
+from .memory_refine import HarnessMemoryRefine, RefineSettings
 from .models import (
     HarnessBudget,
     HarnessCapabilities,
@@ -47,6 +49,7 @@ __all__ = [
     "HarnessContextPack",
     "HarnessEvent",
     "HarnessEventType",
+    "HarnessMemoryRefine",
     "HarnessOrchestration",
     "HarnessPermissions",
     "HarnessPlan",
@@ -61,9 +64,11 @@ __all__ = [
     "HarnessStatus",
     "HarnessTask",
     "MetaHarness",
+    "RefineSettings",
     "NativeMemAgentHarness",
     "OpenHandsHarness",
     "PersistedMemAgentHarness",
+    "DroidHarness",
     "PiHarness",
     "SQLiteHarnessRunStore",
     "VerificationSpec",

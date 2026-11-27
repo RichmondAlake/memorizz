@@ -122,6 +122,41 @@ def test_tools_are_embedded_once_and_only_changes_are_redone(tmp_path):
     assert _row(provider, catalog_row_id("agent-1", "notion")) is None
 
 
+def test_an_index_is_not_rebuilt_with_a_model_that_does_not_match_the_store(
+    tmp_path,
+):
+    embedder = WordEmbedder()
+    provider = _provider(tmp_path, embedder)
+    index = MCPToolIndex(provider, "agent-1")
+    index.sync("notion", [SEARCH], _public)
+    row_id = tool_row_id("agent-1", "notion", "notion-search")
+    made = _row(provider, row_id)["embedding"]
+
+    # An app starts on this store with another embedding model: the index
+    # made with the store's own model is left alone, changes and all.
+    embedder.model = "another-model"
+    provider.embedding_mismatch = True
+    batches = len(embedder.batches)
+    changed = dict(SEARCH, description="Search pages and databases.")
+    assert index.sync("notion", [changed, CALENDAR], _public) == {
+        "stored": 0,
+        "removed": 0,
+    }
+    assert _row(provider, row_id)["embedding"] == made
+    assert len(embedder.batches) == batches
+
+    # A server first seen in that state is indexed without vectors, and
+    # gets them once the model matches the store again.
+    assert index.sync("calendar", [CALENDAR], _public)["stored"] == 1
+    calendar_id = tool_row_id("agent-1", "calendar", CALENDAR["name"])
+    assert not _row(provider, calendar_id).get("embedding")
+    provider.embedding_mismatch = False
+    embedder.model = "words-v1"
+    assert index.sync("calendar", [CALENDAR], _public)["stored"] == 1
+    assert _row(provider, calendar_id)["embedding"]
+    assert index.sync("notion", [changed, CALENDAR], _public)["stored"] == 2
+
+
 def test_without_an_embedder_tools_are_stored_and_embedded_later(tmp_path):
     provider = _provider(tmp_path, None)
     provider._get_embedding_provider = lambda: None

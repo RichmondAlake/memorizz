@@ -13,17 +13,20 @@ from __future__ import annotations
 from typing import Dict, List
 
 LLM_MODEL_CATALOG: Dict[str, List[Dict[str, str]]] = {
-    # Source: https://developers.openai.com/api/docs/models/all (2026-10-21).
+    # Source: the OpenAI Models API (2026-11-19).
     # Deprecated models are left out; any model ID still works as a custom
     # model. Pro models need the Responses API and are left out too.
     "openai": [
-        {"value": "gpt-6-astra", "label": "GPT-6 Astra", "group": "Latest"},
-        {"value": "gpt-6.1-sol", "label": "GPT-6.1 Sol", "group": "Latest"},
-        {"value": "gpt-6-luna", "label": "GPT-6 Luna", "group": "Latest"},
+        {"value": "gpt-6.2-sol", "label": "GPT-6.2 Sol", "group": "Latest"},
+        {"value": "gpt-6.2-astra", "label": "GPT-6.2 Astra", "group": "Latest"},
+        {"value": "gpt-6.1-terra", "label": "GPT-6.1 Terra", "group": "Latest"},
+        {"value": "gpt-6.1-sol", "label": "GPT-6.1 Sol", "group": "GPT-6"},
+        {"value": "gpt-6-astra", "label": "GPT-6 Astra", "group": "GPT-6"},
+        {"value": "gpt-6-luna", "label": "GPT-6 Luna", "group": "GPT-6"},
         {"value": "gpt-5.6-sol", "label": "GPT-5.6 Sol", "group": "GPT-5.6"},
         {"value": "gpt-5.6-terra", "label": "GPT-5.6 Terra", "group": "GPT-5.6"},
         {"value": "gpt-5.6-luna", "label": "GPT-5.6 Luna", "group": "GPT-5.6"},
-        {"value": "gpt-6-sol", "label": "GPT-6 Sol", "group": "Previous"},
+        {"value": "gpt-6-sol", "label": "GPT-6 Sol", "group": "GPT-6"},
         {"value": "gpt-5.5", "label": "GPT-5.5", "group": "Previous"},
         {"value": "gpt-5.4", "label": "GPT-5.4", "group": "Previous"},
         {"value": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "group": "Previous"},
@@ -135,10 +138,11 @@ LLM_MODEL_CATALOG: Dict[str, List[Dict[str, str]]] = {
     ],
     # Anthropic Claude models. Source: the Anthropic Models API (2026-10-21).
     "anthropic": [
+        {"value": "claude-fable-5-2", "label": "Claude Fable 5.2", "group": "Latest"},
         {"value": "claude-opus-5-5", "label": "Claude Opus 5.5", "group": "Latest"},
         {"value": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5", "group": "Latest"},
         {"value": "claude-haiku-5-5", "label": "Claude Haiku 5.5", "group": "Latest"},
-        {"value": "claude-fable-5-1", "label": "Claude Fable 5.1", "group": "Latest"},
+        {"value": "claude-fable-5-1", "label": "Claude Fable 5.1", "group": "Previous"},
         {"value": "claude-opus-5", "label": "Claude Opus 5", "group": "Previous"},
         {"value": "claude-sonnet-5", "label": "Claude Sonnet 5", "group": "Previous"},
         {"value": "claude-fable-5", "label": "Claude Fable 5", "group": "Previous"},
@@ -290,6 +294,146 @@ LLM_MODEL_CATALOG: Dict[str, List[Dict[str, str]]] = {
     # `mlx-community/*` repos for `python -m mlx_lm.server --model <repo>`.
     # The agent-form JS detects which family the user picked and shows the
     # right startup command in the hint.
+    # Google's Gemini API. Source: the Gemini API models page and the list a
+    # key returns (2026-11-25). The 2.5 line, which Google no longer gives to
+    # new users, and the image, audio, video and
+    # embedding models are left out; any model ID still works as a custom
+    # model, and the live list (llms.model_lists) adds newer ones.
+    "gemini": [
+        {"value": "gemini-4-neon", "label": "Gemini 4 Neon", "group": "Gemini 4"},
+        {
+            "value": "gemini-4-hydrogen",
+            "label": "Gemini 4 Hydrogen",
+            "group": "Gemini 4",
+        },
+        {"value": "gemini-4-carbon", "label": "Gemini 4 Carbon", "group": "Gemini 4"},
+        {"value": "gemini-4-argon", "label": "Gemini 4 Argon", "group": "Gemini 4"},
+        {"value": "gemini-3.8-flash", "label": "Gemini 3.8 Flash", "group": "Gemini 3"},
+        {"value": "gemini-3.7-flash", "label": "Gemini 3.7 Flash", "group": "Gemini 3"},
+        {"value": "gemini-3.6-flash", "label": "Gemini 3.6 Flash", "group": "Gemini 3"},
+        {"value": "gemini-3.5-flash", "label": "Gemini 3.5 Flash", "group": "Gemini 3"},
+        {
+            "value": "gemini-3.5-flash-lite",
+            "label": "Gemini 3.5 Flash-Lite",
+            "group": "Gemini 3",
+        },
+        {
+            "value": "gemini-3.1-flash-lite",
+            "label": "Gemini 3.1 Flash-Lite",
+            "group": "Gemini 3",
+        },
+        {
+            "value": "gemini-3.1-pro-preview",
+            "label": "Gemini 3.1 Pro (preview)",
+            "group": "Preview",
+        },
+        {
+            "value": "gemini-3-flash-preview",
+            "label": "Gemini 3 Flash (preview)",
+            "group": "Preview",
+        },
+    ],
+    # OpenRouter serves hundreds of models; these are the newest from each
+    # lab that take tools, and the live list (llms.model_lists) adds more.
+    # Source: OpenRouter's models API (2026-11-19).
+    "openrouter": [
+        {
+            "value": "openrouter/auto",
+            "label": "Auto (OpenRouter picks)",
+            "group": "Routers",
+        },
+        {
+            "value": "openrouter/auto-code",
+            "label": "Auto, for coding agents",
+            "group": "Routers",
+        },
+        {"value": "openrouter/free", "label": "Any free model", "group": "Routers"},
+        {"value": "openai/gpt-6.2-sol", "label": "GPT-6.2 Sol", "group": "OpenAI"},
+        {"value": "openai/gpt-6.2-astra", "label": "GPT-6.2 Astra", "group": "OpenAI"},
+        {"value": "openai/gpt-6.1-terra", "label": "GPT-6.1 Terra", "group": "OpenAI"},
+        {
+            "value": "anthropic/claude-fable-5.2",
+            "label": "Claude Fable 5.2",
+            "group": "Anthropic",
+        },
+        {
+            "value": "anthropic/claude-opus-5.5",
+            "label": "Claude Opus 5.5",
+            "group": "Anthropic",
+        },
+        {
+            "value": "anthropic/claude-sonnet-5.5",
+            "label": "Claude Sonnet 5.5",
+            "group": "Anthropic",
+        },
+        {
+            "value": "anthropic/claude-haiku-5.5",
+            "label": "Claude Haiku 5.5",
+            "group": "Anthropic",
+        },
+        {"value": "google/gemini-4-neon", "label": "Gemini 4 Neon", "group": "Google"},
+        {
+            "value": "google/gemini-4-hydrogen",
+            "label": "Gemini 4 Hydrogen",
+            "group": "Google",
+        },
+        {
+            "value": "google/gemini-4-carbon",
+            "label": "Gemini 4 Carbon",
+            "group": "Google",
+        },
+        {"value": "x-ai/grok-4.7", "label": "Grok 4.7", "group": "xAI"},
+        {"value": "x-ai/grok-4.6", "label": "Grok 4.6", "group": "xAI"},
+        {
+            "value": "deepseek/deepseek-v4.1-flash",
+            "label": "DeepSeek V4.1 Flash",
+            "group": "DeepSeek",
+        },
+        {
+            "value": "deepseek/deepseek-v4-pro",
+            "label": "DeepSeek V4 Pro",
+            "group": "DeepSeek",
+        },
+        {
+            "value": "mistralai/mistral-large-4-0",
+            "label": "Mistral Large 4",
+            "group": "Mistral",
+        },
+        {
+            "value": "mistralai/mistral-medium-3-5",
+            "label": "Mistral Medium 3.5",
+            "group": "Mistral",
+        },
+        {"value": "qwen/qwen4-max", "label": "Qwen4 Max", "group": "Qwen"},
+        {"value": "qwen/qwen3.8-flash", "label": "Qwen3.8 Flash", "group": "Qwen"},
+        {
+            "value": "moonshotai/kimi-k3.1-pro",
+            "label": "Kimi K3.1 Pro",
+            "group": "Moonshot",
+        },
+        {"value": "z-ai/glm-5.3", "label": "GLM 5.3", "group": "Z.ai"},
+        {
+            "value": "minimax/minimax-m3.1-flash",
+            "label": "MiniMax M3.1 Flash",
+            "group": "MiniMax",
+        },
+        {
+            "value": "meta-llama/llama-4-maverick",
+            "label": "Llama 4 Maverick",
+            "group": "Meta",
+        },
+        {"value": "cohere/command-a-plus", "label": "Command A+", "group": "Cohere"},
+        {
+            "value": "nvidia/nemotron-3.5-super-vl",
+            "label": "Nemotron 3.5 Super VL",
+            "group": "NVIDIA",
+        },
+        {
+            "value": "recursive/flint-v1.0:free",
+            "label": "Flint 1.0 (free)",
+            "group": "Recursive",
+        },
+    ],
     "local-openai": [
         # GGUF — for llama.cpp's `llama-server`, LM Studio, llamafile
         {
@@ -360,6 +504,8 @@ DEFAULT_LLM_MODEL_BY_PROVIDER = {
     "ollama": "llama3.1:8b",
     "mlx": "mlx-community/gemma-4-E2B-it-4bit",
     "local-openai": "ggml-org/gemma-4-E2B-it-GGUF",
+    "openrouter": "openrouter/auto",
+    "gemini": "gemini-4-hydrogen",
 }
 
 

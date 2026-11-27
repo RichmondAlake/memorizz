@@ -6,7 +6,8 @@ import copy
 import inspect
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List
+import time
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     from .memagent import MemAgent
@@ -121,12 +122,19 @@ def normalize_delegation_plan(plan: Any) -> Any:
     return normalized
 
 
-def _count_call(agent: Any) -> None:
-    """Count a planning or combining call in the coordinator's run usage."""
+def _count_call(
+    agent: Any, *, stage: str = "delegation", started: Optional[float] = None
+) -> None:
+    """Count a planning or combining call in the coordinator's run usage.
+    ``started`` is ``time.perf_counter()`` from before the call."""
     counter = getattr(agent, "count_model_call", None)
     if callable(counter):
+        duration = (time.perf_counter() - started) * 1000 if started else None
         try:
-            counter()
+            try:
+                counter(stage=stage, duration_ms=duration)
+            except TypeError:
+                counter()  # an agent-like object with the older signature
         except Exception:
             logger.debug("Could not count the model call", exc_info=True)
 
@@ -376,8 +384,9 @@ class TaskDecomposer:
             logger.info("Calling LLM for task decomposition...")
             if not self.root_agent.model:
                 raise ValueError("Root agent has no configured LLMProvider")
+            asked = time.perf_counter()
             response = self.root_agent.model.generate(messages, tools=None)
-            _count_call(self.root_agent)
+            _count_call(self.root_agent, stage="planning", started=asked)
             response_text = self._response_text(response)
 
             logger.info(

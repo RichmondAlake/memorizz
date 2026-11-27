@@ -115,10 +115,16 @@
             const row = node('li');
             const link = node('a', 'inbox-item inbox-item--' + item.kind);
             link.href = item.href;
-            link.appendChild(node('span', 'inbox-kind', KIND_LABEL[item.kind] || 'Notice'));
-            link.appendChild(node('strong', '', item.title));
-            if (item.detail) link.appendChild(node('span', 'inbox-detail', item.detail));
-            link.appendChild(node('span', 'inbox-action', (item.action || 'Open') + ' →'));
+            // A dot for the kind, the title, one quiet line, and where it leads.
+            const dot = node('span', 'inbox-dot');
+            dot.setAttribute('aria-hidden', 'true');
+            const body = node('span', 'inbox-body');
+            body.appendChild(node('strong', '', item.title));
+            body.appendChild(node('span', 'inbox-detail', [KIND_LABEL[item.kind] || 'Notice', item.detail].filter(Boolean).join(' · ')));
+            const go = node('span', 'inbox-action', item.action || 'Open');
+            link.appendChild(dot);
+            link.appendChild(body);
+            link.appendChild(go);
             row.appendChild(link);
             list.appendChild(row);
         });

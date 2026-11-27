@@ -135,10 +135,33 @@ class ToolResult:
 
     value: Any
     outcome: ToolOutcome
+    # What a person should be shown for this result (a table, a list of
+    # pages): a small mapping with a ``kind``. It goes to the stream and the
+    # stored trace, never to the model.
+    display: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.outcome, ToolOutcome):
             object.__setattr__(self, "outcome", ToolOutcome.from_value(self.outcome))
+
+
+MAX_DISPLAY_CHARS = 8000
+
+
+def result_display(value: Any) -> Optional[Dict[str, Any]]:
+    """The display a tool attached to its result, when it is small enough to
+    travel with a trace event. None otherwise."""
+    display = getattr(value, "display", None) if isinstance(value, ToolResult) else None
+    if not isinstance(display, dict) or not display.get("kind"):
+        return None
+    try:
+        import json
+
+        if len(json.dumps(display, default=str)) > MAX_DISPLAY_CHARS:
+            return {"kind": display["kind"], "id": display.get("id"), "trimmed": True}
+    except (TypeError, ValueError):
+        return None
+    return dict(display)
 
 
 def _as_mapping(value: Any) -> Optional[Dict[str, Any]]:

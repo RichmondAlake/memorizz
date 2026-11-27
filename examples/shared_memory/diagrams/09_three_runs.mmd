@@ -1,0 +1,25 @@
+sequenceDiagram
+    autonumber
+    participant You
+    participant MH as MetaHarness
+    participant Mem as Shared memory
+    participant pi
+    participant Codex
+    participant CC as Claude Code
+    You->>MH: run 1 · brief (read-only)
+    MH->>Mem: retrieve for this task
+    Mem-->>MH: the Spring Sale record
+    MH->>pi: task + what memory holds
+    pi-->>MH: the rules, cited
+    MH->>Mem: save the answer
+    You->>MH: run 2 · build (edits files)
+    MH-->>You: approval needed
+    You->>MH: approve
+    MH->>Codex: task + record + the brief
+    Codex-->>MH: pricing.py changed
+    MH->>MH: run the host check
+    MH->>Mem: save the answer
+    You->>MH: run 3 · review (read-only)
+    MH->>CC: task + record + brief + build
+    CC-->>MH: rule-by-rule verdict
+    MH->>Mem: save the answer

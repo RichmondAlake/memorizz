@@ -39,6 +39,8 @@
             {% if turn.failed %}<span class="wf-failed-count">{{ turn.failed }} failed</span>{% endif %}
             <strong title="{{ turn.turn_id or turn.root_trace_id or '' }}">{{ turn.title }}</strong>
             <span class="wf-turn-meta">{% if turn.duration %}{{ turn.duration }} · {% endif %}{{ count(turn.span_count) }} span{{ '' if turn.span_count == 1 else 's' }}{% if turn.started_at %} · started <time data-wf-clock datetime="{{ turn.started_at }}">{{ turn.started_at[11:19] }}</time>{% endif %}{% if turn.warnings %} · <span class="wf-turn-warn">{{ turn.warnings }} with a missing or looping parent</span>{% endif %}</span>
+            {% set sent = observability_trace_link(selected_agent|default(none), turn.trace_export, turn.root_trace_id, turn.started_at) if turn.trace_export else none %}
+            {% if sent %}<a class="wf-turn-export" href="{{ sent.url }}" target="_blank" rel="noopener noreferrer" title="This turn was also sent to {{ sent.label }}. Open its trace there.">Open in {{ sent.label }} ↗</a>{% endif %}
         </summary>
         <p class="wf-turn-empty" data-wf-empty hidden>No spans in this turn match.</p>
         {% if turn.breakdown %}

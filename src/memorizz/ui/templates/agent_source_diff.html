@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% from '_ui.html' import page_header %}
+{% block title %}{{ agent_name }}'s changes - Memorizz{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/agent-source-diff.css?v=8">{% endblock %}
+{% block content %}
+{% call page_header("What " ~ agent_name ~ " changed", "The changes this agent's coding model made to its own copy of the MemoRizz code. Pick one version, or see everything that differs from the installed program.", back=('/agents/' ~ agent_id ~ '/source', 'Back to ' ~ agent_name ~ "'s source")) %}
+    <label class="sdiff-pick"><span class="sr-only">Show</span>
+        <select id="sdiff-version" aria-label="Which changes to show"></select>
+    </label>
+{% endcall %}
+
+<div id="sdiff-root" class="ed-scope" data-agent-id="{{ agent_id }}" data-agent-name="{{ agent_name }}">
+    <section class="panel sdiff-summary" id="sdiff-summary" hidden></section>
+    <section class="panel story" id="sdiff-story" hidden></section>
+    {#- The layout buttons sit on the diff they change, and stay in view. -#}
+    <div class="sdiff-bar" id="sdiff-bar" hidden>
+        <h2 class="panel-title">The change</h2>
+        <span class="sdiff-total" id="sdiff-bar-count"></span>
+        <span class="sdiff-bar-space"></span>
+    <div class="sdiff-toggle" role="group" aria-label="Layout">
+        <button class="btn btn-sm" type="button" data-layout="unified" aria-pressed="false">One column</button>
+        <button class="btn btn-sm" type="button" data-layout="split" aria-pressed="true">Side by side</button>
+    </div>
+    <a class="btn btn-sm" href="/api/agents/{{ agent_id }}/source/patch" id="sdiff-patch" hidden>Download as a patch</a>
+    </div>
+    <div class="sdiff-layout">
+        <nav class="sdiff-files" id="sdiff-files" aria-label="Files changed" hidden></nav>
+        <div class="sdiff-main" id="sdiff-main" aria-live="polite"></div>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/source-code.js?v=1" defer></script>
+<script src="/static/js/agent-source-diff.js?v=8" defer></script>
+{% endblock %}

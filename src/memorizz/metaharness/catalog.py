@@ -18,12 +18,15 @@ HARNESS_LABELS = {
     "deepseek": "DeepSeek",
     "pi": "pi",
     "hermes": "Hermes",
+    "droid": "Factory Droid",
 }
 
 PROVIDER_LABELS = {
     "anthropic": "Anthropic",
     "openai": "OpenAI",
     "deepseek": "DeepSeek",
+    "gemini": "Google Gemini",
+    "openrouter": "OpenRouter",
     "ollama": "Ollama (local)",
 }
 
@@ -233,6 +236,8 @@ def chat_setup(run: Dict[str, Any]) -> Dict[str, Any]:
         "network": str(permissions.get("network") or "none"),
         "write": permissions.get("workspace_mode") == "direct",
         "mcp_access": str(permissions.get("mcp_access") or "read_only"),
+        "mcp_memory_scope": str(permissions.get("mcp_memory_scope") or "run"),
+        "mcp_read_memory_ids": list(permissions.get("mcp_read_memory_ids") or []),
         "allow_dirty_workspace": bool(permissions.get("allow_dirty_workspace")),
         "allow_subagents": bool(permissions.get("allow_subagents")),
         "agent_id": str(task.get("agent_id") or ""),

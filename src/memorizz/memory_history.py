@@ -201,7 +201,14 @@ def _emit_change(provider, kind, record_id, before, after, operation):
     )
     store = ObservabilityStore(provider)
     head_id = "mem-head-" + _hash([str(kind), record_id])[:32]
-    head_row = _lookup(provider, head_id, MemoryType.SHARED_MEMORY)
+    head_row = (
+        # Where the ID lookup is the answer (Notion), a missing head is not
+        # looked for again by name.
+        provider.retrieve_by_id(head_id, MemoryType.SHARED_MEMORY)
+        if getattr(provider, "shared_records_found_by_id", None) is True
+        else _lookup(provider, head_id, MemoryType.SHARED_MEMORY)
+    )
+    head_row = _json(head_row) if isinstance(head_row, dict) else None
     head = ObservabilityStore._payload(head_row) if head_row else None
     previous = (
         head.get("event_id")
@@ -333,6 +340,7 @@ def enable_memory_history(provider):
                     with lock:
                         token = _writing.set(_writing.get() | {id(provider)})
                         try:
+                            untracked = False
                             try:
                                 bound = sig.bind(*args, **kwargs)
                                 bound.apply_defaults()
@@ -386,6 +394,12 @@ def enable_memory_history(provider):
                                         data.get("agent_id") or ""
                                     )
                                     targets = [(target, data)]
+                                    if method_name == "store" and _internal(data):
+                                        # A trace or a journal row is never
+                                        # journalled itself: reading it before
+                                        # and after the write is wasted work
+                                        # (three requests each on Notion).
+                                        untracked, targets = True, []
                                 elif method_name == "delete_all":
                                     try:
                                         targets = [
@@ -439,7 +453,7 @@ def enable_memory_history(provider):
                                 )
                                 return method(*args, **kwargs)
                             result = method(*args, **kwargs)
-                            if result is False or result is None:
+                            if untracked or result is False or result is None:
                                 return result
                             if method_name == "store_many":
                                 ids = (
@@ -671,9 +685,27 @@ class MemoryHistory:
         safe_limit = max(1, min(int(limit), 1000))
         rows = []
         query = getattr(self.provider, "query_memory_observations", None)
-        for kind in MemoryType:
-            if kind in {MemoryType.SHARED_MEMORY, MemoryType.MEMAGENT}:
-                continue
+        kinds = [
+            kind
+            for kind in MemoryType
+            if kind not in {MemoryType.SHARED_MEMORY, MemoryType.MEMAGENT}
+        ]
+        # A provider that pays per query (Notion) answers for every type at once.
+        across = getattr(self.provider, "query_memory_observations_across", None)
+        together = None
+        if callable(across):
+            together = {}
+            for kind, row in across(
+                kinds,
+                agent_id=agent_id,
+                memory_ids=wanted,
+                user_id=user_id,
+                application_id=application_id,
+                exclude_records=exclude_records,
+                limit=safe_limit,
+            ):
+                together.setdefault(kind, []).append(row)
+        for kind in kinds:
             excluded = {
                 str(identifier)
                 for memory_type, identifier in exclude_records
@@ -687,7 +719,9 @@ class MemoryHistory:
                 exclude_ids=excluded,
             )
             candidates = (
-                query(kind, **scope, limit=safe_limit - len(rows))
+                together.get(kind, [])
+                if together is not None
+                else query(kind, **scope, limit=safe_limit - len(rows))
                 if callable(query)
                 else MemoryProvider.query_memory_observations(
                     self.provider, kind, **scope, limit=safe_limit - len(rows)

@@ -154,7 +154,14 @@
                         step.error = !!block.is_error;
                         step.cache = block.cache || data.cache || null;
                         step.detail = (step.detail ? 'Input\n' + step.detail + '\n\n' : '') + 'Result\n' + output;
-                        if (block.is_error) step.summary = excerpt(output, 200);
+                        // Reaching outside the run's memory is refused, not broken:
+                        // say so here, since it is why the run found nothing.
+                        const refusal = /memory_out_of_scope:?\s*([^"\\\n]*)/.exec(output);
+                        if (refusal) {
+                            step.refused = true;
+                            step.error = false;
+                            step.summary = 'Refused: outside this run\u2019s memory. ' + refusal[1].trim();
+                        } else if (block.is_error) step.summary = excerpt(output, 200);
                         else if (data.status === 'approval_required') step.summary = 'Waiting for approval';
                     }
                 });
@@ -208,6 +215,8 @@
         const parts = [['subagent', 'subagent'], ['model', 'model call'], ['thinking', 'reasoning step'], ['tool', 'tool call'], ['command', 'command'], ['file', 'file change'], ['message', 'message']].filter(([kind]) => counts[kind]).map(([kind, label]) => counts[kind] + ' ' + label + (counts[kind] === 1 ? '' : 's'));
         const fromCache = steps.filter(step => step.kind === 'tool' && step.cache && step.cache.status === 'hit').length;
         if (fromCache) parts.push(fromCache + ' from cache');
+        const refused = steps.filter(step => step.refused).length;
+        if (refused) parts.push(refused + ' refused (outside its memory)');
         const last = steps[steps.length - 1];
         const hosts = new Map(steps.filter(step => step.toolId).map(step => [step.toolId, step]));
         const roots = [];
@@ -238,9 +247,9 @@
             const inner = step.children.length ? '<ol class="hx-traj-list hx-traj-children">' + step.children.map(item).join('') + '</ol>' : '';
             // A harness delegate's own run, one click away.
             const runLink = step.runId ? '<a class="hx-traj-run" href="/harnesses/runs/' + encodeURIComponent(step.runId) + '">Open its ' + esc(step.harness || 'harness') + ' run</a>' : '';
-            return '<li class="hx-traj-step hx-traj--' + step.kind + (step.error || (step.exit != null && Number(step.exit) !== 0) ? ' is-error' : '') + (running ? ' is-running' : '') + (cachedHit ? ' is-cached' : '') + '">'
+            return '<li class="hx-traj-step hx-traj--' + step.kind + (step.error || (step.exit != null && Number(step.exit) !== 0) ? ' is-error' : '') + (running ? ' is-running' : '') + (cachedHit ? ' is-cached' : '') + (step.refused ? ' is-refused' : '') + '">'
                 + '<span class="hx-traj-icon" aria-hidden="true"></span>'
-                + '<div class="hx-traj-body"><div class="hx-traj-head"><strong>' + esc(step.title) + '</strong>' + (meta ? '<span class="hx-traj-meta">' + esc(meta) + '</span>' : '') + '<time>+' + step.at.toFixed(1) + 's</time></div>'
+                + '<div class="hx-traj-body"><div class="hx-traj-head"><strong>' + esc(step.title) + '</strong>' + (step.refused ? '<span class="hx-traj-refused">Refused</span>' : '') + (meta ? '<span class="hx-traj-meta">' + esc(meta) + '</span>' : '') + '<time>+' + step.at.toFixed(1) + 's</time></div>'
                 + (step.summary ? '<p class="hx-traj-summary">' + esc(step.summary) + '</p>' : '') + runLink + detail + inner + '</div></li>';
         };
         container.innerHTML = '<p class="hx-traj-counts">' + esc(steps.length + ' steps' + (parts.length ? ' · ' + parts.join(' · ') : '')) + '</p><ol class="hx-traj-list">' + roots.map(item).join('') + '</ol>';

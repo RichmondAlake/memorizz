@@ -95,6 +95,7 @@ from ..tool_cache import (
     mcp_tool_is_cacheable,
 )
 from ..tool_context import get_tool_context
+from ..tool_outcomes import result_display
 from ..tooling import (
     ContextPolicy,
     SemanticToolRouter,
@@ -166,6 +167,32 @@ _UNFINISHED_TURN_CHARS = 4000
 _RAISE_ERRORS: ContextVar[Optional[bool]] = ContextVar(
     "memorizz_raise_errors", default=None
 )
+
+
+def _search_display(provider: str, query: str, results: List[Any]) -> Dict[str, Any]:
+    """What a person is shown for a web search: the pages found, in short."""
+    pages = []
+    for item in results[:8]:
+        if not isinstance(item, dict) or not item.get("url"):
+            continue
+        meta = item.get("metadata") or {}
+        pages.append(
+            {
+                "title": str(item.get("title") or item["url"])[:160],
+                "url": str(item["url"])[:400],
+                "snippet": " ".join(str(item.get("snippet") or "").split())[:260],
+                "published": str(
+                    meta.get("published_date") or meta.get("publishedDate") or ""
+                )[:32],
+            }
+        )
+    return {
+        "kind": "web_search",
+        "provider": provider,
+        "query": str(query)[:300],
+        "count": len(results),
+        "results": pages,
+    }
 
 
 def _memory_reranker(
@@ -604,6 +631,8 @@ class MemAgent:
         refine_interval_hours: Optional[float] = None,
         voice: bool = False,
         voice_config: Optional[Union[str, Dict[str, Any], Any]] = None,
+        observability: Optional[Union[bool, str, Dict[str, Any], Any]] = None,
+        observability_provider: Optional[Union[str, Dict[str, Any], Any]] = None,
     ):
         """Initialize the MemAgent with configuration.
 
@@ -617,6 +646,15 @@ class MemAgent:
         ``voice_config`` names another provider (``"elevenlabs"``, ``"vapi"``,
         ``"openai"``) or tunes it, e.g. ``{"provider": "elevenlabs", "voice":
         "Rachel"}``. Credentials come from the environment, never from here.
+
+        ``observability`` switches the agent's traces on or off: ``True`` (and
+        the default, ``None``) records each turn in MemoRizz's own trace
+        store, ``False`` records none. ``observability_provider`` also sends
+        each turn to another service: ``"sentry"``, or a dict such as
+        ``{"provider": "sentry", "org": "acme"}``; without one the traces
+        stay in MemoRizz. The provider's key (``SENTRY_DSN``) comes from the
+        environment, never from here. See :meth:`observability_status` and
+        :meth:`observability_url`.
         """
         # Eager creation: no first-use race between concurrent runs.
         _ContextLocal.initialize(self)
@@ -636,6 +674,15 @@ class MemAgent:
             else None
         )
         self._voice_provider: Optional[Any] = None
+        # Observability: whether turns are traced, and where the traces go
+        # besides MemoRizz's own store (None: nowhere else).
+        from ..observability.providers import observability_settings
+
+        (
+            self.observability,
+            self.observability_config,
+            self._observability_provider,
+        ) = observability_settings(observability, observability_provider)
         # Tools lent by an environment the agent is in (name -> tool names);
         # see enter_environment. Never saved.
         self._environment_tools: Dict[str, List[str]] = {}
@@ -1082,6 +1129,7 @@ class MemAgent:
                 "list_mcp_servers",
                 "mcp_list_tools",
                 "mcp_call_tool",
+                "send_page_snapshot",
                 "semantic_list_models",
                 "list_agent_harnesses",
                 "run_harness_task",
@@ -1272,6 +1320,39 @@ class MemAgent:
         reflection, importance ratings, skill distillation and consolidation.
         The agent's own model unless :meth:`with_background_model` set one."""
         return self.__dict__.get("_background_model") or self.model
+
+    def with_model_routing(self, routing: Any = None):
+        """Say which providers may answer for this agent's model, and which
+        models to fall back to.
+
+        For an agent whose model is on a gateway (``OpenRouter``). Pass a
+        :class:`~memorizz.llms.ModelRouting`, the same settings as a dict, or
+        ``None`` to go back to the gateway's defaults. The rules are saved
+        with the agent. Returns the agent, for chaining.
+        """
+        apply = getattr(self.model, "with_routing", None)
+        if not callable(apply):
+            name = type(self.model).__name__ if self.model is not None else "none"
+            raise ValueError(
+                "Routing needs a model on a gateway, such as OpenRouter; "
+                f"this agent's model is {name}"
+            )
+        apply(routing)
+        pinned = getattr(self, "_pinned_llm_config", None)
+        if isinstance(pinned, dict):
+            # A pinned config is what gets saved, so it carries the rules too.
+            rules = self.get_model_routing()
+            if rules:
+                pinned["routing"] = rules
+            else:
+                pinned.pop("routing", None)
+        return self
+
+    def get_model_routing(self) -> Dict[str, Any]:
+        """The routing rules in force, as a dict; empty when there are none."""
+        routing = getattr(self.model, "routing", None)
+        to_dict = getattr(routing, "to_dict", None)
+        return to_dict() if callable(to_dict) else {}
 
     def with_background_model(self, model: Any = None):
         """Run memory upkeep on a second, usually cheaper, model.
@@ -2490,10 +2571,18 @@ class MemAgent:
             except Exception:
                 entity_summary = ""
             if entity_summary:
+                # A record is the value as it stands now. Recalled messages
+                # are what was said at the time, and a memory several agents
+                # share keeps every older statement of a fact that changed.
                 sections.append(
-                    "Entity memory facts:\n"
+                    "Entity memory facts (the current values; where a recalled "
+                    "message or earlier turn says otherwise, these are right):\n"
                     + entity_summary
-                    + "\nUse the entity memory tools to keep these facts up to date."
+                    + (
+                        "\nUse the entity memory tools to keep these facts up to date."
+                        if self.entity_policy.writes
+                        else "\nYou read these records and cannot change them."
+                    )
                 )
                 self._record_memory_chars("entity", sections[-1])
 
@@ -2547,6 +2636,29 @@ class MemAgent:
                     "`expand_summary('<summary_id>')`:\n" + "\n".join(summary_lines)
                 )
                 self._record_memory_chars("summaries", sections[-1])
+
+        others = context.get("other_conversations") or []
+        if others:
+            lines = []
+            for item in others:
+                when = str(item.get("last_at") or "")[:16].replace("T", " ")
+                line = (
+                    f'- {when} UTC, {item.get("messages")} messages. '
+                    f'Opened with: "{item.get("opened_with")}"'
+                )
+                if item.get("last_asked"):
+                    line += f' Last asked: "{item["last_asked"]}"'
+                if item.get("last_answer"):
+                    line += f' Your last reply began: "{item["last_answer"]}"'
+                lines.append(line)
+            sections.append(
+                "Your other recent conversations with this person, newest "
+                "first. They are separate chats from this one. Use them when "
+                "asked what was discussed before or to pick a thread back up; "
+                "if something is not listed here, say you do not have it "
+                "rather than guessing:\n" + "\n".join(lines)
+            )
+            self._record_memory_chars("other_conversations", sections[-1])
 
         # Durable digest of this thread's tool_log entries — the placeholder
         # rows are filtered out of LLM history, so this is how tool_log_ids
@@ -3569,7 +3681,7 @@ class MemAgent:
                 router = getattr(self, "semantic_tool_router", None)
                 if router is not None and names:
                     router.disclose(names)
-            return result
+            return self._mcp_result(server_name, result)
 
         @governed_tool(deterministic=False, side_effects=False, domains=("mcp",))
         def mcp_call_tool(
@@ -3582,19 +3694,27 @@ class MemAgent:
 
         def mcp_list_resources(server_name: str) -> Dict[str, Any]:
             """List resources exposed by a configured MCP server."""
-            return self.mcp_manager.list_resources(server_name)
+            return self._mcp_result(
+                server_name, self.mcp_manager.list_resources(server_name)
+            )
 
         def mcp_list_resource_templates(server_name: str) -> Dict[str, Any]:
             """List parameterized resource templates exposed by an MCP server."""
-            return self.mcp_manager.list_resource_templates(server_name)
+            return self._mcp_result(
+                server_name, self.mcp_manager.list_resource_templates(server_name)
+            )
 
         def mcp_read_resource(server_name: str, uri: str) -> Dict[str, Any]:
             """Read a resource from a configured MCP server."""
-            return self.mcp_manager.read_resource(server_name, uri)
+            return self._mcp_result(
+                server_name, self.mcp_manager.read_resource(server_name, uri)
+            )
 
         def mcp_list_prompts(server_name: str) -> Dict[str, Any]:
             """List prompts exposed by a configured MCP server."""
-            return self.mcp_manager.list_prompts(server_name)
+            return self._mcp_result(
+                server_name, self.mcp_manager.list_prompts(server_name)
+            )
 
         def mcp_get_prompt(
             server_name: str,
@@ -3602,8 +3722,25 @@ class MemAgent:
             arguments: Optional[Dict[str, str]] = None,
         ) -> Dict[str, Any]:
             """Get a prompt template from a configured MCP server."""
-            return self.mcp_manager.get_prompt(
-                server_name, prompt_name, arguments=arguments or {}
+            return self._mcp_result(
+                server_name,
+                self.mcp_manager.get_prompt(
+                    server_name, prompt_name, arguments=arguments or {}
+                ),
+            )
+
+        @governed_tool(deterministic=False, side_effects=False, domains=("mcp",))
+        def send_page_snapshot(url: str, title: str = "", summary: str = "") -> Any:
+            """Show the user a snapshot of a page you created or changed (a
+            Notion page, board or database, a document), in the conversation.
+            Call it once after the page is saved, with the page's web address.
+            A Notion page is read as it is now; for any other page also give
+            its title and a one-line summary. Afterwards give the link and one
+            line on what you did, not the page's content."""
+            from ..page_snapshots import take_snapshot
+
+            return take_snapshot(
+                url, title=title, summary=summary, mcp_manager=self.mcp_manager
             )
 
         list_mcp_servers.__name__ = "list_mcp_servers"
@@ -3623,6 +3760,7 @@ class MemAgent:
         self.tool_manager.add_tool(mcp_read_resource)
         self.tool_manager.add_tool(mcp_list_prompts)
         self.tool_manager.add_tool(mcp_get_prompt)
+        self.tool_manager.add_tool(send_page_snapshot)
         self._mcp_tools_registered = True
         self._register_cached_mcp_tools()
 
@@ -3796,8 +3934,9 @@ class MemAgent:
                 "message": (
                     f"Tell the user in one short sentence that {label} "
                     f"{needs} for this agent yet, and that they can connect it now; "
-                    "the app offers to. Do not offer workarounds or pretend to "
-                    "have done it."
+                    "the app shows the button for it right here, so do not send "
+                    "them to another page. Do not offer workarounds or pretend "
+                    "to have done it."
                 ),
             }
 
@@ -3812,7 +3951,38 @@ class MemAgent:
             if self._approval_execution_active
             else self.mcp_manager.call_tool
         )
-        return method(server_name=server_name, tool_name=tool_name, arguments=arguments)
+        return self._mcp_result(
+            server_name,
+            method(server_name=server_name, tool_name=tool_name, arguments=arguments),
+        )
+
+    def _mcp_result(self, server_name: str, result: Any) -> Any:
+        """An MCP answer on its way to the model. When the server refused its
+        saved sign-in, the app offers the sign-in now, as ``request_capability``
+        does, instead of leaving the model to try the server's other tools."""
+        if (
+            not isinstance(result, dict)
+            or result.get("error_code") != "authorization_required"
+        ):
+            return result
+        try:
+            session = session_for(self)
+            if session is None:
+                return
+            for row in self._capability_state():
+                if row.get("status") == "needs_sign_in" and row.get("via") == str(
+                    server_name
+                ):
+                    session.emit(
+                        "capability.requested",
+                        capability=row["id"],
+                        title=row["title"],
+                        status=row["status"],
+                        reason=f"{server_name} needs signing in again",
+                    )
+        except Exception as exc:
+            logger.debug("Could not offer the sign-in for %s: %s", server_name, exc)
+        return result
 
     @staticmethod
     def _mcp_tool_name(server_name: str, tool_name: str) -> str:
@@ -4032,6 +4202,7 @@ class MemAgent:
             from .entity_policy import EntityPolicy
 
             self.entity_policy = EntityPolicy.from_value(policy)
+            self._sync_entity_write_tool()
         if capture != "keep":
             from dataclasses import replace as replace_config
 
@@ -4090,10 +4261,10 @@ class MemAgent:
         self._internet_access_disabled_reason = None
         self._internet_access_disabled_until = None
 
+        # A different provider brings different tools, so start again.
+        self._unregister_internet_access_tools()
         if provider:
             self._register_internet_access_tools()
-        else:
-            self._unregister_internet_access_tools()
 
         return self
 
@@ -4959,8 +5130,148 @@ class MemAgent:
             self._register_self_aware_tools()
         else:
             self._unregister_self_aware_tools()
+        self._sync_own_source()
 
         return self
+
+    def has_own_source(self) -> bool:
+        """True when this agent keeps its own copy of the MemoRizz source."""
+        return bool(
+            self.has_self_awareness()
+            and self.self_awareness_manager.get_config().get("own_source")
+        )
+
+    def self_source(self):
+        """This agent's versioned copy of the MemoRizz source.
+
+        The copy is made the first time it is asked for. Edits there never
+        touch the installed package; see ``memorizz.memagent.self_source``."""
+        from .self_source import SelfSource
+
+        return SelfSource(self.agent_id)
+
+    def self_errors(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """This agent's recent errors: its error log and failed trace steps."""
+        from .self_repair import recent_failures
+
+        return recent_failures(self, limit)
+
+    def recommend_self_fix(
+        self, focus: Optional[str] = None, on_step: Optional[Callable] = None
+    ) -> Dict[str, Any]:
+        """Have the coding model read this agent's errors and its source, and
+        say what is wrong and how to fix it. Nothing is changed."""
+        from .self_repair import SelfRepair
+
+        self._require_own_source()
+        return SelfRepair(self, on_step=on_step).recommend(focus)
+
+    def fix_self(
+        self,
+        recommendation: Optional[str] = None,
+        focus: Optional[str] = None,
+        on_step: Optional[Callable] = None,
+    ) -> Dict[str, Any]:
+        """Have the coding model make a fix in this agent's copy of the
+        source, check it, and keep it as a new version."""
+        from .self_repair import SelfRepair
+
+        self._require_own_source()
+        return SelfRepair(self, on_step=on_step).fix(recommendation, focus)
+
+    def _require_own_source(self) -> None:
+        if not self.has_own_source():
+            raise ValueError(
+                "This agent has no copy of its source. Turn it on with "
+                "with_self_aware(True, {'own_source': True})."
+            )
+
+    def _sync_own_source(self) -> None:
+        """Make the copy, watch for errors and offer the tools, or undo that."""
+        from . import self_repair
+
+        if not self.has_own_source():
+            self_repair.unwatch(self.agent_id)
+            self._unregister_own_source_tools()
+            return
+        try:
+            self.self_source().ensure()
+        except Exception as exc:
+            logger.warning("Could not make the agent's copy of the source: %s", exc)
+            return
+        self_repair.watch(self.agent_id)
+        self._register_own_source_tools()
+
+    def _register_own_source_tools(self) -> None:
+        if not self.tool_manager or getattr(
+            self, "_own_source_tools_registered", False
+        ):
+            return
+
+        def self_source_status() -> Dict[str, Any]:
+            """Your own copy of the MemoRizz source: where it is, the version it started from, and the versions you have kept."""
+            source = self.self_source()
+            return {**source.status(), "kept_versions": source.versions()[:10]}
+
+        def self_source_diff(version: str = "") -> Dict[str, Any]:
+            """What changed in your copy of the source: one version by its ID, 'all' for everything since the install, or empty for edits not yet kept."""
+            try:
+                return {"ok": True, "diff": self.self_source().diff(version or None)}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        def self_recent_errors(limit: int = 15) -> Any:
+            """Your own recent errors: messages from your error log with the source files and lines, and the failed steps in your traces."""
+            return self.self_errors(limit) or "No errors are recorded."
+
+        def self_read_trace(turn_id: str) -> Any:
+            """Every recorded step of one of your own turns, by its turn_id."""
+            from .self_repair import read_trace
+
+            return read_trace(self, turn_id) or "No steps are recorded for that turn."
+
+        def self_recommend_fix(focus: str = "") -> Dict[str, Any]:
+            """Have your coding model read your recent errors and your source, and report the problem, its cause and a recommended fix. Changes nothing."""
+            try:
+                return {"ok": True, **self.recommend_self_fix(focus or None)}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        @governed_tool(
+            requires_approval=True,
+            side_effects=True,
+            deterministic=False,
+            domains=("self_aware", "workspace"),
+        )
+        def self_apply_fix(recommendation: str = "", focus: str = "") -> Dict[str, Any]:
+            """Have your coding model make a fix in your own copy of the source, check it, and keep it as a new version. Pass the recommendation you were given."""
+            try:
+                return {
+                    "ok": True,
+                    **self.fix_self(recommendation or None, focus or None),
+                }
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        tools = (
+            self_source_status,
+            self_source_diff,
+            self_recent_errors,
+            self_read_trace,
+            self_recommend_fix,
+            self_apply_fix,
+        )
+        for tool in tools:
+            self.tool_manager.add_tool(tool)
+        self._own_source_tool_names = tuple(tool.__name__ for tool in tools)
+        self._own_source_tools_registered = True
+
+    def _unregister_own_source_tools(self) -> None:
+        if not getattr(self, "_own_source_tools_registered", False):
+            return
+        for tool_name in getattr(self, "_own_source_tool_names", ()):
+            self.tool_manager.remove_tool(tool_name)
+        self._own_source_tools_registered = False
 
     def has_self_awareness(self) -> bool:
         """Return True when self-aware tooling is enabled."""
@@ -5312,6 +5623,10 @@ class MemAgent:
                 )
             except Exception as exc:
                 logger.debug("Learning run-start capture failed: %s", exc)
+        if self.has_own_source():
+            from .self_repair import current_agent_id
+
+            current_agent_id.set(self.agent_id)
         if emit_start:
             self._emit_trace_turn_start()
 
@@ -6363,13 +6678,29 @@ class MemAgent:
                         continue
                     if isinstance(value, (int, float)):
                         metadata[target] = value
+                # A gateway that bills per call reports the charge itself.
+                charged = usage.get("cost_usd")
+                if isinstance(charged, (int, float)) and not isinstance(charged, bool):
+                    metadata["provider_cost_usd"] = charged
         return metadata
+
+    def _price_call(self, metadata: Dict[str, Any]) -> None:
+        """Add the cost of one model call to its record: the charge the
+        provider reported, else the list rate for its tokens."""
+        pricing = getattr(self, "usage_pricing", DEFAULT_PRICING)
+        try:
+            metadata.update(pricing.quote(metadata))
+        except Exception:
+            logger.debug("Usage pricing unavailable", exc_info=True)
+        # The reported charge is now the call's cost; it is not a trace field.
+        metadata.pop("provider_cost_usd", None)
 
     def _add_call_cost(self, call: Dict[str, Any]) -> None:
         """Add a priced model call to the run's cost; count calls that could
         not be priced, so a partial total is never shown as the whole."""
         cost = call.get("cost_usd")
-        if call.get("cost_status") == "calculated" and cost is not None:
+        priced = call.get("cost_status") in {"calculated", "provider_reported"}
+        if priced and cost is not None:
             self._run_usage["cost_usd"] = round(
                 float(self._run_usage.get("cost_usd") or 0) + float(cost), 8
             )
@@ -6378,17 +6709,37 @@ class MemAgent:
                 int(self._run_usage.get("unpriced_calls") or 0) + 1
             )
 
-    def count_model_call(self) -> None:
+    def count_model_call(
+        self, *, stage: str = "delegation", duration_ms: Optional[float] = None
+    ) -> None:
         """Add the model's last call to this run's usage and cost, for calls
-        made outside the tool loop (planning and combining delegates' work)."""
+        made outside the tool loop (planning and combining delegates' work).
+        Inside a traced turn the call is also a model result in that trace,
+        so the run shows the tokens and the time it spent."""
         metadata = self._model_trace_metadata()
-        pricing = getattr(self, "usage_pricing", DEFAULT_PRICING)
-        try:
-            metadata.update(pricing.quote(metadata))
-        except Exception:
-            logger.debug("Usage pricing unavailable", exc_info=True)
+        self._price_call(metadata)
         add_call_usage(self._run_usage, metadata)
         self._add_call_cost(metadata)
+        if self._stream_trace_events is None:
+            return
+        span_id = str(uuid.uuid4())
+        payload = {
+            "trace_kind": "model_result",
+            "title": "Model result",
+            "trace_id": f"model:{span_id}:result",
+            "span_id": span_id,
+            "parent_span_id": self._current_root_trace_id,
+            "iteration": 0,
+            "stage": stage,
+            "status": "success",
+            "success": True,
+            "error_code": "",
+            "content": "",
+            **metadata,
+        }
+        if duration_ms is not None:
+            payload["duration_ms"] = round(float(duration_ms), 3)
+        self._emit_stream_event("trace", payload)
 
     def _start_model_trace(self, *, iteration: int, stage: str) -> tuple[str, float]:
         span_id = str(uuid.uuid4())
@@ -6453,11 +6804,7 @@ class MemAgent:
                 if key in {"model", "provider", "max_output_tokens"}
             }
         model_metadata.update(response_metadata or {})
-        pricing = getattr(self, "usage_pricing", DEFAULT_PRICING)
-        try:
-            model_metadata.update(pricing.quote(model_metadata))
-        except Exception:
-            logger.debug("Usage pricing unavailable", exc_info=True)
+        self._price_call(model_metadata)
         if error is None:
             add_call_usage(self._run_usage, model_metadata)
             self._add_call_cost(model_metadata)
@@ -7053,6 +7400,9 @@ class MemAgent:
                     "harness_verification_command"
                 ),
                 execution_backend=(tool_context or {}).get("harness_execution_backend"),
+                # Access the caller already approved (the playground's
+                # grant) or the folder it chose for this conversation.
+                parent_run=(tool_context or {}).get("harness_parent"),
             )
             if session_for(self) is not None and result.status.value != "succeeded":
                 raise ProviderStreamError("harness_" + str(result.status.value))
@@ -7067,41 +7417,15 @@ class MemAgent:
             and self.delegation_config.get("mode", "auto") in {"auto", "deterministic"}
             and not (tool_context or {}).get("_memorizz_skip_delegation")
         ):
-            result = self.delegate(
+            return self._run_delegation(
                 query,
-                memory_id=memory_id,
-                thread_id=thread_id,
+                memory_id,
+                thread_id,
                 user_id=user_id,
                 context=context,
                 tool_context=tool_context,
-                return_report=delegated_execution.get()
-                or bool(self.delegation_config.get("return_report", False)),
+                trace_tags=trace_tags,
             )
-            if delegated_execution.get():
-                for warning in result.get("recording_warnings", []):
-                    report_recording_warning(
-                        "nested_" + warning["operation"], RuntimeError(warning["error"])
-                    )
-                if result.get("execution", {}).get("workers_still_running"):
-                    report_recording_warning(
-                        "nested_workers_running",
-                        RuntimeError("Nested workers still require settlement"),
-                    )
-                if not result["ok"]:
-                    status = (
-                        result["outcome"]
-                        if result["outcome"] in {"waiting", "cancelled"}
-                        else "failed"
-                    )
-                    raise AgentExecutionError(
-                        result.get("error_code") or "nested_delegation_failed",
-                        result.get("error")
-                        or "Nested delegation did not complete successfully",
-                        status=status,
-                        metadata={"workflow_report": result},
-                    )
-                return result["response"]
-            return result
         logger.info(f"MemAgent {self.agent_id} executing query: {query[:50]}...")
 
         # M4: scope per-call tool context for tools reading via get_tool_context().
@@ -7207,6 +7531,92 @@ class MemAgent:
                 self._stream_trace_events = None
             # M4: always release the per-call tool_context scope.
             reset_tool_context(_tc_token)
+
+    def _run_delegation(
+        self,
+        query: str,
+        memory_id: Optional[str],
+        thread_id: Optional[str],
+        *,
+        user_id: Optional[str],
+        context: Optional[Dict[str, Any]],
+        tool_context: Optional[Dict[str, Any]],
+        trace_tags: Optional[Dict[str, str]],
+    ) -> Any:
+        """A coordinator's turn: hand the request to its delegates, as one
+        traced run of its own.
+
+        Each delegate's turn is a run of that delegate. Without a run for the
+        coordinator, the turn that started them all was missing from the
+        Agents page and from Observability, and the model calls that planned
+        the work and combined the results were counted nowhere."""
+        self._begin_trace_turn(user_id, query=query, trace_tags=trace_tags)
+        turn_id = self._current_turn_id
+        status, error_code = "error", None
+        try:
+            result = self.delegate(
+                query,
+                memory_id=memory_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                context=context,
+                tool_context=tool_context,
+                return_report=delegated_execution.get()
+                or bool(self.delegation_config.get("return_report", False)),
+            )
+            if delegated_execution.get():
+                for warning in result.get("recording_warnings", []):
+                    report_recording_warning(
+                        "nested_" + warning["operation"], RuntimeError(warning["error"])
+                    )
+                if result.get("execution", {}).get("workers_still_running"):
+                    report_recording_warning(
+                        "nested_workers_running",
+                        RuntimeError("Nested workers still require settlement"),
+                    )
+                if not result["ok"]:
+                    nested = (
+                        result["outcome"]
+                        if result["outcome"] in {"waiting", "cancelled"}
+                        else "failed"
+                    )
+                    raise AgentExecutionError(
+                        result.get("error_code") or "nested_delegation_failed",
+                        result.get("error")
+                        or "Nested delegation did not complete successfully",
+                        status=nested,
+                        metadata={"workflow_report": result},
+                    )
+                status = "success"
+                return result["response"]
+            if isinstance(result, dict) and result.get("ok") is False:
+                error_code = str(result.get("error_code") or "delegation_failed")
+            else:
+                status = "success"
+            return result
+        except StreamCancelled:
+            status, error_code = "cancelled", "cancelled"
+            raise
+        except ApprovalRequired:
+            status, error_code = "approval_required", "approval_required"
+            raise
+        except Exception as exc:
+            error_code = str(getattr(exc, "code", None) or type(exc).__name__)
+            raise
+        finally:
+            # With no delegate to give the work to, the coordinator answers
+            # itself: that turn opened, closed and saved its own trace.
+            if (
+                self._current_turn_id == turn_id
+                and self._stream_trace_events is not None
+            ):
+                self._finish_trace_turn(status, error_code=error_code, query=query)
+                self._record_stream_trace_bundle(
+                    str(memory_id or self._current_memory_id or ""),
+                    str(thread_id or ""),
+                    user_id=user_id,
+                )
+                self._stream_trace_events = None
 
     def delegate(
         self,
@@ -8263,7 +8673,10 @@ class MemAgent:
         from ..llms.streaming import streaming_capabilities
 
         if self.model is None and session_for(self) is not None:
-            raise ProviderStreamError("model_not_configured")
+            raise ProviderStreamError(
+                "model_not_configured",
+                detail=self._no_llm_message().removeprefix("Error: "),
+            )
         if not self.model or not streaming_capabilities(self.model)["text_deltas"]:
             # Fallback: run synchronously and yield the full result
             yield self.run(
@@ -8667,6 +9080,9 @@ class MemAgent:
                         record_pipeline_metric(
                             self.memory_provider, "dropped_metadata_fields"
                         )
+            # What to show a person for this step; bounded where it was made.
+            if isinstance(event.get("display"), dict) and event["display"].get("kind"):
+                entry["display"] = dict(event["display"])
             for field in metadata_fields:
                 value = event.get(field)
                 if field == "grounding_source_ids" and isinstance(value, (list, tuple)):
@@ -8692,33 +9108,51 @@ class MemAgent:
     ) -> None:
         """Persist reasoning/tool traces outside the conversational recall path."""
         session = session_for(self)
-        if not self.memory_provider:
+        if not getattr(self, "observability", True):
+            # observability=False: the turn leaves no trace anywhere.
             if session:
-                session.persistence["trace"] = "not_configured"
+                session.persistence["trace"] = "disabled"
             return
+        if not self.memory_provider and session:
+            session.persistence["trace"] = "not_configured"
         # A handful of legacy provider-like integrations expose ``store`` but
         # no way to list or query a memory type. Writing trace bundles there
         # would create permanently unreadable data. Full MemoryProvider
         # implementations always expose at least one of these read surfaces.
-        if not any(
+        can_store = bool(self.memory_provider) and any(
             callable(getattr(self.memory_provider, method_name, None))
             for method_name in ("query_observability_records", "list_all")
-        ):
+        )
+        exports = getattr(self, "observability_config", None) is not None
+        if not can_store and not exports:
             return
 
         trace_events = self._build_trace_bundle_events(self._stream_trace_events)
         if not trace_events:
             return
 
+        context = {
+            **self._trace_identity_payload(),
+            "memory_id": memory_id,
+            "thread_id": thread_id,
+            "user_id": user_id,
+        }
+        if exports:
+            sent_to = self._export_trace_turn(context, trace_events)
+            if sent_to:
+                # MemoRizz's copy says where else the turn went, so the
+                # Traces page links only turns that reached the provider.
+                root = context.get("root_trace_id")
+                for event in reversed(trace_events):
+                    if event.get("span_id") == root:
+                        event["trace_export"] = sent_to
+                        break
+        if not can_store:
+            return
+
         try:
             from ..observability import ObservabilityStore
 
-            context = {
-                **self._trace_identity_payload(),
-                "memory_id": memory_id,
-                "thread_id": thread_id,
-                "user_id": user_id,
-            }
             ObservabilityStore(self.memory_provider).record_trace_bundle(
                 trace_context=context,
                 events=trace_events,
@@ -9110,21 +9544,28 @@ class MemAgent:
         messages: List[Dict[str, Any]], message: Any
     ) -> None:
         """Append the assistant's tool-call message to the running history."""
+
+        def call(tc: Any) -> Dict[str, Any]:
+            entry: Dict[str, Any] = {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
+            }
+            # What the provider put beside the call and wants back with it
+            # (Gemini's thought signature).
+            extra = getattr(tc, "extra_content", None)
+            if isinstance(extra, dict) and extra:
+                entry["extra_content"] = extra
+            return entry
+
         messages.append(
             {
                 "role": "assistant",
                 "content": message.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in message.tool_calls
-                ],
+                "tool_calls": [call(tc) for tc in message.tool_calls],
             }
         )
 
@@ -9650,6 +10091,7 @@ class MemAgent:
         # must not rely on a prior model turn having populated the field.
         self._current_user_id = user_id
         tool_started_at = time.perf_counter()
+        tool_display: Optional[Dict[str, Any]] = None
 
         tool_name = tool_call.function.name
         raw_arguments = tool_call.function.arguments
@@ -9920,6 +10362,7 @@ class MemAgent:
                                 self.tool_cache.bypass("result_not_copyable")
                                 cache_key = None
 
+                tool_display = result_display(result)
                 result, tool_outcome = normalize_tool_result(result)
                 failed = not tool_outcome.ok
                 if cache_key and cache_hit is None:
@@ -9968,6 +10411,7 @@ class MemAgent:
                     }
 
         if tool_outcome is None:
+            tool_display = result_display(result)
             result, tool_outcome = normalize_tool_result(result)
         tool_failed = not tool_outcome.ok
         if (
@@ -10023,6 +10467,7 @@ class MemAgent:
                 "error_code": error_code,
                 "duration_ms": duration_ms,
                 "cache": cache_info,
+                "display": tool_display,
             },
         )
 
@@ -10966,6 +11411,31 @@ class MemAgent:
                         (MemoryType.WORKFLOW_MEMORY, "workflow", None, None)
                     )
 
+                # A chat surface with a memory per conversation: the same
+                # person's other conversations are recalled alongside.
+                other_memories = self._other_recall_memories(policy)
+                if other_memories and any(
+                    kind == MemoryType.CONVERSATION_MEMORY
+                    for kind, _, _, _ in candidate_sources
+                ):
+                    for other_memory_id in other_memories:
+                        for retrieval_query in retrieval_queries:
+                            snippets = self._timed_memory_read(
+                                "episodic",
+                                self.memory_manager.retrieve_relevant_memories,
+                                query=retrieval_query,
+                                memory_type=MemoryType.CONVERSATION_MEMORY,
+                                memory_id=other_memory_id,
+                                limit=policy.candidate_limit,
+                                user_id=user_id,
+                                include_embedding=True,
+                                thread_id=None,
+                                namespace=None,
+                            )
+                            for row in snippets or []:
+                                if not sealed_elsewhere(row, self._current_thread_id):
+                                    candidates.append(("episodic", row))
+
                 for (
                     memory_type,
                     source,
@@ -11099,7 +11569,97 @@ class MemAgent:
             except Exception as e:
                 logger.debug("Failed to load summary references: %s", e)
 
+        try:
+            others = self._other_conversations_digest(
+                self._other_recall_memories(self._active_retrieval_policy()),
+                user_id=user_id,
+            )
+        except Exception as exc:
+            logger.debug("Could not list other conversations: %s", exc)
+            others = []
+        if others:
+            context["other_conversations"] = others
+
         return context
+
+    def _other_recall_memories(self, policy: Any) -> List[str]:
+        """The other memories this turn may read conversations from: none for
+        a sealed or thread-scoped policy, or for a delegate's task."""
+        if (
+            getattr(policy, "conversation_scope", "memory") != "memory"
+            or delegated_execution.get()
+        ):
+            return []
+        current = str(self._current_memory_id or "")
+        return [
+            memory_id
+            for memory_id in getattr(policy, "also_recall_from", ()) or ()
+            if memory_id != current
+        ]
+
+    def _other_conversations_digest(
+        self, memory_ids: List[str], *, user_id: Optional[str] = None, limit: int = 8
+    ) -> List[Dict[str, Any]]:
+        """A line on each of the person's other recent conversations: how it
+        opened, when it was last active and how it last stood. Recall finds
+        past messages by likeness to the question; this is what answers
+        "what have we been talking about?"."""
+        provider = self.memory_provider
+        read = getattr(
+            provider, "retrieve_conversation_history_ordered_by_timestamp", None
+        )
+        if not memory_ids or not callable(read):
+            return []
+
+        def text_of(row: Dict[str, Any]) -> str:
+            content = row.get("content")
+            if isinstance(content, dict):
+                content = content.get("content") or content.get("text")
+            return " ".join(str(content or row.get("text") or "").split())
+
+        found: List[Dict[str, Any]] = []
+        for memory_id in memory_ids[:24]:
+            try:
+                rows = read(memory_id=memory_id, limit=80) or []
+            except Exception:
+                continue
+            turns = []
+            for row in rows:
+                if not isinstance(row, dict) or sealed_elsewhere(
+                    row, self._current_thread_id
+                ):
+                    continue
+                owner = row.get("user_id")
+                if user_id and owner and str(owner) != str(user_id):
+                    continue
+                role = str(row.get("role") or "").lower()
+                text = text_of(row)
+                # A turn held for approval is a note, not something said.
+                if (
+                    role in {"user", "assistant"}
+                    and text
+                    and not text.lower().startswith("[waiting for approval")
+                ):
+                    turns.append((str(row.get("timestamp") or ""), role, text))
+            if not turns:
+                continue
+            turns.sort(key=lambda turn: turn[0])
+            asked = [turn for turn in turns if turn[1] == "user"]
+            answered = [turn for turn in turns if turn[1] == "assistant"]
+            found.append(
+                {
+                    "memory_id": memory_id,
+                    "last_at": turns[-1][0],
+                    "messages": len(turns),
+                    "opened_with": (asked[0][2] if asked else turns[0][2])[:140],
+                    "last_asked": asked[-1][2][:200] if len(asked) > 1 else "",
+                    # The person's words carry the topics; a long reply here would
+                    # hand back whatever the model said last time as fact.
+                    "last_answer": answered[-1][2][:120] if answered else "",
+                }
+            )
+        found.sort(key=lambda item: item["last_at"], reverse=True)
+        return found[:limit]
 
     def _build_system_prompt(self) -> str:
         """Build the STATIC system prompt (stable prompt-cache prefix).
@@ -11304,7 +11864,11 @@ class MemAgent:
                     else "- Nothing is stored about this user's entities yet, so there is nothing to look up.\n"
                 )
                 + (
-                    "- Facts the user shares about themselves and others are saved automatically after each turn; call 'entity_memory_upsert' only when the user asks you to correct or change a stored fact.\n"
+                    # A reader of a memory others keep: the record is the
+                    # current value, whatever an older message said.
+                    "- You read these records and do not change them. A record is the current value: when it disagrees with an earlier message in the conversation or in memory, the record is right.\n"
+                    if not self.entity_policy.writes
+                    else "- Facts the user shares about themselves and others are saved automatically after each turn; call 'entity_memory_upsert' only when the user asks you to correct or change a stored fact.\n"
                     if self._turn_capture_mode()
                     else "- After the user shares stable personal info (name, preferences, background, ongoing projects, likes/dislikes), call 'entity_memory_upsert' with the attribute/value pair so it persists.\n"
                 )
@@ -11313,8 +11877,12 @@ class MemAgent:
                     if self.entity_policy.self_only
                     else ""
                 )
-                + "- Only store verifiable statements; skip speculative or time-sensitive details.\n"
-                "- Always keep JSON fields descriptive (e.g., attribute 'favorite_hobby', value 'hiking in the mountains')."
+                + (
+                    "- Only store verifiable statements; skip speculative or time-sensitive details.\n"
+                    "- Always keep JSON fields descriptive (e.g., attribute 'favorite_hobby', value 'hiking in the mountains')."
+                    if self.entity_policy.writes
+                    else "- If a record looks wrong, say so; the agent that keeps it will correct it."
+                )
             )
 
         # 7. Internet access instructions
@@ -11393,6 +11961,21 @@ class MemAgent:
                 "- Use 'self_aware_run_command' only for allowlisted host commands.\n"
                 "- Keep operations bounded and within allowed roots."
             )
+            if self.has_own_source():
+                prompt_parts.append(
+                    "Your own source code:\n"
+                    "You have your own versioned copy of the MemoRizz source "
+                    "you run on. Changes there are kept as versions and never "
+                    "alter the installed program.\n"
+                    "- 'self_recent_errors' and 'self_read_trace' show what "
+                    "went wrong in your own turns.\n"
+                    "- 'self_recommend_fix' has your coding model find the "
+                    "cause and recommend a fix. Report it to the user.\n"
+                    "- 'self_apply_fix' makes the fix and keeps it as a new "
+                    "version; it needs the user's approval.\n"
+                    "- 'self_source_status' and 'self_source_diff' show the "
+                    "versions you have kept and what each changed."
+                )
 
         # 12. Loaded skills (local files)
         if self.skills:
@@ -11900,6 +12483,10 @@ class MemAgent:
                 # run(..., memory_capture=False): this turn's message was not
                 # written by the user, so nothing from it becomes memory.
                 raise ValueError(_NO_CAPTURE_REFUSAL)
+            if not self.entity_policy.writes:
+                from .entity_policy import READ_ONLY_REFUSAL
+
+                raise ValueError(READ_ONLY_REFUSAL)
             normalized_attributes = _normalize_attributes(attributes)
             normalized_metadata = _normalize_json_field(metadata, dict)
             identity_key = None
@@ -11999,8 +12586,21 @@ class MemAgent:
         entity_memory_upsert.__name__ = "entity_memory_upsert"
 
         self.tool_manager.add_tool(entity_memory_lookup)
-        self.tool_manager.add_tool(entity_memory_upsert)
+        self._entity_memory_upsert_tool = entity_memory_upsert
         self._entity_memory_tools_registered = True
+        self._sync_entity_write_tool()
+
+    def _sync_entity_write_tool(self) -> None:
+        """The upsert tool is offered only to an agent that may change entity
+        memory (``EntityPolicy.writes``)."""
+        upsert = getattr(self, "_entity_memory_upsert_tool", None)
+        if upsert is None or not self.tool_manager:
+            return
+        offered = "entity_memory_upsert" in (self.tool_manager.list_tools() or [])
+        if self.entity_policy.writes and not offered:
+            self.tool_manager.add_tool(upsert)
+        elif not self.entity_policy.writes and offered:
+            self.tool_manager.remove_tool("entity_memory_upsert")
 
     def _register_semantic_layer_tools(self) -> None:
         """Expose governed discovery and planning for an attached catalog."""
@@ -12287,7 +12887,19 @@ class MemAgent:
                         retryable=False,
                         result_count=0,
                     )
-                return {"results": results}
+                return ToolResult(
+                    value={"results": results},
+                    outcome=ToolOutcome(
+                        status=(
+                            ToolOutcomeStatus.SUCCESS
+                            if results
+                            else ToolOutcomeStatus.EMPTY
+                        ),
+                        provider=provider_name,
+                        result_count=len(results),
+                    ),
+                    display=_search_display(provider_name, query, results),
+                )
             except Exception as exc:
                 logger.error("internet_search failed: %s", exc)
                 return self._handle_internet_access_error(str(exc))
@@ -12327,6 +12939,19 @@ class MemAgent:
 
         self.tool_manager.add_tool(internet_search)
         self.tool_manager.add_tool(open_web_page)
+        # What this provider offers beyond search and open page (Exa's
+        # Websets and Monitors); removed again when the provider changes.
+        extra_names = []
+        provider = getattr(self.internet_access_manager, "provider", None)
+        try:
+            extra = list(provider.agent_tools(self)) if provider is not None else []
+        except Exception as exc:
+            logger.warning("Provider tools were not added: %s", exc)
+            extra = []
+        for tool in extra:
+            self.tool_manager.add_tool(tool)
+            extra_names.append(tool.__name__)
+        self._internet_provider_tool_names = tuple(extra_names)
         self._internet_access_tools_registered = True
 
     def _internet_error_result(
@@ -12808,9 +13433,13 @@ class MemAgent:
         if not self.tool_manager or not self._internet_access_tools_registered:
             return
 
-        for tool_name in self._internet_access_tool_names:
+        for tool_name in (
+            *self._internet_access_tool_names,
+            *getattr(self, "_internet_provider_tool_names", ()),
+        ):
             self.tool_manager.remove_tool(tool_name)
 
+        self._internet_provider_tool_names = ()
         self._internet_access_tools_registered = False
 
     def _unregister_skills_marketplace_tools(self):
@@ -14550,6 +15179,11 @@ class MemAgent:
             ] = "This conversation is sealed, so nothing from it goes to shared memory."
         if target is None:
             return receipt
+        if target == ENTITY_MEMORY and not self.entity_policy.writes:
+            from .entity_policy import READ_ONLY_REFUSAL
+
+            receipt["reason"] = READ_ONLY_REFUSAL
+            return receipt
         routing_meta = {
             key: placement[key]
             for key in ("routed_to", "confidence", "router", "run_id", "applied")
@@ -15261,6 +15895,7 @@ class MemAgent:
         manager = self.entity_memory_manager
         if (
             config.entity_capture is False
+            or not self.entity_policy.writes
             or self.memory_provider is None
             or not self._entity_memory_enabled
             or not (manager and manager.is_enabled())
@@ -15530,9 +16165,7 @@ class MemAgent:
             "entity_capture": self._turn_capture_mode() == "entities",
             "multi_tenant": self.multi_tenant,
             # Which record the user's facts land on; None is the default.
-            "entity_policy": (
-                self.entity_policy.to_dict() if self.entity_policy.active else None
-            ),
+            "entity_policy": self.entity_policy.stored,
             "reranker": self.reranker.to_dict() if self.reranker else None,
             "decision_model": (
                 self.decision_model.to_dict() if self.decision_model else None
@@ -16810,6 +17443,104 @@ class MemAgent:
         """The environments the agent is in, each with the tools it lent."""
         return {name: list(tools) for name, tools in self._environment_tools.items()}
 
+    # ---- observability ---------------------------------------------------
+
+    def with_observability(
+        self, enabled: bool = True, provider: Any = None
+    ) -> "MemAgent":
+        """Turn the agent's traces on or off, optionally changing where they
+        go. ``provider`` is a name (``"sentry"``, ``"memorizz"``), a dict, an
+        ``ObservabilityConfig`` or a provider instance; left as None it keeps
+        the provider the agent has."""
+        from ..observability.providers import observability_settings
+
+        if provider is not None:
+            _, config, instance = observability_settings(True, provider)
+            self._close_observability_provider()
+            self.observability_config = config
+            self._observability_provider = instance
+        self.observability = bool(enabled)
+        return self
+
+    @property
+    def observability_provider(self) -> Any:
+        """The agent's observability provider (MemoRizz's own when none was
+        named)."""
+        if self._observability_provider is None:
+            from ..observability.providers import create_observability_provider
+
+            self._observability_provider = create_observability_provider(
+                self.observability_config
+            )
+        return self._observability_provider
+
+    def observability_status(self) -> Dict[str, Any]:
+        """Whether traces are recorded, where they go and whether that
+        provider is ready (``missing`` names what it still needs)."""
+        status = self.observability_provider.status()
+        status["enabled"] = bool(self.observability)
+        status["dashboard_url"] = self.observability_url()
+        return status
+
+    def observability_url(self) -> Optional[str]:
+        """Where a person opens this agent's traces at its provider. For the
+        built-in provider it is a path in the MemoRizz UI."""
+        return self.observability_provider.dashboard_url(
+            agent_id=self.agent_id, agent_name=self._observability_agent_name()
+        )
+
+    def flush_observability(self, timeout: float = 2.0) -> None:
+        """Wait up to ``timeout`` seconds for traces queued for the provider
+        to be sent (before a short script exits, for example)."""
+        if self.observability_config is not None:
+            try:
+                self.observability_provider.flush(timeout)
+            except Exception as exc:
+                logger.debug("Flushing the observability provider failed: %s", exc)
+
+    def _observability_agent_name(self) -> str:
+        persona = self.persona_manager.current_persona if self.persona_manager else None
+        return str(
+            self.name or getattr(persona, "name", None) or self.agent_id or "agent"
+        )
+
+    def _export_trace_turn(
+        self, context: Dict[str, Any], events: List[Dict[str, Any]]
+    ) -> Optional[str]:
+        """Send one finished turn to the agent's provider, and return the
+        provider's name when the turn was sent. A provider that fails never
+        fails the turn."""
+        session = session_for(self)
+        try:
+            provider = self.observability_provider
+            reference = provider.export_turn(
+                context, events, agent_name=self._observability_agent_name()
+            )
+            if session:
+                session.persistence["trace_export"] = "sent" if reference else "skipped"
+            if reference:
+                return str(provider.export_mark() or "")[:40] or None
+        except Exception as exc:
+            from ..observability.pipeline import record_pipeline_metric
+
+            record_pipeline_metric(self.memory_provider, "export_failures")
+            logger.warning(
+                "Sending the trace to %s failed (%s)",
+                (self.observability_config or {}).get("provider", "the provider"),
+                type(exc).__name__,
+            )
+            if session:
+                session.persistence["trace_export"] = "failed"
+        return None
+
+    def _close_observability_provider(self) -> None:
+        provider, self._observability_provider = self._observability_provider, None
+        if provider is not None:
+            try:
+                provider.close()
+            except Exception:
+                logger.debug("Closing the observability provider failed", exc_info=True)
+
     # ---- voice -----------------------------------------------------------
 
     def with_voice(self, enabled: bool = True, config: Any = None) -> "MemAgent":
@@ -17092,6 +17823,19 @@ class MemAgent:
         """
         return persistence.save_agent(self)
 
+    def publish(
+        self,
+        *,
+        url: Optional[str] = None,
+        key: Optional[str] = None,
+        timeout: float = 30.0,
+        quiet: bool = False,
+    ) -> Dict[str, Any]:
+        """Publish this agent's definition to a hosted MemoRizz Simuground."""
+        from .. import cloud
+
+        return cloud.publish(self, url=url, key=key, timeout=timeout, quiet=quiet)
+
     def close(
         self,
         *,
@@ -17108,6 +17852,7 @@ class MemAgent:
         retain their own fail-closed validation.
         """
         self._close_voice_provider()
+        self._close_observability_provider()
         report: Dict[str, Any] = {
             "ok": True,
             "cleanup": None,

@@ -21,7 +21,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from .auth import StaticAPIKeyVerifier, current_identity
-from .config import MemorizzMCPServerConfig
+from .config import PERSONAL_MEMORY_ID, MemorizzMCPServerConfig
 from .runtime import MemorizzRuntime, MemorizzServerError
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,20 @@ APP_INSTRUCTIONS = (
     "Leave memory_id out unless the user names one, so every app sees the same "
     "memories. Never claim a memory was saved unless the tool returned ok=true."
 )
+
+
+def _app_instructions(config: MemorizzMCPServerConfig) -> str:
+    """What a connected app is told, naming the shared memory when the server
+    keeps one other than ``personal``."""
+    if config.app_memory_id == PERSONAL_MEMORY_ID:
+        return APP_INSTRUCTIONS
+    return (
+        APP_INSTRUCTIONS
+        + f" What you save goes to the memory `{config.app_memory_id}`, which the"
+        " user's agents share; search it first."
+    )
+
+
 # The tools the "memory" tool set keeps.
 MEMORY_TOOLS = frozenset(
     {
@@ -62,7 +76,7 @@ MEMORY_TOOLS = frozenset(
     }
 )
 # Cloud apps that may send an Origin header to the MCP endpoint.
-_APP_ORIGINS = ("https://chatgpt.com", "https://grok.com")
+_APP_ORIGINS = ("https://chatgpt.com", "https://grok.com", "https://agent.meta.ai")
 
 
 class EntityRelationArgument(BaseModel):
@@ -109,6 +123,20 @@ async def _tool_call(function: Callable[..., Any], *args: Any, **kwargs: Any) ->
             client=identity.client,
             harness_run_id=os.getenv("MEMORIZZ_HARNESS_RUN_ID"),
         ):
+            # A server started for one memory stays inside it.
+            owner = getattr(function, "__self__", None)
+            runtime = owner if isinstance(owner, MemorizzRuntime) else None
+            if runtime is None:
+                # Tool groups that hold the runtime (fine-tuning) answer to
+                # its scope too.
+                held = getattr(owner, "runtime", None)
+                runtime = held if isinstance(held, MemorizzRuntime) else None
+            if runtime is not None:
+                from .memory_scope import scoped_call
+
+                return await asyncio.to_thread(
+                    scoped_call, runtime, function, args, kwargs
+                )
             return await asyncio.to_thread(function, *args, **kwargs)
     except MemorizzServerError as exc:
         raise ToolError(f"{exc.code}: {exc.message}") from exc
@@ -187,7 +215,7 @@ def create_memorizz_mcp_server(
             "governed external agent harness runs."
         ),
         instructions=(
-            APP_INSTRUCTIONS
+            _app_instructions(resolved)
             if resolved.oauth or resolved.tool_set == "memory"
             else SERVER_INSTRUCTIONS
         ),
@@ -330,6 +358,9 @@ def create_memorizz_mcp_server(
         voice: Optional[bool] = None,
         voice_provider: Optional[str] = None,
         voice_name: Optional[str] = None,
+        observability: Optional[bool] = None,
+        observability_provider: Optional[str] = None,
+        observability_org: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create and persist a local MemAgent after durable host approval.
 
@@ -340,6 +371,11 @@ def create_memorizz_mcp_server(
         default), elevenlabs, vapi or openai, and voice_name a voice ID or
         name from that provider. Provider keys are never passed here; they
         are set in the environment or the local UI's Settings.
+        observability false records no traces of the agent's turns (they are
+        recorded by default). observability_provider is memorizz (the default:
+        traces stay in MemoRizz) or sentry (each turn is also sent to Sentry,
+        whose DSN is set in the environment); observability_org is the
+        provider's organisation slug, used in links to the agent's traces.
         """
         return await _tool_call(
             service.create_agent,
@@ -371,6 +407,9 @@ def create_memorizz_mcp_server(
             voice=voice,
             voice_provider=voice_provider,
             voice_name=voice_name,
+            observability=observability,
+            observability_provider=observability_provider,
+            observability_org=observability_org,
         )
 
     @server.tool(annotations=write)
@@ -406,11 +445,18 @@ def create_memorizz_mcp_server(
         voice: Optional[bool] = None,
         voice_provider: Optional[str] = None,
         voice_name: Optional[str] = None,
+        observability: Optional[bool] = None,
+        observability_provider: Optional[str] = None,
+        observability_org: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Update safe local agent configuration after host approval.
 
         voice turns the agent's voice on or off; voice_provider (livekit,
         elevenlabs, vapi, openai) and voice_name change it and turn it on.
+        observability turns tracing of the agent's turns on or off;
+        observability_provider (memorizz, sentry) says where the traces go
+        and turns tracing on, and observability_org names the provider's
+        organisation for links.
 
         Persona fields change the persona in place, keeping its version and
         history. persona_learning needs a persona. Reviewing or undoing what it
@@ -453,6 +499,9 @@ def create_memorizz_mcp_server(
             voice=voice,
             voice_provider=voice_provider,
             voice_name=voice_name,
+            observability=observability,
+            observability_provider=observability_provider,
+            observability_org=observability_org,
         )
 
     @server.tool(annotations=destructive)
@@ -607,6 +656,7 @@ def create_memorizz_mcp_server(
         allow_dirty_workspace: bool = False,
         network: str = "none",
         mcp_access: str = "read_only",
+        mcp_read_memory_ids: Optional[list[str]] = None,
         allowed_env: Optional[list[str]] = None,
         allowed_tools: Optional[list[str]] = None,
         denied_tools: Optional[list[str]] = None,
@@ -623,7 +673,9 @@ def create_memorizz_mcp_server(
         """Start a bounded harness run; risky envelopes pause for host approval.
         Omit workspace for a task that needs no project (a fresh empty folder).
         allow_subagents lets Claude Code use its Task tool and Codex start
-        sub-agents."""
+        sub-agents. The run reads and writes memory_id only;
+        mcp_read_memory_ids names up to 5 other memories it may read and
+        never write."""
         return await _tool_call(
             service.start_harness_run,
             task,
@@ -638,6 +690,7 @@ def create_memorizz_mcp_server(
             allow_dirty_workspace=allow_dirty_workspace,
             network=network,
             mcp_access=mcp_access,
+            mcp_read_memory_ids=mcp_read_memory_ids,
             allowed_env=allowed_env,
             allowed_tools=allowed_tools,
             denied_tools=denied_tools,
@@ -665,6 +718,7 @@ def create_memorizz_mcp_server(
         memory_id: Optional[str] = None,
         network: str = "none",
         mcp_access: str = "read_only",
+        mcp_read_memory_ids: Optional[list[str]] = None,
         allow_dirty_workspace: bool = False,
         allow_subagents: bool = False,
         timeout_seconds: int = 900,
@@ -683,6 +737,7 @@ def create_memorizz_mcp_server(
             memory_id=memory_id,
             network=network,
             mcp_access=mcp_access,
+            mcp_read_memory_ids=mcp_read_memory_ids,
             allow_dirty_workspace=allow_dirty_workspace,
             allow_subagents=allow_subagents,
             timeout_seconds=timeout_seconds,
@@ -699,6 +754,7 @@ def create_memorizz_mcp_server(
         harness_models: Optional[Dict[str, str]] = None,
         network: str = "none",
         mcp_access: str = "read_only",
+        mcp_read_memory_ids: Optional[list[str]] = None,
         allow_subagents: bool = False,
         verification_command: Optional[str] = None,
         timeout_seconds: int = 900,
@@ -719,6 +775,7 @@ def create_memorizz_mcp_server(
             harness_models=harness_models,
             network=network,
             mcp_access=mcp_access,
+            mcp_read_memory_ids=mcp_read_memory_ids,
             allow_subagents=allow_subagents,
             verification_command=verification_command,
             timeout_seconds=timeout_seconds,

@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -305,6 +306,29 @@ def _matches(record, query):
     return True
 
 
+def _notion_page_url(reported, database_id):
+    """The Notion address of the memory database: the one Notion reports when
+    it is a plain Notion link, else one built from the database ID."""
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(str(reported or ""))
+        host = (parts.hostname or "").lower()
+        if (
+            parts.scheme == "https"
+            and (
+                host in {"notion.so", "notion.com"}
+                or host.endswith((".notion.so", ".notion.com"))
+            )
+            and not parts.username
+            and not parts.password
+        ):
+            return str(reported)
+        return "https://www.notion.so/" + uuid.UUID(str(database_id)).hex
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 class NotionProvider(MemoryProvider):
     """Notion is canonical; ``semantic_provider`` stores vectors and references.
 
@@ -312,6 +336,11 @@ class NotionProvider(MemoryProvider):
     explicitly, then pass its memory data-source ID. The injected provider is
     caller-owned and is not closed by this provider.
     """
+
+    # ``retrieve_by_id`` settles whether a trace, setting or journal row
+    # exists: callers need not ask again by name or scan for it, each of
+    # which is a request here.
+    shared_records_found_by_id = True
 
     def __init__(self, config: NotionConfig, semantic_provider=None, *, client=None):
         self.config = config
@@ -332,12 +361,17 @@ class NotionProvider(MemoryProvider):
         )
         self._owns_client = client is None
         self._state = NotionState(config.state_path)
+        # The page the last observability query on this thread read: what
+        # ``observability_row_cursor`` builds its cursors from.
+        self._observability_page = threading.local()
         try:
             self._state.bind_source(config.data_source_id)
             schema = self._client.request(
                 "GET", "/data_sources/" + config.data_source_id
             )
             self.database_id = (schema.get("parent") or {}).get("database_id")
+            # Where a person opens this library in Notion.
+            self.notion_url = _notion_page_url(schema.get("url"), self.database_id)
             self._properties = self._resolve_schema(schema)
             self._semantic_identity = (
                 semantic_provider.semantic_identity()
@@ -642,7 +676,15 @@ class NotionProvider(MemoryProvider):
         sorts=None,
         edited_since=None,
     ):
-        conditions = [self._condition("memory_type", MemoryType(memory_type).value)]
+        if isinstance(memory_type, (list, tuple, set, frozenset)):
+            # Several types in one query: every Notion query is a request.
+            kinds = [
+                self._condition("memory_type", MemoryType(kind).value)
+                for kind in memory_type
+            ]
+            conditions = [kinds[0] if len(kinds) == 1 else {"or": kinds}]
+        else:
+            conditions = [self._condition("memory_type", MemoryType(memory_type).value)]
         filters = dict(query or {})
         for key, value in (
             ("user_id", user_id),
@@ -1334,6 +1376,79 @@ class NotionProvider(MemoryProvider):
                         return rows
         return rows
 
+    def query_memory_observations_across(
+        self,
+        memory_store_types,
+        *,
+        agent_id=None,
+        memory_ids=None,
+        user_id=_UNSET,
+        application_id=None,
+        exclude_records=(),
+        limit=200,
+    ):
+        """``query_memory_observations`` for several memory types at once, as
+        ``(memory_type, record)`` pairs in the order the types were given.
+
+        One Notion query covers every type, where asking type by type costs a
+        request (about a second) for each type and scope."""
+        from ..base import _observation_matches
+
+        kinds = [MemoryType(kind) for kind in memory_store_types]
+        if not kinds:
+            return []
+        safe_limit = max(1, min(int(limit), 1000))
+        excluded = {
+            (str(getattr(kind, "value", kind)), str(identifier))
+            for kind, identifier in exclude_records
+        }
+        queries = (
+            [
+                {"agent_id": str(agent_id)},
+                {"agent_id": None, "owner_agent_id": str(agent_id)},
+            ]
+            if agent_id
+            else []
+        )
+        queries.extend(
+            {
+                "memory_id": namespace,
+                **({"agent_id": None, "owner_agent_id": None} if agent_id else {}),
+            }
+            for namespace in dict.fromkeys(memory_ids or ())
+        )
+        found, seen = [], set()
+        for query in queries or [{}]:
+            if application_id is not None:
+                query["application_id"] = application_id
+            _validate_filter(query)
+            for page in self._pages(kinds, query=query, user_id=user_id):
+                row = self._decode(page)
+                if row is None or not _matches(
+                    row,
+                    {**query, **({} if user_id is _UNSET else {"user_id": user_id})},
+                ):
+                    continue
+                kind = MemoryType(self._text(page, "memory_type"))
+                key = (kind.value, str(row["id"]))
+                if (
+                    key in seen
+                    or key in excluded
+                    or not _observation_matches(
+                        row,
+                        agent_id=agent_id,
+                        memory_ids=memory_ids,
+                        user_id=user_id,
+                        application_id=application_id,
+                    )
+                ):
+                    continue
+                seen.add(key)
+                found.append((kind, row))
+        order = {kind: index for index, kind in enumerate(kinds)}
+        found.sort(key=lambda pair: order[pair[0]])
+        return found[:safe_limit]
+
     def query_observability_records(
         self,
         memory_store_type,
@@ -1418,7 +1533,7 @@ class NotionProvider(MemoryProvider):
                 ]
             ).encode()
         ).hexdigest()
-        start_cursor, scanned = None, 0
+        start_cursor, scanned, after = None, 0, None
         if cursor:
             try:
                 if len(cursor) > 4096:
@@ -1432,9 +1547,13 @@ class NotionProvider(MemoryProvider):
                     or not isinstance(decoded["cursor"], str)
                 ):
                     raise ValueError()
-                start_cursor = decoded["cursor"]
+                # "" is the first page: a row cursor can follow a row of it.
+                start_cursor = decoded["cursor"] or None
                 scanned = decoded["scanned"]
                 if type(scanned) is not int or not 0 <= scanned < 10_000:
+                    raise ValueError()
+                after = decoded.get("after")
+                if after is not None and (not isinstance(after, str) or not after):
                     raise ValueError()
             except (ValueError, TypeError, KeyError):
                 raise ValueError(
@@ -1448,26 +1567,79 @@ class NotionProvider(MemoryProvider):
                 {"property": self._properties["id"], "direction": "descending"},
             ],
         }
-        if start_cursor:
-            body["start_cursor"] = start_cursor
-        result = self._client.request(
-            "POST", "/data_sources/" + self.config.data_source_id + "/query", body=body
-        )
-        if (result.get("request_status") or {}).get("type") in {
-            "incomplete",
-            "partial",
-        }:
-            raise NotionQueryLimitError(
-                "Notion returned an incomplete observability query"
+        skipped = 0
+        for _ in range(self.config.max_query_pages):
+            if start_cursor:
+                body["start_cursor"] = start_cursor
+            result = self._client.request(
+                "POST",
+                "/data_sources/" + self.config.data_source_id + "/query",
+                body=body,
             )
-        scanned += len(result.get("results", []))
+            if (result.get("request_status") or {}).get("type") in {
+                "incomplete",
+                "partial",
+            }:
+                raise NotionQueryLimitError(
+                    "Notion returned an incomplete observability query"
+                )
+            fetched = result.get("results", [])
+            if after is None:
+                break
+            # A row cursor: this page is read again from its start and the
+            # rows up to the one the cursor follows are passed over. Records
+            # added since may have moved that row to a later page.
+            position = next(
+                (
+                    index
+                    for index, page in enumerate(fetched)
+                    if self._text(page, "id") == after
+                ),
+                None,
+            )
+            if position is not None and position + 1 < len(fetched):
+                skipped, after = position + 1, None
+                break
+            if not result.get("has_more"):
+                if position is None:
+                    raise ValueError(
+                        "The record this Notion observability cursor follows is "
+                        "gone; restart the query"
+                    )
+                # It was the last record there is.
+                skipped, after = len(fetched), None
+                break
+            next_value = result.get("next_cursor")
+            if not next_value or next_value == start_cursor:
+                raise NotionIntegrityError(
+                    "Notion observability pagination did not advance"
+                )
+            start_cursor = next_value
+            if position is not None:
+                # It closed its page: the next page starts after it.
+                after = None
+        else:
+            raise NotionQueryLimitError(
+                "Notion query budget exhausted; restart the observability query"
+            )
+        before_page = scanned
+        scanned += len(fetched) - skipped
         if scanned >= 10_000:
             raise NotionQueryLimitError(
                 "Notion's 10,000-row limit was reached; partition the observability time window"
             )
         items = []
-        for page in result.get("results", []):
+        # For ``observability_row_cursor``: where each returned row sits.
+        positions = {}
+        self._observability_page.value = {
+            "scope": identity,
+            "cursor": start_cursor or "",
+            "rows": positions,
+        }
+        for index, page in enumerate(fetched[skipped:], start=1):
             row = self._decode(page, memory_type)
+            if row is not None:
+                positions[str(row.get("id"))] = before_page + index
             if row is None or user_id is not _UNSET and row.get("user_id") != user_id:
                 continue
             if time_bounds:
@@ -1536,11 +1708,41 @@ class NotionProvider(MemoryProvider):
             "next_cursor": next_cursor,
             "truncated": bool(next_cursor),
             "limit": min(limit, 100),
-            "scanned_count": len(result.get("results", [])),
+            "scanned_count": len(fetched) - skipped,
             "query_duration_ms": round((time.perf_counter() - started) * 1000, 3),
             "freshness": str(items[0].get("timestamp") or "") if items else None,
             "provider_native": True,
         }
+
+    # Trace reads take a page of records per request, the most Notion gives.
+    observability_batch_size = 100
+
+    def observability_row_cursor(self, row):
+        """Cursor that continues ``query_observability_records`` after ``row``,
+        a row of the page this thread read last.
+
+        With it, trace reads take records a page at a time. Without it they
+        took one record per query, and every query is a request: a hundred
+        turns of traces took a hundred requests (about forty seconds)."""
+        page = getattr(self._observability_page, "value", None)
+        identifier = str((row or {}).get("id") or (row or {}).get("_id") or "")
+        if not page or identifier not in page["rows"]:
+            raise ValueError("That record is not in the page this thread read last")
+        return (
+            base64.urlsafe_b64encode(
+                _json(
+                    {
+                        "v": 1,
+                        "scope": page["scope"],
+                        "cursor": page["cursor"],
+                        "scanned": page["rows"][identifier],
+                        "after": identifier,
+                    }
+                ).encode()
+            )
+            .decode()
+            .rstrip("=")
+        )
 
     def supports_entity_memory(self):
         return True

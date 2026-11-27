@@ -18,7 +18,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,10 @@ class UIExtension:
     on_shutdown: Optional[Callable[[], None]] = None
     #: POST paths (regular expression) that are not worth an activity line.
     quiet_posts: Optional[str] = None
+    #: Exact HTTP paths that authenticate every request themselves (for example,
+    #: a scoped publish key). They bypass the UI login cookie and browser Origin
+    #: check, and are responsible for rejecting unauthorised callers.
+    self_authenticated_paths: Sequence[str] = ()
     #: Shown as a small tag beside the label, e.g. "Preview".
     badge: Optional[str] = None
     extra: dict = field(default_factory=dict)
@@ -128,6 +132,12 @@ def install(app: Any, templates: Any) -> List[UIExtension]:
         installed.append(extension)
     templates.env.globals["ui_extensions"] = [e.nav_item() for e in installed]
     app.state.ui_extensions = installed
+    app.state.extension_self_auth_paths = frozenset(
+        str(path).strip()
+        for extension in installed
+        for path in (extension.self_authenticated_paths or ())
+        if str(path).strip().startswith("/")
+    )
     if installed:
         from . import activity
 

@@ -138,6 +138,12 @@ INTERNET_PROVIDERS = (
         "key_env": "FIRECRAWL_API_KEY",
         "signup_url": "https://www.firecrawl.dev/app/api-keys",
     },
+    {
+        "provider": "exa",
+        "title": "Exa",
+        "key_env": "EXA_API_KEY",
+        "signup_url": "https://dashboard.exa.ai/api-keys",
+    },
 )
 
 
@@ -151,6 +157,16 @@ def _server_provides(server: Dict[str, Any], capability: Capability) -> bool:
     ).lower()
     haystack += " " + " ".join(str(arg) for arg in server.get("args") or []).lower()
     return any(term in haystack for term in capability.server_terms)
+
+
+def _service_name(server: Dict[str, Any]) -> str:
+    """What a person calls the app behind a server: "Notion" for the Notion
+    preset, else the server's own name."""
+    url = str(server.get("url") or "").rstrip("/")
+    for preset in catalog.PRESETS.values():
+        if url and url == str(preset.get("url") or "").rstrip("/"):
+            return str(preset["title"])
+    return str(server.get("name") or "the server")
 
 
 def capability_state(
@@ -207,12 +223,15 @@ def capability_state(
         elif providing:
             server = providing[0]
             auth = server.get("auth") or {}
-            row.update(status="needs_sign_in", via=str(server.get("name")))
+            service = _service_name(server)
+            row.update(
+                status="needs_sign_in", via=str(server.get("name")), service=service
+            )
             row["offers"].append(
                 {
                     "kind": "mcp_sign_in",
                     "server": str(server.get("name")),
-                    "title": f"Sign in to {server.get('name')}",
+                    "title": f"Sign in to {service}",
                     "needs_client": auth.get("type") == "oauth"
                     and not auth.get("client_id")
                     and _preset_needs_client(server),

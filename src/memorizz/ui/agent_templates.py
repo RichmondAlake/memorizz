@@ -36,6 +36,9 @@ TEXT_FIELDS = (
     "persona_learning_every_n_turns",
     "voice_provider",
     "voice_name",
+    "observability_provider",
+    "observability_org",
+    "observability_project",
     "forgetting_scoring_recency_decay_per_hour",
     "forgetting_scoring_recency_anchor",
     "forgetting_scoring_alpha_recency",
@@ -77,6 +80,8 @@ CHECKBOX_FIELDS = (
     "consolidation_auto_apply",
     "persona_learning",
     "voice",
+    "observability",
+    "observability_include_content",
     "persona_learning_auto_apply",
     "continual_learning_require_shadow",
     "continual_learning_shadow_evaluation",
@@ -94,15 +99,17 @@ _SECRET_KEY = re.compile(
     r"api[_-]?key|secret|token|password|passphrase|authorization|credential", re.I
 )
 
-_INTERNET_TITLES = {"tavily": "Tavily", "firecrawl": "Firecrawl"}
+_INTERNET_TITLES = {"tavily": "Tavily", "firecrawl": "Firecrawl", "exa": "Exa"}
 
 _PROVIDER_TITLES = {
     "openai": "OpenAI",
     "anthropic": "Anthropic",
+    "gemini": "Google Gemini",
     "azure": "Azure OpenAI",
     "ollama": "Ollama",
     "huggingface": "HuggingFace",
     "mlx": "MLX",
+    "openrouter": "OpenRouter",
     "local-openai": "Local OpenAI-compatible",
 }
 
@@ -158,7 +165,11 @@ def values_from_form(form: Mapping[str, Any]) -> Dict[str, Any]:
     return values
 
 
-_INTERNET_KEYS = {"tavily": "TAVILY_API_KEY", "firecrawl": "FIRECRAWL_API_KEY"}
+_INTERNET_KEYS = {
+    "tavily": "TAVILY_API_KEY",
+    "firecrawl": "FIRECRAWL_API_KEY",
+    "exa": "EXA_API_KEY",
+}
 
 
 def _available_internet_provider(preferences: List[str]) -> Optional[str]:
@@ -213,7 +224,7 @@ def _card(template: AgentTemplate) -> Dict[str, Any]:
         else:
             warning = {
                 "label": "Needs a web search key",
-                "detail": "Web search needs a Tavily or Firecrawl key in Settings",
+                "detail": "Web search needs a Tavily, Firecrawl or Exa key in Settings",
             }
     elif internet:
         chips.append(f"Web search ({_INTERNET_TITLES.get(internet, internet)})")
@@ -221,6 +232,8 @@ def _card(template: AgentTemplate) -> Dict[str, Any]:
         chips.append("Sealed conversations")
     if values.get("memory_consolidation"):
         chips.append("Memory consolidation")
+    if values.get("continual_learning"):
+        chips.append("Learning")
     if values.get("persona_learning"):
         chips.append("Persona learning")
     if not template.builtin and values.get("llm_model"):

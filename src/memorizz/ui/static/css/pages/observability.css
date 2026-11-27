@@ -355,8 +355,7 @@ details[open].detail-section.obs-nav > summary {
 }
 
 .obs-nav-table tbody tr.traces-agent-row.is-selected {
-    background: color-mix(in srgb, var(--accent-primary) 10%, transparent);
-    box-shadow: inset 2px 0 0 var(--accent-primary);
+    background: color-mix(in srgb, var(--accent-primary) 12%, transparent);
 }
 
 .obs-nav-table .traces-agent-row--thread.is-collapsed {

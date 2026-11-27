@@ -45,6 +45,8 @@ class ContextSnapshots:
                     break
             except (NotImplementedError, TypeError, ValueError):
                 continue
+            if getattr(self.provider, "shared_records_found_by_id", None) is True:
+                break
         if existing:
             return existing
         # JSON copying freezes mutable message/tool lists before providers touch them.

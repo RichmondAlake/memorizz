@@ -23,6 +23,14 @@ from .normalization import (
 )
 from .pipeline import pipeline_health
 from .pricing import DEFAULT_PRICING, PricingRegistry, RateCard
+from .providers import (
+    MemorizzObservability,
+    ObservabilityConfig,
+    ObservabilityProvider,
+    create_observability_provider,
+    observability_status,
+    register_observability_provider,
+)
 from .recorder import ObservabilityRecorder
 from .store import ObservabilityStore
 from .tags import normalize_trace_tags, parse_tag_filter
@@ -56,4 +64,10 @@ __all__ = [
     "pipeline_health",
     "normalize_trace_tags",
     "parse_tag_filter",
+    "ObservabilityConfig",
+    "ObservabilityProvider",
+    "MemorizzObservability",
+    "create_observability_provider",
+    "observability_status",
+    "register_observability_provider",
 ]

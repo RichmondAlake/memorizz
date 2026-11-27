@@ -668,6 +668,15 @@ def _waterfall_group(
         "turn_id": group.get("turn_id"),
         "title": f"Turn {str(turn)[:8]}" if turn else "Spans without a turn",
         "started_at": group.get("started_at"),
+        # The observability provider the turn was also sent to, if any.
+        "trace_export": next(
+            (
+                str((node.get("attributes") or {})["trace_export"])
+                for node in nodes
+                if (node.get("attributes") or {}).get("trace_export")
+            ),
+            None,
+        ),
         "extent_ms": extent,
         "duration": duration_label(extent if any(s.measured for s in spans) else None),
         "span_count": len(spans),

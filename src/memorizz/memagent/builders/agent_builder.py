@@ -71,6 +71,8 @@ class MemAgentBuilder:
         self._persona_learning: Any = None
         self._voice: bool = False
         self._voice_config: Any = None
+        self._observability: Any = None
+        self._observability_provider: Any = None
         self._memory_routing: Any = None
         self._reranker: Any = None
         self._decision_model: Any = None
@@ -551,6 +553,23 @@ class MemAgentBuilder:
         self._voice_config = config
         return self
 
+    def with_observability(
+        self, provider: Any = None, enabled: bool = True, **settings: Any
+    ) -> "MemAgentBuilder":
+        """Record the agent's traces, and say where they go. ``provider`` is a
+        name ("memorizz", the default, or "sentry"), a config dict or a
+        provider instance; ``settings`` are ``ObservabilityConfig`` fields such
+        as ``org`` or ``include_content``. ``enabled=False`` records none."""
+        config: Any = provider
+        if settings:
+            base = dict(provider) if isinstance(provider, dict) else {}
+            if isinstance(provider, str):
+                base["provider"] = provider
+            config = {**base, **settings}
+        self._observability = bool(enabled)
+        self._observability_provider = config
+        return self
+
     def with_memory_routing(
         self, router: Any = "auto", **settings: Any
     ) -> "MemAgentBuilder":
@@ -746,6 +765,8 @@ class MemAgentBuilder:
                 persona_learning=self._persona_learning,
                 voice=self._voice,
                 voice_config=self._voice_config,
+                observability=self._observability,
+                observability_provider=self._observability_provider,
                 memory_routing=self._memory_routing,
                 reranker=self._reranker,
                 decision_model=self._decision_model,

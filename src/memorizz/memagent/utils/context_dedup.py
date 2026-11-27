@@ -79,6 +79,12 @@ _MIN_RECENCY_SPAN_HOURS = 1.0
 # Ratings share one fixed 0..1 scale, so a small gap is a small difference, not
 # the whole range. Only a gap of half the scale or more uses all of it.
 _MIN_IMPORTANCE_SPAN = 0.5
+# A candidate less than this share as relevant as the most relevant one found
+# waits until the more relevant ones are placed. Recall refreshes a memory's
+# last access, so without this a few records recalled every turn (the chunks
+# of a small handbook) keep full recency and are chosen again whatever is
+# asked, ahead of a memory that answers the question.
+_RELEVANCE_GATE = 0.5
 
 _WORKFLOW_SOURCE_LABELS = frozenset(
     {
@@ -425,6 +431,19 @@ def score_candidates(
             if cand.get("last_accessed") is not None
             else "created",
         }
+
+
+def _by_relevance_gate(
+    kept: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split scored candidates into those near the most relevant one and the
+    rest (see ``_RELEVANCE_GATE``). With no relevance signal, all are near."""
+    top = max((float(c.get("_raw_relevance") or 0.0) for c in kept), default=0.0)
+    if top <= 0:
+        return list(kept), []
+    floor = top * _RELEVANCE_GATE
+    near = [c for c in kept if float(c.get("_raw_relevance") or 0.0) >= floor]
+    return near, [c for c in kept if float(c.get("_raw_relevance") or 0.0) < floor]
 
 
 def candidate_text(row: Any) -> str:
@@ -997,8 +1016,11 @@ def dedupe_and_select(
         score_candidates(kept, scoring=resolved_scoring, now=now)
 
         selected: List[Dict[str, Any]] = []
-        remaining = list(kept)
-        while remaining and len(selected) < max_items:
+        remaining, waiting = _by_relevance_gate(kept)
+        while (remaining or waiting) and len(selected) < max_items:
+            if not remaining:
+                # Every candidate near the most relevant one is placed.
+                remaining, waiting = waiting, []
             best = None
             best_value = -math.inf
             for cand in remaining:
@@ -1032,8 +1054,15 @@ def dedupe_and_select(
                 if cand.get("_decision") is not None:
                     cand["_decision"]["rerank_score"] = round(value, 4)
         score_candidates(kept, scoring=resolved_scoring, now=now)
-        ranked = sorted(kept, key=lambda c: (-c["_relevance"], c["id"]))
+        near, rest = _by_relevance_gate(kept)
+        ranked = [
+            cand
+            for group in (near, rest)
+            for cand in sorted(group, key=lambda c: (-c["_relevance"], c["id"]))
+        ]
         selected = ranked[:max_items]
+
+    placed = {id(cand) for cand in selected}
 
     # 5. Character budget, served in selection order so the most relevant
     # memory gets its text first.
@@ -1051,8 +1080,14 @@ def dedupe_and_select(
         within_budget.append(cand)
     selected = within_budget
 
+    # Not chosen: it waited behind more relevant candidates, or it was
+    # chosen and the item or character budget left it out.
+    waited = {id(cand) for cand in _by_relevance_gate(kept)[1]} - placed
     for candidate in kept:
-        mark(candidate, "budget_exceeded")
+        mark(
+            candidate,
+            "less_relevant" if id(candidate) in waited else "budget_exceeded",
+        )
     for candidate in selected:
         mark(
             candidate,

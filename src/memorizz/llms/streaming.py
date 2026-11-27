@@ -24,11 +24,13 @@ def provider_error_message(code):
 
 
 class ProviderStreamError(RuntimeError):
-    def __init__(self, code, metadata=None):
+    def __init__(self, code, metadata=None, detail=None):
         self.code = code
         self.response_metadata = metadata or {}
-        detail = provider_error_message(code)
-        super().__init__(f"{code}: {detail}" if detail else code)
+        # What to tell the person, when the code alone does not say what to
+        # do (a model that could not be built names the key to set).
+        self.detail = detail or provider_error_message(code)
+        super().__init__(f"{code}: {self.detail}" if self.detail else code)
 
 
 # Connection-level failures a provider stream can hit mid-flight (the server
@@ -136,6 +138,9 @@ def tool_response(calls, content):
                             function=SimpleNamespace(
                                 name=c["name"], arguments=c["arguments"]
                             ),
+                            # A provider's own fields (Gemini's thought
+                            # signature), sent back with the call.
+                            extra_content=c.get("extra_content"),
                         )
                         for c in calls
                     ],
@@ -188,14 +193,24 @@ def chat_events(provider, stream, *, max_output_tokens=None):
                     "provider_refusal", last_response_metadata(provider)
                 )
             for call in getattr(delta, "tool_calls", None) or []:
-                entry = calls.setdefault(
-                    call.index, {"id": "", "name": "", "arguments": ""}
-                )
+                index = getattr(call, "index", None)
+                if index is None:
+                    # Gemini numbers no call in a stream: each arrives whole
+                    # under its own id, so a new id is a new call.
+                    last = max(calls) if calls else None
+                    if last is None or (call.id and call.id != calls[last]["id"]):
+                        index = 0 if last is None else last + 1
+                    else:
+                        index = last
+                entry = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
                 if call.id:
                     entry["id"] = call.id
                 if call.function:
                     entry["name"] += call.function.name or ""
                     entry["arguments"] += call.function.arguments or ""
+                extra = getattr(call, "extra_content", None)
+                if isinstance(extra, dict) and extra:
+                    entry["extra_content"] = extra
     provider._last_response_metadata.update(
         response_metadata(None, text=text, max_output_tokens=max_output_tokens)
     )

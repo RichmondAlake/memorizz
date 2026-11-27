@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% from '_ui.html' import page_header %}
+{% block title %}{{ agent_name }}'s source file - Memorizz{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/agent-source-diff.css?v=6">{% endblock %}
+{% block content %}
+{% call page_header("A file in " ~ agent_name ~ "'s source", "The whole file from this agent's own copy of the MemoRizz code, with the lines a change touched marked.", back=('/agents/' ~ agent_id ~ '/source/diff', 'Back to the changes'), title_id='sfile-title') %}
+    <label class="sdiff-pick"><span class="sr-only">Show the file as of</span>
+        <select id="sfile-version" aria-label="Which change to mark"></select>
+    </label>
+    <div class="sdiff-toggle" role="group" aria-label="Side">
+        <button class="btn btn-sm" type="button" data-side="new" aria-pressed="true">After</button>
+        <button class="btn btn-sm" type="button" data-side="old" aria-pressed="false">Before</button>
+    </div>
+{% endcall %}
+
+<div id="sfile-root" class="ed-scope" data-agent-id="{{ agent_id }}" data-agent-name="{{ agent_name }}">
+    <div id="sfile-main" aria-live="polite"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/source-code.js?v=1" defer></script>
+<script src="/static/js/agent-source-file.js?v=1" defer></script>
+{% endblock %}

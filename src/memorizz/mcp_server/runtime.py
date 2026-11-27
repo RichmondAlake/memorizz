@@ -9,6 +9,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import inspect
+import itertools
 import json
 import logging
 import os
@@ -18,7 +19,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .. import timers as timers_store
 from ..approval import (
@@ -82,10 +83,12 @@ _SENSITIVE_AGENT_FIELDS = {
 _CREATABLE_LLM_PROVIDERS = {
     "anthropic",
     "azure",
+    "gemini",
     "huggingface",
     "mlx",
     "ollama",
     "openai",
+    "openrouter",
 }
 
 
@@ -218,10 +221,13 @@ _EMBEDDINGS_HINT = (
 _CONNECTOR_TYPES = ("knowledge_base", "entity_memory")
 
 
-def _default_memory_id(identity: RequestIdentity) -> str:
+def _default_memory_id(
+    identity: RequestIdentity, app_memory_id: str = PERSONAL_MEMORY_ID
+) -> str:
     """Where a save with no memory ID goes: connected apps keep one memory the
-    local agents can read; anything else gets a new one."""
-    return PERSONAL_MEMORY_ID if identity.client else str(uuid.uuid4())
+    local agents can read (``personal``, or the one the server names);
+    anything else gets a new one."""
+    return app_memory_id if identity.client else str(uuid.uuid4())
 
 
 def _record_text(row: Dict[str, Any]) -> str:
@@ -447,6 +453,35 @@ def _voice_setting(
             enabled=enabled,
             provider=provider,
             voice=name,
+        )
+    except ValueError as exc:
+        raise MemorizzServerError("invalid_agent", str(exc)) from exc
+
+
+def _observability_setting(
+    record: Any,
+    enabled: Optional[bool],
+    provider: Optional[str],
+    org: Optional[str],
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """An agent's ``(observability, observability_config)`` after an MCP
+    create or update."""
+    from ..observability.providers import observability_change
+
+    for value in (provider, org):
+        if value is not None and len(str(value)) > 200:
+            raise MemorizzServerError(
+                "invalid_agent",
+                "observability_provider and observability_org are at most "
+                "200 characters",
+            )
+    try:
+        return observability_change(
+            getattr(record, "observability", None) if record is not None else None,
+            getattr(record, "observability_config", None),
+            enabled=enabled,
+            provider=provider,
+            org=org,
         )
     except ValueError as exc:
         raise MemorizzServerError("invalid_agent", str(exc)) from exc
@@ -706,6 +741,8 @@ class MemorizzRuntime:
                     "default_timezone",
                     "voice",
                     "voice_config",
+                    "observability",
+                    "observability_config",
                 )
             }
         value["sandbox_provider_name"] = _provider_name(value.get("sandbox_provider"))
@@ -743,6 +780,8 @@ class MemorizzRuntime:
                 "semantic_cache",
                 "voice",
                 "voice_config",
+                "observability",
+                "observability_config",
                 "continual_learning",
                 "learning_control_plane",
                 "skill_retrieval",
@@ -906,6 +945,9 @@ class MemorizzRuntime:
         voice: Optional[bool] = None,
         voice_provider: Optional[str] = None,
         voice_name: Optional[str] = None,
+        observability: Optional[bool] = None,
+        observability_provider: Optional[str] = None,
+        observability_org: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a validated local agent through the governed MCP write path.
 
@@ -1095,6 +1137,11 @@ class MemorizzRuntime:
         voice_on, voice_config = _voice_setting(None, voice, voice_provider, voice_name)
         if voice_on or voice_config:
             builder.with_voice(voice_config, enabled=voice_on)
+        traced, observability_config = _observability_setting(
+            None, observability, observability_provider, observability_org
+        )
+        if not traced or observability_config:
+            builder.with_observability(observability_config, enabled=traced)
         if normalized_instruction:
             builder.with_instruction(normalized_instruction)
         if normalized_memory_ids:
@@ -1210,6 +1257,9 @@ class MemorizzRuntime:
         voice: Optional[bool] = None,
         voice_provider: Optional[str] = None,
         voice_name: Optional[str] = None,
+        observability: Optional[bool] = None,
+        observability_provider: Optional[str] = None,
+        observability_org: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Update the safe persisted-agent surface without accepting credentials."""
         normalized, existing = self._local_agent_record(
@@ -1247,6 +1297,9 @@ class MemorizzRuntime:
                 voice,
                 voice_provider,
                 voice_name,
+                observability,
+                observability_provider,
+                observability_org,
             )
         ) or bool(clear_llm)
         if not supplied:
@@ -1518,6 +1571,17 @@ class MemorizzRuntime:
         if voice is not None or voice_provider is not None or voice_name is not None:
             updated.voice, updated.voice_config = _voice_setting(
                 updated, voice, voice_provider, voice_name
+            )
+        if (
+            observability is not None
+            or observability_provider is not None
+            or observability_org is not None
+        ):
+            (
+                updated.observability,
+                updated.observability_config,
+            ) = _observability_setting(
+                updated, observability, observability_provider, observability_org
             )
         updated.persona_learning = _persona_learning_setting(
             updated.persona_learning,
@@ -2546,19 +2610,32 @@ class MemorizzRuntime:
             result["note"] = note
         return result
 
-    def connector_search(self, query: str, identity: RequestIdentity) -> Dict[str, Any]:
-        """``search`` as ChatGPT calls it: ``results`` of id, title and url."""
+    def connector_search(
+        self,
+        query: str,
+        identity: RequestIdentity,
+        *,
+        memory_ids: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        """``search`` as ChatGPT calls it: ``results`` of id, title and url.
+        ``memory_ids`` keeps it to those memories (a server limited to some)."""
         results: List[Dict[str, Any]] = []
-        for kind in _CONNECTOR_TYPES:
+        seen = set()
+        for kind, memory_id in itertools.product(
+            _CONNECTOR_TYPES, list(memory_ids) if memory_ids else [None]
+        ):
             try:
-                found = self.search_memories(query, kind, identity, limit=10)
+                found = self.search_memories(
+                    query, kind, identity, memory_id=memory_id, limit=10
+                )
             except MemorizzServerError as exc:
                 if exc.code == "invalid_query":
                     raise
                 continue
             for row in found["memories"]:
                 record_id = str(row.get("_id") or row.get("id") or "")
-                if record_id:
+                if record_id and (kind, record_id) not in seen:
+                    seen.add((kind, record_id))
                     results.append(
                         {
                             "id": f"{kind}:{record_id}",
@@ -2807,7 +2884,9 @@ class MemorizzRuntime:
                 for key in ("routed_to", "confidence", "run_id", "applied")
                 if key in routing
             }
-        resolved_memory_id = str(memory_id or _default_memory_id(identity))
+        resolved_memory_id = str(
+            memory_id or _default_memory_id(identity, self.config.app_memory_id)
+        )
         document = {
             **safe_metadata,
             "content": text,
@@ -3732,7 +3811,7 @@ class MemorizzRuntime:
             )
         entities = self._entity_memory()
         if identity.client:
-            memory_id = memory_id or PERSONAL_MEMORY_ID
+            memory_id = memory_id or self.config.app_memory_id
         scope = {"memory_id": memory_id, "user_id": identity.principal}
         created_targets: List[str] = []
         links = []

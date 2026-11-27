@@ -167,6 +167,8 @@ def _stream_turn(session, query: str) -> None:
     needed = []
     # Tool calls waiting for approval; asked about after the turn.
     approvals = []
+    # What tools found that is worth a table (ToolResult.display).
+    displays = []
     stream = None
     # The local UI's playground shows this turn as it streams.
     live_turn = LiveTurn(getattr(session.agent, "agent_id", None), query)
@@ -240,6 +242,8 @@ def _stream_turn(session, query: str) -> None:
                     show_feed(delegates.event(event))
                 elif kind == "tool.started":
                     tools.append(event.get("tool_name", "tool"))
+                elif kind == "tool.completed" and event.get("display"):
+                    displays.append(event["display"])
                 elif kind == "approval.required":
                     status = "paused for approval"
                     approvals.append((event.get("proposal") or {}).get("proposal_id"))
@@ -270,6 +274,18 @@ def _stream_turn(session, query: str) -> None:
                 stream.close()
             harness_event_listener.reset(listening)
             refresh(force=True)
+    if displays:
+        # What the tools found, as tables under the answer.
+        from .displays import print_displays
+
+        provider = getattr(
+            getattr(session.agent, "internet_access_manager", None), "provider", None
+        )
+        print_displays(
+            session.console,
+            displays,
+            provider if hasattr(provider, "get_webset") else None,
+        )
     if save_stream_session(session) == "failed":
         session.console.print("[yellow]Session state could not be saved.[/yellow]")
     if approvals:

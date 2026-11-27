@@ -165,8 +165,15 @@ def serve_apps(
         "--shared",
         help="The first pairing code shares your local agents' memory, in every project.",
     ),
+    memory_id: Optional[str] = typer.Option(
+        None,
+        "--memory-id",
+        help="Keep the apps to one memory: they read only it and save to it. "
+        "Name the memory ID your agents share. (Default: every memory the app "
+        "may read, saving to `personal`.)",
+    ),
 ):
-    """Put your memory online for Grok Bot and ChatGPT dots, with sign-in."""
+    """Put your memory online for Muse, Grok Bot and ChatGPT dots, with sign-in."""
     from .config import load_layered_env
 
     load_layered_env()
@@ -200,6 +207,8 @@ def serve_apps(
             allow_harness_execution=False,
             allow_training=False,
             tool_set="memory",
+            app_memory_id=memory_id,
+            memory_ids={memory_id} if memory_id else None,
         )
     except (TypeError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -217,12 +226,21 @@ def serve_apps(
         f"  Pairing code  [bold]{code}[/bold]  [dim](one app, {minutes} minutes; "
         "`memorizz mcp apps pair` makes another)[/dim]\n"
     )
+    if memory_id:
+        console.print(
+            f"  Memory        [bold]{config.app_memory_id}[/bold]  "
+            "[dim](apps read and save only here)[/dim]\n"
+        )
     if shared:
         console.print(f"  [yellow]{_SHARED_WARNING}[/yellow]\n")
     console.print(
         "  [bold]Grok Bot[/bold]   Connect apps → Add a custom connector → name it memorizz, "
         "type Remote HTTPS, paste the URL (leave the OAuth fields empty), and sign in "
         "with a pairing code."
+    )
+    console.print(
+        "  [bold]Muse[/bold]  Ask Muse in chat to create a custom connector for an MCP "
+        "server at the URL, with OAuth, and sign in with a pairing code."
     )
     console.print(
         "  [bold]Grok[/bold]  grok.com/connectors → New Connector → Custom → paste the "

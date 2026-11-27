@@ -113,6 +113,7 @@ PROVIDER_COLOURS = {
     "azure": "#60a5fa",
     "anthropic": "#f4a27a",
     "ollama": "#bef264",
+    "openrouter": "#a5b4fc",
     "deepseek": "#818cf8",
     "gemini": "#93c5fd",
     "google": "#93c5fd",

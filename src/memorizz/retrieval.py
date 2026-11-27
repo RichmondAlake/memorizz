@@ -95,6 +95,10 @@ def thread_entity_memory_id(memory_id: str, thread_id: str) -> str:
     return f"{str(memory_id)[:200]}:thread:{digest}"
 
 
+# The most other memories one policy may reach into.
+MAX_RECALL_MEMORIES = 64
+
+
 @dataclass(frozen=True)
 class RetrievalPolicy:
     """Configure automatic semantic recall without changing storage.
@@ -121,6 +125,13 @@ class RetrievalPolicy:
     memory: ``"memory"`` from every thread of the memory and user,
     ``"thread"`` from the current thread only, ``"disabled"`` (the default)
     none. A thread-scoped or sealed policy keeps it to the current thread.
+
+    ``also_recall_from`` names other memories whose conversations may be
+    recalled alongside this one's, and listed for the model as its other
+    recent conversations. It is for a chat surface where each conversation
+    has a memory of its own and one person owns them all (the console's
+    playground). It only reads; nothing is written to those memories. Never
+    list another person's memory here.
 
     ``read_routing`` asks a decision model, before recall, which kinds of
     memory a request needs: episodic (past conversations), semantic (the
@@ -150,9 +161,24 @@ class RetrievalPolicy:
     workflow_scope: str = "disabled"
     read_routing: Any = None
     read_threshold: float = 0.5
+    # Other memories whose conversations this one may recall, for a chat
+    # surface that keeps each conversation in a memory of its own. Read only,
+    # and only while ``conversation_scope`` is "memory"; a sealed or
+    # thread-scoped policy ignores it.
+    also_recall_from: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         from .decision_models import feature_setting
+
+        extra = self.also_recall_from
+        if isinstance(extra, str):
+            extra = (extra,)
+        names = [str(item).strip() for item in (extra or ())]
+        object.__setattr__(
+            self,
+            "also_recall_from",
+            tuple(name for name in dict.fromkeys(names) if name)[:MAX_RECALL_MEMORIES],
+        )
 
         object.__setattr__(self, "read_routing", feature_setting(self.read_routing))
         threshold = float(self.read_threshold)
@@ -294,6 +320,8 @@ class RetrievalPolicy:
             "knowledge_base_scope": self.knowledge_base_scope,
             "knowledge_base_namespaces": list(self.knowledge_base_namespaces),
         }
+        if self.also_recall_from:
+            result["also_recall_from"] = list(self.also_recall_from)
         if self.entity_scope != "memory":
             result["entity_scope"] = self.entity_scope
         if self.candidate_limit != 5:

@@ -22,6 +22,61 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["memory-pages"])
 
 
+def _harness_runs() -> list:
+    """Harness runs, for the memories they share with agents. None when the
+    harness service is not set up here."""
+    try:
+        from .harnesses import _service
+
+        return list(_service().list_runs(limit=500))
+    except Exception:
+        return []
+
+
+@router.get("/memory/shared", response_class=HTMLResponse)
+async def shared_memories(request: Request):
+    """Every memory in use and who runs in it: agents and harnesses."""
+    if not _state["provider"]:
+        return RedirectResponse(url="/connect", status_code=302)
+    from ..helpers import _list_agents
+    from ..shared_memory_view import overview
+
+    provider = _state["provider"]
+    memories = await run_in_threadpool(
+        lambda: overview(provider, _list_agents(), _harness_runs())
+    )
+    return templates.TemplateResponse(
+        "shared_memory.html",
+        {
+            "request": request,
+            "active_page": "shared",
+            "memories": memories,
+            "shared": [m for m in memories if m["shared"]],
+            "private": [m for m in memories if not m["shared"]],
+        },
+    )
+
+
+@router.get("/memory/shared/{memory_id:path}", response_class=HTMLResponse)
+async def shared_memory_detail(request: Request, memory_id: str):
+    """One memory: its agents, decisions, coordinated tasks and who wrote what."""
+    if not _state["provider"]:
+        return RedirectResponse(url="/connect", status_code=302)
+    from ..helpers import _list_agents
+    from ..shared_memory_view import detail
+
+    provider = _state["provider"]
+    memory = await run_in_threadpool(
+        lambda: detail(provider, _list_agents(), memory_id, _harness_runs())
+    )
+    if memory is None:
+        raise HTTPException(status_code=404, detail="Nothing runs in that memory")
+    return templates.TemplateResponse(
+        "shared_memory_detail.html",
+        {"request": request, "active_page": "shared", "memory": memory},
+    )
+
+
 @router.get("/memory/{memory_type}", response_class=HTMLResponse)
 async def memory_list(request: Request, memory_type: str, error: Optional[str] = None):
     """Show list of items for a memory type."""
@@ -40,7 +95,9 @@ async def memory_list(request: Request, memory_type: str, error: Optional[str] =
         "short-term": MemoryType.SHORT_TERM_MEMORY,
         "entity": MemoryType.ENTITY_MEMORY,
         "summaries": MemoryType.SUMMARIES,
-        "shared": MemoryType.SHARED_MEMORY,
+        # /memory/shared is the page of who shares each memory; the stored
+        # records of this type (coordination boards, traces) are listed here.
+        "shared-records": MemoryType.SHARED_MEMORY,
         "cache": MemoryType.SEMANTIC_CACHE,
         "skills": MemoryType.SKILLBOX,
         # The records themselves (/memory/workflows and /memory/skills are

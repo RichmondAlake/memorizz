@@ -126,6 +126,9 @@
                     <th scope="row" class="fleet-name">
                         <a href="/agents/{{ agent_id_value }}/playground">{{ agent_display_name }}</a>
                         <span class="fleet-id">{{ agent_id_value[:8] }}</span>
+                        {% if agent.self_aware %}<a class="pill pill--info" href="/agents/{{ agent_id_value }}/source" title="This agent can read and change its own code">Self-aware</a>{% endif %}
+                        {% set obs = observability_link(agent) %}
+                        {% if obs.enabled and obs.external and obs.url %}<a class="pill pill--info fleet-observability" href="{{ obs.url }}" target="_blank" rel="noopener noreferrer" title="This agent's traces are also sent to {{ obs.label }}. Open them there.">{{ obs.label }} ↗</a>{% elif not obs.enabled %}<span class="pill fleet-observability" title="Observability is off for this agent: its turns leave no traces">Not traced</span>{% endif %}
                         {% if agent_copies.get(agent_id_value, 1) > 1 %}<span class="pill pill--warning fleet-copies" title="{{ agent_copies[agent_id_value] }} stored records share this agent ID">{{ agent_copies[agent_id_value] }} copies</span>{% endif %}
                     </th>
                     <td class="fleet-col-model mono" title="{{ row.provider }} / {{ row.model }}">{{ row.model }}</td>
@@ -184,6 +187,8 @@
             <div class="fleet-detail-actions">
                 <a class="btn btn-primary" href="/agents/{{ agent_id_value }}/playground">Open playground</a>
                 <a class="btn" href="/traces?agent_id={{ agent_id_value|urlencode }}">Traces</a>
+                {% set obs = observability_link(agent) %}
+                {% if obs.enabled and obs.external and obs.url %}<a class="btn" href="{{ obs.url }}" target="_blank" rel="noopener noreferrer" title="Open this agent's traces in {{ obs.label }}">{{ obs.label }} ↗</a>{% endif %}
                 <a class="btn" href="/agents/{{ agent_id_value }}/edit">Edit</a>
             </div>
 
@@ -222,6 +227,7 @@
                 <div><dt>Max tool iterations</dt><dd>{{ agent.max_steps or '—' }}</dd></div>
                 {% if agent.persona and agent.persona.role %}<div><dt>Role</dt><dd>{{ agent.persona.role }}</dd></div>{% endif %}
                 {% if agent.whatsapp_enabled %}<div><dt>WhatsApp</dt><dd>{{ 'Active' if agent_id_value == active_whatsapp_agent_id else 'Enabled' }}</dd></div>{% endif %}
+                <div><dt>Observability</dt><dd>{% if not obs.enabled %}Off{% elif obs.external and obs.url %}<a href="{{ obs.url }}" target="_blank" rel="noopener noreferrer">{{ obs.label }} ↗</a>{% if not obs.ready %} <small class="is-bad" title="{{ obs.missing|join(', ') }} missing in this UI's environment">needs setup</small>{% endif %}{% else %}<a href="{{ obs.url or '/traces' }}">{{ obs.label }}</a>{% endif %}</dd></div>
             </dl>
             {% if agent.instruction %}<p class="fleet-instruction" title="{{ agent.instruction }}">{{ agent.instruction }}</p>{% endif %}
 
@@ -418,6 +424,7 @@ async function sendInlineChat(e, agentId) {
         });
 
         if (!response.ok) throw new Error('HTTP ' + response.status);
+        window.dispatchEvent(new Event('memorizz:agent-activity'));
 
         // SSE plumbing lives in the shared readSseStream() (static/js/app.js).
         await readSseStream(response, function(payload) {

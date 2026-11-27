@@ -18,6 +18,10 @@ _LAZY = {
     "Anthropic": ".anthropic",
     "OllamaLLM": ".ollama",
     "MLXLLM": ".mlx",
+    "ModelGateway": ".gateway",
+    "OpenRouter": ".gateway",
+    "Gemini": ".gateway",
+    "ModelRouting": ".routing",
 }
 
 

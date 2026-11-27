@@ -31,6 +31,11 @@ SELF_ONLY_REFUSAL = (
     "This memory keeps facts about the user only. Store a fact about the user "
     'with name "user"; do not store facts about other people.'
 )
+#: What a refused write tells the model of an agent that only reads.
+READ_ONLY_REFUSAL = (
+    "This agent reads entity memory and does not change it. Use the records as "
+    "they are; if one looks wrong, say so instead of rewriting it."
+)
 _KEY_RE = re.compile(r"[^a-z0-9_.:-]+")
 
 
@@ -51,14 +56,24 @@ class EntityPolicy:
     and capture drops facts about anyone else.
     ``attribute_history_limit``: how many replaced values each attribute
     keeps, with the dates each one held (20 by default).
+    ``writes``: ``False`` makes the agent a reader of entity memory. It looks
+    records up and is given them with each request, but gets no tool to change
+    them and files nothing from its conversations. In a memory several agents
+    share, this keeps a decision in the hands of the agent that owns it.
     """
 
     self_identity_key: Optional[str] = None
     subjects: str = "all"
     #: Replaced values kept per attribute, each with the dates it held.
     attribute_history_limit: int = 20
+    #: False: the agent reads entity memory and never changes it.
+    writes: bool = True
 
     def __post_init__(self) -> None:
+        writes = self.writes
+        if isinstance(writes, str):
+            writes = writes.strip().lower() not in {"false", "0", "no", "off", "read"}
+        object.__setattr__(self, "writes", bool(writes))
         try:
             limit = int(self.attribute_history_limit)
         except (TypeError, ValueError):
@@ -90,10 +105,12 @@ class EntityPolicy:
         if not isinstance(value, Mapping):
             raise TypeError("entity_policy must be a mapping or EntityPolicy")
         limit = value.get("attribute_history_limit")
+        writes = value.get("writes")
         return cls(
             self_identity_key=value.get("self_identity_key"),
             subjects=value.get("subjects") or "all",
             attribute_history_limit=20 if limit in (None, "") else limit,
+            writes=True if writes is None else writes,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -104,11 +121,18 @@ class EntityPolicy:
         if self.attribute_history_limit != 20:
             # Only a changed limit is saved, so stored agents keep their shape.
             data["attribute_history_limit"] = self.attribute_history_limit
+        if not self.writes:
+            data["writes"] = False
         return data
 
     @property
     def active(self) -> bool:
         return self.self_identity_key is not None
+
+    @property
+    def stored(self) -> Optional[Dict[str, Any]]:
+        """What a saved agent keeps: None for the default policy."""
+        return self.to_dict() if self.active or not self.writes else None
 
     @property
     def self_only(self) -> bool:

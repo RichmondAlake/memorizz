@@ -1,0 +1,24 @@
+flowchart LR
+    subgraph CLOUD["Their clouds"]
+        direction TB
+        M[Muse]:::app
+        G[Grok Bot]:::app
+        D[a dot]:::app
+    end
+    T{{"Public HTTPS address<br/>a tunnel you open"}}:::meta
+    subgraph MAC["Your computer"]
+        direction TB
+        S["MemoRizz MCP server<br/>127.0.0.1:8766<br/>sign-in · memory tools only"]:::meta
+        MEM[("Shared memory<br/>fern-ember")]:::mem
+        AG[Mara · Cole · Sam · Ona]:::agent
+        H[Codex · Claude Code · pi]:::harness
+    end
+    CLOUD -- "HTTPS + token" --> T --> S
+    S <--> MEM
+    AG <--> MEM
+    H <--> MEM
+    classDef app fill:#1a0f1f,stroke:#d58cff,color:#f8ecff;
+    classDef agent fill:#0d1b2a,stroke:#5aa9ff,color:#eaf4ff;
+    classDef harness fill:#1a1408,stroke:#ffb454,color:#fff5e6;
+    classDef meta fill:#14171c,stroke:#6f7cff,color:#f2f4f7;
+    classDef mem fill:#0f2a1f,stroke:#3ddc97,color:#eafff5;

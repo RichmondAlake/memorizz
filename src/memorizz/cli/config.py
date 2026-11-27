@@ -59,6 +59,8 @@ DEFAULT_OLLAMA_EMBED_MODEL = "nomic-embed-text"
 DEFAULT_OPENAI_MODEL = _DEFAULT_MODELS["openai"]  # gpt-6.1-sol
 DEFAULT_ANTHROPIC_MODEL = _DEFAULT_MODELS["anthropic"]  # claude-opus-5-5
 DEFAULT_AZURE_MODEL = _DEFAULT_MODELS["azure"]  # gpt-5
+DEFAULT_OPENROUTER_MODEL = _DEFAULT_MODELS["openrouter"]  # openrouter/auto
+DEFAULT_GEMINI_MODEL = _DEFAULT_MODELS["gemini"]  # gemini-4-hydrogen
 
 #: Default Ollama daemon host (also overridable via OLLAMA_HOST).
 OLLAMA_DEFAULT_HOST = "http://localhost:11434"

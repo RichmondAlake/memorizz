@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Shared memory - Memorizz{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/css/pages/shared-memory.css?v=3">{% endblock %}
+{% block content %}
+{% from '_ui.html' import page_header, empty_state %}
+{#- One row per memory ID: who runs in it. A memory is shared when more than
+    one agent or harness does. -#}
+{% macro memory_row(memory) %}
+<a class="sm-memory" href="/memory/shared/{{ memory.memory_id|urlencode }}">
+    <div class="sm-memory-head">
+        <strong class="sm-memory-id mono">{{ memory.memory_id }}</strong>
+        <span class="sm-badge{% if memory.shared %} sm-badge--shared{% endif %}">{% if memory.shared %}Shared by {{ memory.used_by }}{% else %}Private{% endif %}</span>
+    </div>
+    <ul class="sm-chips" aria-label="Who runs in this memory">
+        {% for agent in memory.agents %}
+        <li class="sm-chip sm-chip--{{ agent.access }}" title="{{ agent.role or 'Agent' }}{% if agent.access == 'writes' %} · writes records{% elif agent.access == 'reads' %} · reads records{% endif %}">{{ agent.name }}{% if agent.access == 'writes' %}<span class="sm-chip-mark" aria-hidden="true">✎</span>{% endif %}</li>
+        {% endfor %}
+        {% for harness, count in memory.harnesses.items() %}
+        <li class="sm-chip sm-chip--harness" title="{{ count }} harness run{{ '' if count == 1 else 's' }}">{{ harness }} · {{ count }}</li>
+        {% endfor %}
+        {% for app, count in memory.apps.items() %}
+        <li class="sm-chip sm-chip--app" title="A connected app that saved {{ count }} record{{ '' if count == 1 else 's' }} here">{{ app }} · {{ count }}</li>
+        {% endfor %}
+    </ul>
+    <p class="sm-memory-facts">
+        <span>{{ memory.records }} record{{ '' if memory.records == 1 else 's' }}</span>
+        <span>{{ memory.turns }} turn{{ '' if memory.turns == 1 else 's' }}</span>
+        {% if memory.last_at %}<span class="mono">{{ memory.last_at[:16]|replace('T', ' ') }}</span>{% endif %}
+    </p>
+</a>
+{% endmacro %}
+
+<div class="sm">
+    {% call page_header('Shared memory', 'Which agents, harnesses and connected apps use each memory. A memory is shared when more than one of them reads and writes the same memory ID.') %}
+        <a class="btn" href="/memory/shared-records">Stored records</a>
+    {% endcall %}
+
+    {% if not memories %}
+        {{ empty_state('No memory is in use yet', 'Run an agent in the playground, or give two agents the same memory ID, and it appears here.', '/playground', 'Open the playground') }}
+    {% else %}
+    <section aria-labelledby="sm-shared-title">
+        <h2 class="sm-title" id="sm-shared-title">Shared <span>{{ shared|length }}</span></h2>
+        {% if shared %}
+        <div class="sm-grid">{% for memory in shared %}{{ memory_row(memory) }}{% endfor %}</div>
+        {% else %}
+        <p class="sm-empty">No memory is shared yet. Give two agents the same memory ID (<code>memory_ids</code> in the SDK, <strong>Memory IDs</strong> on the agent form) and they read and write one memory.</p>
+        {% endif %}
+    </section>
+    {% if private %}
+    <section aria-labelledby="sm-private-title">
+        <h2 class="sm-title" id="sm-private-title">Used by one <span>{{ private|length }}</span></h2>
+        <div class="sm-grid">{% for memory in private %}{{ memory_row(memory) }}{% endfor %}</div>
+    </section>
+    {% endif %}
+    <p class="sm-legend"><span class="sm-chip sm-chip--writes">Name<span class="sm-chip-mark" aria-hidden="true">✎</span></span> may change the memory's records. <span class="sm-chip sm-chip--reads">Name</span> reads them. <span class="sm-chip sm-chip--harness">harness · runs</span> is a coding harness that ran in the memory. <span class="sm-chip sm-chip--app">app · saves</span> is a connected app, such as Muse, Grok Bot or a dot, that saved here.</p>
+    {% endif %}
+</div>
+{% endblock %}

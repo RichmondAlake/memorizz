@@ -1054,6 +1054,11 @@ class OracleConfig:
         vector_search_mode: str = "exact",
         pool_wait_timeout: Optional[float] = 60.0,
         read_only: bool = False,
+        config_dir: Optional[str] = None,
+        wallet_location: Optional[str] = None,
+        wallet_password: Optional[str] = None,
+        pool_ping_interval: Optional[int] = None,
+        pool_timeout: Optional[int] = None,
     ):
         """
         Initialize the Oracle provider with configuration settings.
@@ -1144,6 +1149,11 @@ class OracleConfig:
         self.pool_increment = pool_increment
         self.pool_wait_timeout = pool_wait_timeout
         self.read_only = bool(read_only)
+        self.config_dir = config_dir
+        self.wallet_location = wallet_location
+        self.wallet_password = wallet_password
+        self.pool_ping_interval = pool_ping_interval
+        self.pool_timeout = pool_timeout
 
 
 class OracleProvider(
@@ -1271,6 +1281,16 @@ class OracleProvider(
                 "getmode": oracledb.POOL_GETMODE_TIMEDWAIT,
                 "wait_timeout": int(config.pool_wait_timeout * 1000),
             }
+        if config.config_dir:
+            wait_options["config_dir"] = config.config_dir
+        if config.wallet_location:
+            wait_options["wallet_location"] = config.wallet_location
+        if config.wallet_password:
+            wait_options["wallet_password"] = config.wallet_password
+        if config.pool_ping_interval is not None:
+            wait_options["ping_interval"] = int(config.pool_ping_interval)
+        if config.pool_timeout is not None:
+            wait_options["timeout"] = int(config.pool_timeout)
         try:
             self.pool = _GuardedPool(
                 oracledb.create_pool(

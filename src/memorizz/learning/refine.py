@@ -198,6 +198,7 @@ class _TokenMeter:
         self.model = model
         self.tokens = 0
         self.estimated = False
+        self._depth = 0
         self._saved: Dict[str, Any] = {}
 
     def _count(self, prompt: Any, reply: Any) -> None:
@@ -227,8 +228,15 @@ class _TokenMeter:
                 continue
 
             def wrapped(*args: Any, __call: Callable = original, **kwargs: Any) -> Any:
-                reply = __call(*args, **kwargs)
-                self._count(args[0] if args else kwargs, reply)
+                # A model whose text call goes through its chat call is one
+                # request: count it once, at the outer call.
+                self._depth += 1
+                try:
+                    reply = __call(*args, **kwargs)
+                finally:
+                    self._depth -= 1
+                if self._depth == 0:
+                    self._count(args[0] if args else kwargs, reply)
                 return reply
 
             try:

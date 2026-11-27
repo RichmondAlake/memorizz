@@ -43,7 +43,7 @@ count, a time window and an agent:
 Rules are checked every minute **while the MemoRizz UI is running**. If it isn't
 running, nothing checks them.
 
-A rule that fires shows under Needs attention on the Overview. With a webhook, it
+A rule that fires shows under Needs attention on the Dashboard. With a webhook, it
 sends one message when it fires and one when it clears, not one a minute. If a
 delivery fails, the rule says so and tries again at the next check. **Send a test**
 checks the address.

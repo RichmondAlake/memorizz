@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}Agent harnesses - Memorizz{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/css/pages/harnesses.css?v=26">
+{% block head %}<link rel="stylesheet" href="/static/css/pages/harnesses.css?v=32">
 <script src="/static/js/harness-trajectory.js?v=15"></script>
 <link rel="stylesheet" href="/static/css/pages/harness-compare.css?v=3">
 <script src="https://cdn.jsdelivr.net/npm/marked@14.0.0/marked.min.js"></script>
@@ -21,33 +21,6 @@
     <button class="btn" type="button" onclick="location.reload()">Refresh</button>
     {% if not ui_read_only %}<button class="btn btn-primary" type="button" data-focus-quick>New run</button>{% endif %}
 {% endcall %}
-
-{% if not ui_read_only %}
-<form class="hx-quick" id="hx-quick" autocomplete="off" data-mutates novalidate>
-    <label class="visually-hidden" for="hx-quick-task">Task</label>
-    <textarea id="hx-quick-task" name="task" rows="1" placeholder="Ask a harness to do something, e.g. “Find why the tests fail in my project” or “What is MongoDB’s stock price today?”"></textarea>
-    <div class="hx-quick-row">
-        <label class="hx-quick-field"><span>Harness</span>
-            <select id="hx-quick-harness" name="harness">
-                <option value="auto" data-web="true">Auto route</option>
-                {% for item in harnesses if item.name != 'memagent' %}<option value="{{ item.name }}" data-web="{{ 'true' if 'full' in ((item.metadata or {}).network_modes or []) else 'false' }}"{% if not item.ready %} disabled data-unready="true"{% endif %}>{{ item.name }}{% if not item.ready %} · not ready{% endif %}</option>{% endfor %}
-            </select>
-        </label>
-        <label class="hx-quick-field hx-quick-model"><span>Model</span>
-            <input id="hx-quick-model" name="model" list="hx-quick-models" placeholder="Harness default" autocomplete="off" spellcheck="false">
-        </label>
-        <datalist id="hx-quick-models"></datalist>
-        <label class="hx-quick-field hx-quick-ws"><span>Project folder</span>
-            <input id="hx-quick-workspace" name="workspace" list="hx-workspaces" value="{{ request.query_params.get('workspace', '') }}" placeholder="None: a fresh scratch folder">
-        </label>
-        <datalist id="hx-workspaces">{% for ws in recent_workspaces %}<option value="{{ ws }}"></option>{% endfor %}</datalist>
-        <label class="harness-check"><input type="checkbox" name="web" id="hx-quick-web"> Web access</label>
-        <label class="harness-check"><input type="checkbox" name="write" id="hx-quick-write"> Allow edits</label>
-        <button class="btn btn-primary" type="submit" id="hx-quick-run">Run</button>
-    </div>
-    <div class="hx-quick-status" id="hx-quick-status" aria-live="polite"></div>
-</form>
-{% endif %}
 
 {% if error %}<div class="error-message" role="alert">{{ error }}</div>{% endif %}
 
@@ -97,6 +70,34 @@
     {{ empty_state('No harness adapters registered', 'Install Codex, Claude Code or OpenHands, or register an adapter with the MetaHarness, then refresh this page.') }}
     {% endif %}
 </section>
+
+{# The quick ask sits under Availability: you see what is ready, then ask. #}
+{% if not ui_read_only %}
+<form class="hx-quick" id="hx-quick" autocomplete="off" data-mutates novalidate>
+    <label class="visually-hidden" for="hx-quick-task">Task</label>
+    <textarea id="hx-quick-task" name="task" rows="1" placeholder="Ask a harness to do something, e.g. “Find why the tests fail in my project” or “What is MongoDB’s stock price today?”"></textarea>
+    <div class="hx-quick-row">
+        <label class="hx-quick-field"><span>Harness</span>
+            <select id="hx-quick-harness" name="harness">
+                <option value="auto" data-web="true">Auto route</option>
+                {% for item in harnesses if item.name != 'memagent' %}<option value="{{ item.name }}" data-web="{{ 'true' if 'full' in ((item.metadata or {}).network_modes or []) else 'false' }}"{% if not item.ready %} disabled data-unready="true"{% endif %}>{{ item.name }}{% if not item.ready %} · not ready{% endif %}</option>{% endfor %}
+            </select>
+        </label>
+        <label class="hx-quick-field hx-quick-model"><span>Model</span>
+            <input id="hx-quick-model" name="model" list="hx-quick-models" placeholder="Harness default" autocomplete="off" spellcheck="false">
+        </label>
+        <datalist id="hx-quick-models"></datalist>
+        <label class="hx-quick-field hx-quick-ws"><span>Project folder</span>
+            <input id="hx-quick-workspace" name="workspace" list="hx-workspaces" value="{{ request.query_params.get('workspace', '') }}" placeholder="None: a fresh scratch folder">
+        </label>
+        <datalist id="hx-workspaces">{% for ws in recent_workspaces %}<option value="{{ ws }}"></option>{% endfor %}</datalist>
+        <label class="harness-check"><input type="checkbox" name="web" id="hx-quick-web"> Web access</label>
+        <label class="harness-check"><input type="checkbox" name="write" id="hx-quick-write"> Allow edits</label>
+        <button class="btn btn-primary" type="submit" id="hx-quick-run">Run</button>
+    </div>
+    <div class="hx-quick-status" id="hx-quick-status" aria-live="polite"></div>
+</form>
+{% endif %}
 
 {% if not ui_read_only %}
 {% set hx_harnesses = [] %}{% for item in harnesses %}{% set _ = hx_harnesses.append({'name': item.name, 'ready': item.ready, 'edits': not (item.metadata or {}).get('write_requires_external_isolation'), 'models': item.models or [], 'network': (item.metadata or {}).get('network_modes') or ['none'], 'tools': (item.metadata or {}).get('task_tool_policy', False), 'cost': (item.metadata or {}).get('cost_reporting', item.usage_reporting) is true, 'tokens': (item.metadata or {}).get('token_reporting', item.usage_reporting) is true, 'schema': (item.metadata or {}).get('output_schema', False) is true, 'subagents': (item.metadata or {}).get('subagents') or item.name == 'memagent', 'isolation': item.requires_external_isolation is true, 'edit_isolation': (item.metadata or {}).get('write_requires_external_isolation') is true, 'mcp': item.mcp or (item.metadata or {}).get('mcp_fallback') == 'context_pack', 'default_model': ((model_choices or {}).get(item.name) or {}).get('default') or (item.metadata or {}).get('default_model') or '', 'choices': ((model_choices or {}).get(item.name) or {}).get('groups') or []}) %}{% endfor %}
@@ -201,9 +202,21 @@
                 <input id="harness-verify" name="verification_command" placeholder="pytest -q">
             </div>
             <div class="form-group">
-                <label for="harness-memory">Memory ID <span class="optional">saves answers</span></label>
-                <input id="harness-memory" name="memory_id" placeholder="e.g. repo-name" aria-describedby="harness-memory-hint">
-                <small class="form-hint" id="harness-memory-hint">Plan and comparison answers are saved to this memory so later runs can recall them.</small>
+                <label for="harness-memory-pick">Memory <span class="optional">saves answers</span></label>
+                {# Pick a memory harnesses already use, start a new one, or none. A typed name that is a near miss would silently start an empty memory. #}
+                <select id="harness-memory-pick" aria-describedby="harness-memory-hint">
+                    <option value="">None: private to this run</option>
+                    {% for entry in known_memories %}<option value="{{ entry.memory_id }}">{{ entry.memory_id }} · {{ entry.runs }} run{{ '' if entry.runs == 1 else 's' }}{% if entry.harnesses %} · {{ entry.harnesses|join(', ') }}{% endif %}</option>{% endfor %}
+                    <option value="__new__">New memory…</option>
+                </select>
+                <input id="harness-memory" name="memory_id" placeholder="Name the new memory, e.g. repo-name" aria-label="New memory name" hidden>
+                <small class="form-hint" id="harness-memory-hint">Answers are saved to this memory so later runs given the same one can recall them. A run can read and write this memory only. <a id="harness-memory-open" href="#" hidden>Open this memory</a></small>
+            </div>
+            <div class="form-group">
+                <label for="harness-read-memories">Also read <span class="optional">read-only</span></label>
+                <input id="harness-read-memories" name="mcp_read_memory_ids" placeholder="e.g. team-handbook, legal" list="hx-known-memories" aria-describedby="harness-read-hint">
+                <datalist id="hx-known-memories">{% for entry in known_memories %}<option value="{{ entry.memory_id }}">{% endfor %}</datalist>
+                <small class="form-hint" id="harness-read-hint">Other memories, separated by commas, that the run may read and never write. Up to 5.</small>
             </div>
             <div class="form-group">
                 <label for="harness-user">User ID <span class="optional">optional</span></label>
@@ -350,38 +363,46 @@
             </header>
             {% if wf.setup and not ui_read_only %}<script type="application/json" data-workflow-setup="{{ wf.id }}">{{ wf.setup|tojson }}</script>{% endif %}
             <div class="hx-workflow-body" id="hx-workflow-body-{{ wf.id }}">
-            <div class="hx-flow hx-flow--{{ wf.kind }}" data-flow>
-            <div class="hx-flow-root" data-flow-root>
-                <span class="hx-flow-root-label">{{ 'Goal' if wf.kind == 'plan' else 'Task' }}</span>
-                <span class="hx-flow-root-sub">{{ wf.steps|length }} {{ ('stage' if wf.kind == 'plan' else 'harness') ~ ('' if wf.steps|length == 1 else ('s' if wf.kind == 'plan' else 'es')) }}</span>
-            </div>
-            <ol class="hx-steps">
+            {# Stages top to bottom on one rail. A row opens to its full answer and trace. #}
+            <ol class="hx-seq hx-seq--{{ wf.kind }}" aria-label="{{ 'Stages, in order' if wf.kind == 'plan' else 'Harnesses compared' }}">
                 {% for step in wf.steps %}
-                <li class="hx-step hx-step--{{ step.signal }}" data-flow-node data-signal="{{ step.signal }}" data-step-status="{{ step.status }}">
-                    <button type="button" class="hx-step-btn"{% if step.run_id %} data-select-run="{{ step.run_id }}" aria-label="Show {{ step.name }} run in the ledger"{% else %} disabled{% endif %}>
-                        <span class="hx-step-top">
-                            {% if wf.kind == 'plan' %}<span class="hx-step-num">{{ step.number }}</span>{% endif %}
-                            <strong>{{ step.name }}</strong>
-                            {% if wf.kind == 'plan' %}<span class="mono hx-step-harness">{{ step.harness }}</span>{% endif %}
-                            {% if step.run and step.run.model %}<span class="mono hx-step-model" title="Model{% if step.run.model_is_default %}, as the harness reported it{% endif %}">{{ step.run.model }}</span>{% endif %}
-                            {% if step.writes %}<span class="hx-step-edits">edits</span>{% endif %}
-                        </span>
-                        <span class="hx-step-status"><span class="fleet-health fleet-health--{{ dot[step.signal] }}">{{ step.status_label }}</span>
-                        {% if step.run %}<span class="mono hx-step-figures">{% if step.run.duration_ms is not none %}{{ fmt_duration(step.run.duration_ms) }}{% endif %}{% if step.run.total_cost_usd is not none %} · {{ '≈' if step.run.total_cost_estimated }}{{ fmt_usd(step.run.total_cost_usd) }}{% if step.run.delegate_runs %} with delegates{% endif %}{% endif %}{% if step.run.verify_state == 'verified' %} · <span class="is-good">verified</span>{% elif step.run.verify_state == 'failed' %} · <span class="is-bad">verification failed</span>{% endif %}</span>{% endif %}</span>
-                        {% if step.status == 'pending_approval' %}<span class="hx-step-excerpt is-warn">Waiting for approval in the queue above.</span>
-                        {% elif step.excerpt %}<span class="hx-step-excerpt{% if step.is_error %} is-bad{% endif %}">{{ step.excerpt }}</span>{% endif %}
-                        {% if step.files_changed %}<span class="hx-step-files mono" title="{{ step.files_changed|join(', ') }}">{{ step.files_changed|length }} file{{ '' if step.files_changed|length == 1 else 's' }} changed</span>{% endif %}
-                        {% if step.run and step.run.step_total %}{{ step_strip(step.run.steps) }}{% endif %}
-                    </button>
-                    {% if step.run_id %}{% set live = step.run and step.run.group in ['active', 'approval'] %}
-                    <button type="button" class="hx-node-trace-toggle" data-node-toggle="{{ step.run_id }}" aria-expanded="false" aria-controls="hx-node-trace-{{ step.run_id }}">{{ 'Live trace' if live else 'Trace' }}</button>
-                    <div class="hx-traj hx-node-trace" id="hx-node-trace-{{ step.run_id }}" data-node-panel="{{ step.run_id }}" data-trajectory-for="{{ step.run_id }}" data-active="{{ 'true' if live else 'false' }}" hidden></div>
-                    {% endif %}
+                {% set live = step.run and step.run.group in ['active', 'approval'] %}
+                <li class="hx-step hx-seq-step hx-step--{{ step.signal }}" data-signal="{{ step.signal }}" data-step-status="{{ step.status }}">
+                    <span class="hx-seq-rail" aria-hidden="true"><span class="hx-seq-mark">{% if wf.kind == 'plan' %}{{ step.number }}{% endif %}</span></span>
+                    <div class="hx-seq-main">
+                        <button type="button" class="hx-seq-head"{% if step.run_id %} data-step-toggle="{{ step.run_id }}" aria-expanded="false" aria-controls="hx-seq-body-{{ step.run_id }}"{% else %} disabled{% endif %}>
+                            <span class="hx-seq-line">
+                                <strong class="hx-seq-name">{{ step.name }}</strong>
+                                {% if wf.kind == 'plan' %}<span class="hx-seq-harness">{{ step.harness }}</span>{% endif %}
+                                {% if step.run and step.run.model %}<span class="mono hx-seq-model" title="Model{% if step.run.model_is_default %}, as the harness reported it{% endif %}">{{ step.run.model }}</span>{% endif %}
+                                {% if step.writes %}<span class="hx-step-edits">edits</span>{% endif %}
+                                <span class="hx-seq-figures">
+                                    <span class="fleet-health fleet-health--{{ dot[step.signal] }}">{{ step.status_label }}</span>
+                                    {% if step.run %}<span class="mono hx-step-figures">{% if step.run.duration_ms is not none %}{{ fmt_duration(step.run.duration_ms) }}{% endif %}{% if step.run.total_cost_usd is not none %} · {{ '≈' if step.run.total_cost_estimated }}{{ fmt_usd(step.run.total_cost_usd) }}{% if step.run.delegate_runs %} with delegates{% endif %}{% endif %}{% if step.run.verify_state == 'verified' %} · <span class="is-good">verified</span>{% elif step.run.verify_state == 'failed' %} · <span class="is-bad">verification failed</span>{% endif %}</span>{% endif %}
+                                    {% if step.run and step.run.step_total %}{{ step_strip(step.run.steps) }}{% endif %}
+                                    {% if step.run_id %}<svg class="hx-seq-chevron" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>{% endif %}
+                                </span>
+                            </span>
+                            {% if step.status == 'pending_approval' %}<span class="hx-seq-excerpt is-warn">Waiting for approval in the queue above.</span>
+                            {% elif step.excerpt %}<span class="hx-seq-excerpt{% if step.is_error %} is-bad{% endif %}">{{ step.excerpt }}</span>{% endif %}
+                        </button>
+                        {% if step.run_id %}
+                        <div class="hx-seq-body" id="hx-seq-body-{{ step.run_id }}" data-step-body="{{ step.run_id }}" hidden>
+                            <div class="hx-seq-answer" data-step-answer="{{ step.run_id }}"></div>
+                            {% if step.files_changed %}<p class="hx-seq-files mono">{{ step.files_changed|length }} file{{ '' if step.files_changed|length == 1 else 's' }} changed: {{ step.files_changed|join(', ') }}</p>{% endif %}
+                            <div class="hx-seq-actions">
+                                <button type="button" class="btn btn-sm hx-btn-quiet" data-node-toggle="{{ step.run_id }}" aria-expanded="false" aria-controls="hx-node-trace-{{ step.run_id }}">{{ 'Live trace' if live else 'Trace' }}</button>
+                                <a class="btn btn-sm hx-btn-quiet" href="/harnesses/runs/{{ step.run_id }}">Open run</a>
+                                <a class="btn btn-sm hx-btn-quiet" href="/harnesses/runs/{{ step.run_id }}#used">Memory it used</a>
+                                <button type="button" class="btn btn-sm hx-btn-quiet" data-select-run="{{ step.run_id }}">Show in ledger</button>
+                            </div>
+                            <div class="hx-traj hx-node-trace" id="hx-node-trace-{{ step.run_id }}" data-node-panel="{{ step.run_id }}" data-trajectory-for="{{ step.run_id }}" data-active="{{ 'true' if live else 'false' }}" hidden></div>
+                        </div>
+                        {% endif %}
+                    </div>
                 </li>
                 {% endfor %}
             </ol>
-            <svg class="hx-flow-edges" aria-hidden="true" focusable="false"></svg>
-            </div>
             {% if wf.error and wf.group != 'succeeded' %}<p class="hx-workflow-error">{{ wf.error }}</p>{% endif %}
             <p class="hx-workflow-foot">
                 {% if wf.memory_id %}Answers saved to memory <span class="mono">{{ wf.memory_id }}</span>{% if wf.steps %} ({{ wf.remembered }} of {{ wf.steps|length }}){% endif %}{% else %}No memory ID, so answers are kept only in the run ledger{% endif %}
@@ -563,7 +584,7 @@
                 <div><dt>Files</dt><dd>{% if run.writes %}<span class="is-warn">Changed files</span>{% else %}No file changes{% endif %}</dd></div>
                 <div><dt>Model</dt><dd class="mono">{{ run.model or '—' }}</dd></div>
                 <div><dt>Turns</dt><dd class="mono">{{ run.turns }}</dd></div>
-                {% if run.memory_id %}<div><dt>Memory ID</dt><dd>{{ id_chip(run.memory_id, 18) }}</dd></div>{% endif %}
+                {% if run.memory_id %}<div><dt>Memory</dt><dd>{{ id_chip(run.memory_id, 18) }} <a class="hx-memory-link" href="/harnesses/memory/{{ run.memory_id|urlencode }}">Open</a></dd></div>{% endif %}
                 {% if run.session_log %}<div class="hx-wide"><dt>Session log</dt><dd class="mono hx-path">{{ run.session_log }}</dd></div>{% endif %}
             </dl>
             {% else %}
@@ -586,7 +607,7 @@
                 <div><dt>Uncommitted changes</dt><dd>{{ 'Allowed' if run.allow_dirty else 'Not allowed' }}</dd></div>
                 <div><dt>Model</dt><dd class="mono">{{ run.model or 'Adapter default' }}{% if run.model_is_default %} <span class="hx-muted">(harness default)</span>{% endif %}</dd></div>
                 {% if run.agent_id and run.harness == 'memagent' %}<div><dt>MemAgent</dt><dd><a href="/agents/{{ run.agent_id }}/playground">{{ agent_names.get(run.agent_id, run.agent_id[:12]) }}</a></dd></div>{% endif %}
-                {% if run.memory_id %}<div><dt>Memory ID</dt><dd>{{ id_chip(run.memory_id, 18) }}</dd></div>{% endif %}
+                {% if run.memory_id %}<div><dt>Memory</dt><dd>{{ id_chip(run.memory_id, 18) }} <a class="hx-memory-link" href="/harnesses/memory/{{ run.memory_id|urlencode }}">Open</a></dd></div>{% endif %}
                 {% if run.user_id %}<div><dt>User ID</dt><dd class="mono">{{ run.user_id }}</dd></div>{% endif %}
             </dl>
 
@@ -761,10 +782,11 @@
             if (field.type === 'checkbox') field.checked = !!value;
             else field.value = value == null ? '' : String(value);
         };
-        ['task', 'workspace', 'agent_id', 'model', 'verification_command', 'memory_id', 'user_id', 'thread_id',
+        ['task', 'workspace', 'agent_id', 'model', 'verification_command', 'memory_id', 'mcp_read_memory_ids', 'user_id', 'thread_id',
          'timeout_seconds', 'max_cost_usd', 'max_steps', 'max_input_tokens', 'max_output_tokens',
          'execution_backend', 'network', 'mcp_access', 'allowed_env', 'allowed_tools', 'denied_tools',
-         'allow_dirty_workspace', 'allow_subagents'].forEach(name => set(name, setup[name]));
+         'allow_dirty_workspace', 'allow_subagents'].forEach(name => set(name, Array.isArray(setup[name]) ? setup[name].join(', ') : setup[name]));
+        if (window.hxSyncMemoryPick) window.hxSyncMemoryPick();
         const judgeRoot = document.getElementById('hx-launch-judge');
         const autoJudge = judgeRoot?.querySelector('[data-judge-auto]');
         if (autoJudge) {
@@ -796,7 +818,7 @@
         const value = (name) => (data.get(name) || '').toString().trim();
         const payload = {
             task: value('task'), workspace: value('workspace'), agent_id: value('agent_id'),
-            memory_id: value('memory_id'), user_id: value('user_id'),
+            memory_id: value('memory_id'), mcp_read_memory_ids: value('mcp_read_memory_ids'), user_id: value('user_id'),
             execution_backend: value('execution_backend'), network: value('network'), mcp_access: value('mcp_access'),
             allow_dirty_workspace: data.has('allow_dirty_workspace'), allow_subagents: data.has('allow_subagents'),
             timeout_seconds: Number(value('timeout_seconds') || 900), max_steps: Number(value('max_steps') || 80),
@@ -906,10 +928,12 @@
         const clone = element.cloneNode(true);
         clone.querySelectorAll('[data-trajectory-for]').forEach(el => { el.innerHTML = ''; });
         clone.querySelectorAll('[data-live-since]').forEach(el => { el.textContent = ''; });
-        clone.querySelectorAll('.hx-flow-edges').forEach(el => { el.innerHTML = ''; });
         // What the viewer opened or folded is theirs, not a page change.
         clone.querySelectorAll('[data-node-panel]').forEach(el => { el.hidden = true; });
         clone.querySelectorAll('[data-node-toggle]').forEach(el => el.setAttribute('aria-expanded', 'false'));
+        clone.querySelectorAll('[data-step-body]').forEach(el => { el.hidden = true; });
+        clone.querySelectorAll('[data-step-toggle]').forEach(el => el.setAttribute('aria-expanded', 'false'));
+        clone.querySelectorAll('[data-step-answer]').forEach(el => { el.innerHTML = ''; });
         clone.querySelectorAll('[data-collapsed]').forEach(el => el.removeAttribute('data-collapsed'));
         clone.querySelectorAll('[data-workflow-toggle]').forEach(el => { el.setAttribute('aria-expanded', 'true'); el.setAttribute('aria-label', 'Collapse workflow'); });
         clone.querySelectorAll('[data-workflows-all]').forEach(el => { el.textContent = ''; });
@@ -991,6 +1015,7 @@
         if (!typingApproval()) patchRegion('hx-region-approvals', doc);
         patchRegion('hx-region-workflows', doc);
         applyCollapse();
+        restoreSteps();
         restoreNodeTraces();
         patchLedger(doc);
         syncPicks();
@@ -998,7 +1023,6 @@
         const live = document.getElementById('hx-live');
         if (live && nextLive) { live.dataset.fingerprint = nextLive.dataset.fingerprint; live.dataset.active = nextLive.dataset.active; }
         fillApprovers();
-        drawFlows();
         tickDurations();
         if (monitor) {
             const selected = monitor.selected();
@@ -1012,7 +1036,7 @@
     const refreshNow = async () => { try { await refreshInPlace(); } catch (_) { location.reload(); } };
 
     // ------------------------------------------------------------------
-    // Live durations and the execution graph
+    // Live durations
     // ------------------------------------------------------------------
     const tickDurations = () => {
         const now = Date.now();
@@ -1021,60 +1045,6 @@
     setInterval(tickDurations, 1000);
     tickDurations();
 
-    const SVG = 'http://www.w3.org/2000/svg';
-    const drawFlows = () => {
-        document.querySelectorAll('[data-flow]').forEach((flow, index) => {
-            const svg = flow.querySelector('.hx-flow-edges');
-            const root = flow.querySelector('[data-flow-root]');
-            const nodes = [...flow.querySelectorAll('[data-flow-node]')];
-            if (!svg || !root || !nodes.length) return;
-            const box = flow.getBoundingClientRect();
-            if (!box.width) return;
-            svg.setAttribute('viewBox', '0 0 ' + box.width + ' ' + box.height);
-            svg.setAttribute('width', box.width);
-            svg.setAttribute('height', box.height);
-            const at = (el) => {
-                const r = el.getBoundingClientRect();
-                return {l: r.left - box.left, r: r.right - box.left, t: r.top - box.top, b: r.bottom - box.top, x: (r.left + r.right) / 2 - box.left, y: (r.top + r.bottom) / 2 - box.top};
-            };
-            // A marker takes its colour from where it is defined, not from the
-            // edge using it, so each edge colour gets its own arrowhead.
-            const SIGNALS = ['good', 'bad', 'warn', 'active', 'idle'];
-            const marker = (signal) => 'hx-arrow-' + index + '-' + (SIGNALS.includes(signal) ? signal : 'idle');
-            let paths = '<defs>' + SIGNALS.map(signal => '<marker id="' + marker(signal) + '" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path class="hx-edge-head hx-edge-head--' + signal + '" d="M1,1.5 L9,5 L1,8.5 z"></path></marker>').join('') + '</defs>';
-            const edge = (a, b, signal) => {
-                let d;
-                // The tip ends on the card's edge, not over its border.
-                if (b.l >= a.r - 2) {
-                    const dx = Math.max(24, (b.l - a.r) / 2);
-                    d = 'M' + a.r + ',' + a.y + ' C' + (a.r + dx) + ',' + a.y + ' ' + (b.l - dx) + ',' + b.y + ' ' + b.l + ',' + b.y;
-                } else {
-                    const dy = Math.max(16, (b.t - a.b) / 2);
-                    d = 'M' + a.x + ',' + a.b + ' C' + a.x + ',' + (a.b + dy) + ' ' + b.x + ',' + (b.t - dy) + ' ' + b.x + ',' + b.t;
-                }
-                paths += '<path class="hx-edge hx-edge--' + signal + '" d="' + d + '" marker-end="url(#' + marker(signal) + ')"></path>';
-            };
-            // Edges meet a node's card, not the trace panel opened below it.
-            const card = (node) => node.querySelector('.hx-step-btn') || node;
-            if (flow.classList.contains('hx-flow--compare')) {
-                const start = at(root);
-                nodes.forEach(node => edge(start, at(card(node)), node.dataset.signal || 'idle'));
-            } else {
-                let previous = root;
-                nodes.forEach(node => { edge(at(previous === root ? root : card(previous)), at(card(node)), node.dataset.signal || 'idle'); previous = node; });
-            }
-            svg.innerHTML = paths;
-        });
-    };
-    if ('ResizeObserver' in window) {
-        const observer = new ResizeObserver(() => drawFlows());
-        const watch = () => document.querySelectorAll('[data-flow]').forEach(flow => observer.observe(flow));
-        watch();
-        new MutationObserver(watch).observe(document.getElementById('hx-region-workflows') || document.body, {childList: true});
-    } else {
-        window.addEventListener('resize', drawFlows);
-    }
-    requestAnimationFrame(drawFlows);
 
     // ------------------------------------------------------------------
     // Trajectory: a run's events as the steps the harness took.
@@ -1185,7 +1155,6 @@
         if (!live.length) return;
         nodeTimer = setTimeout(async () => {
             await Promise.all(live.map(runId => showTrajectory(runId).catch(() => {})));
-            drawFlows();
             followNodes();
         }, 1500);
     };
@@ -1196,10 +1165,57 @@
             panel.hidden = false;
             panel.closest('.hx-step')?.querySelector('[data-node-toggle]')?.setAttribute('aria-expanded', 'true');
             renderTrajectory(panel, trajectoryState(runId));
-            showTrajectory(runId).then(drawFlows).catch(() => {});
+            showTrajectory(runId).catch(() => {});
         });
         followNodes();
     };
+    // A stage row opens to its full answer, read from the run when first
+    // opened. What the viewer opened stays open across refreshes.
+    const openSteps = new Set();
+    const stepAnswers = new Map();
+    const fillStep = async (runId) => {
+        const target = document.querySelector('[data-step-answer="' + CSS.escape(runId) + '"]');
+        if (!target) return;
+        const draw = (run) => {
+            const result = run.result || {};
+            const text = result.final_response || result.error || '';
+            const working = ['queued', 'running', 'pending_approval'].includes(run.status);
+            target.innerHTML = text
+                ? (window.MemorizzMarkdown ? window.MemorizzMarkdown.render(String(text)) : '<pre></pre>')
+                : '<p class="hx-seq-none">' + (working ? 'No answer yet: this stage is still working.' : 'This stage gave no answer text.') + '</p>';
+            if (text && !window.MemorizzMarkdown) target.querySelector('pre').textContent = String(text);
+            target.classList.toggle('is-bad', !result.final_response && !!result.error);
+        };
+        const kept = stepAnswers.get(runId);
+        if (kept) draw(kept);
+        else target.innerHTML = '<p class="hx-seq-none">Loading the answer\u2026</p>';
+        try {
+            const response = await fetch('/api/harness-runs/' + encodeURIComponent(runId), {cache: 'no-store'});
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            const run = (await response.json()).run;
+            stepAnswers.set(runId, run);
+            draw(run);
+        } catch (error) {
+            if (!kept) target.innerHTML = '<p class="hx-seq-none">The answer could not be loaded.</p>';
+        }
+    };
+    const setStep = (runId, open) => {
+        const body = document.querySelector('[data-step-body="' + CSS.escape(runId) + '"]');
+        const head = document.querySelector('[data-step-toggle="' + CSS.escape(runId) + '"]');
+        if (!body || !head) { openSteps.delete(runId); return; }
+        body.hidden = !open;
+        head.setAttribute('aria-expanded', String(open));
+        head.closest('.hx-seq-step')?.classList.toggle('is-open', open);
+        if (open) fillStep(runId);
+    };
+    const toggleStep = (button) => {
+        const runId = button.dataset.stepToggle;
+        const open = !openSteps.has(runId);
+        if (open) openSteps.add(runId); else openSteps.delete(runId);
+        setStep(runId, open);
+    };
+    const restoreSteps = () => { [...openSteps].forEach(runId => setStep(runId, true)); };
+
     const toggleNodeTrace = async (button) => {
         const runId = button.dataset.nodeToggle;
         const panel = nodePanel(runId);
@@ -1208,10 +1224,8 @@
         if (open) openNodes.add(runId); else openNodes.delete(runId);
         panel.hidden = !open;
         button.setAttribute('aria-expanded', String(open));
-        drawFlows();
         if (!open) return;
         await showTrajectory(runId);
-        drawFlows();
         followNodes();
     };
 
@@ -1241,10 +1255,8 @@
         cards.forEach(card => { collapsedPrefs[card.dataset.workflowId] = collapsed; });
         saveCollapsed();
         applyCollapse();
-        drawFlows();
     };
     applyCollapse();
-    drawFlows();
 
     // Evidence is a dedicated, bookmarkable page.
     const openEvidence = (runId, tab) => {
@@ -1338,6 +1350,8 @@
         }
         const nodeToggle = target.closest('[data-node-toggle]');
         if (nodeToggle) { toggleNodeTrace(nodeToggle); return; }
+        const stepToggle = target.closest('[data-step-toggle]');
+        if (stepToggle && !(window.getSelection && String(window.getSelection()).trim())) { toggleStep(stepToggle); return; }
         const collapseAll = target.closest('[data-workflows-all]');
         if (collapseAll) { const cards = workflowCards(); setCollapsed(cards, cards.some(card => !card.dataset.collapsed)); return; }
         const workflowHead = target.closest('.hx-workflow-head');
@@ -1536,7 +1550,12 @@
             lines.push('No web access: harnesses work only with the workspace and memory.');
         }
         if (mcp !== 'none') {
-            lines.push((mcp === 'governed_write' ? 'Harnesses can read and propose changes to' : 'Harnesses can read') + ' MemoRizz memory, and use the saved agent’s connected apps (Notion, Gmail…) when an agent is chosen' + (mcp === 'governed_write' ? '; every change waits for approval.' : ', read-only.'));
+            // A run is kept to the memory it is given; with none it is not limited.
+            const memoryName = (form.querySelector('[name="memory_id"]') || {}).value;
+            const alsoRead = ((form.querySelector('[name="mcp_read_memory_ids"]') || {}).value || '').split(',').map(part => part.trim()).filter(Boolean);
+            const reach = (memoryName && memoryName.trim() ? ' the memory \u201c' + memoryName.trim() + '\u201d and no other' : ' a private memory of their own, shared with no other run')
+                + (alsoRead.length ? ', plus read-only: ' + alsoRead.join(', ') : '');
+            lines.push((mcp === 'governed_write' ? 'Harnesses can read and propose changes to' : 'Harnesses can read') + reach + ', and use the saved agent’s connected apps (Notion, Gmail…) when an agent is chosen' + (mcp === 'governed_write' ? '; every change waits for approval.' : ', read-only.'));
         }
         const subagents = form.querySelector('[name="allow_subagents"]');
         if (subagents && !subagents.disabled && subagents.checked) {
@@ -1562,7 +1581,7 @@
     // A warning when a harness only runs other providers' models.
     function modelMismatch(name, model) {
         if (!name || name === 'auto' || name === 'memagent') return '';
-        const names = {anthropic: 'Anthropic', openai: 'OpenAI', deepseek: 'DeepSeek', ollama: 'Ollama'};
+        const names = {anthropic: 'Anthropic', openai: 'OpenAI', deepseek: 'DeepSeek', gemini: 'Google Gemini', ollama: 'Ollama'};
         const info = launchData.harnesses.find(h => h.name === name) || {};
         const provider = modelProvider(model);
         const accepted = new Set((info.choices || []).flatMap(group => group.models.map(modelProvider)).filter(Boolean));
@@ -1582,7 +1601,9 @@
     };
     const attachModelSelect = (input, name) => {
         if (!input) return null;
-        let select = input.previousElementSibling && input.previousElementSibling.matches('select.hx-model-select') ? input.previousElementSibling : null;
+        // Found by its place in the field, not as the input's neighbour: the
+        // dropdown drawn for a select sits between the two.
+        let select = input.parentElement ? input.parentElement.querySelector(':scope > select.hx-model-select') : null;
         if (!select) {
             select = document.createElement('select');
             select.className = 'hx-model-select';
@@ -1721,7 +1742,37 @@
     form?.addEventListener('click', (event) => { if (event.target.closest('[data-mode-choice], [data-preset], #hx-add-stage, [data-stage-remove]')) setTimeout(syncApplies); });
     syncApplies();
     form?.addEventListener('change', syncAccess);
-    form?.addEventListener('input', (event) => { if (event.target.matches('[name="allowed_tools"], [name="denied_tools"]')) syncAccess(); });
+    form?.addEventListener('input', (event) => { if (event.target.matches('[name="allowed_tools"], [name="denied_tools"], [name="memory_id"], [name="mcp_read_memory_ids"]')) syncAccess(); });
+
+    // The memory picker drives the hidden memory_id field; "New memory…"
+    // shows it for typing. Restored setups and ?memory_id= select the match.
+    const memoryPick = document.getElementById('harness-memory-pick');
+    const memoryField = document.getElementById('harness-memory');
+    const memoryOpen = document.getElementById('harness-memory-open');
+    const syncMemoryPick = (fromField) => {
+        if (!memoryPick || !memoryField) return;
+        const known = [...memoryPick.options].map(option => option.value);
+        if (fromField) {
+            const wanted = memoryField.value.trim();
+            memoryPick.value = !wanted ? '' : known.includes(wanted) ? wanted : '__new__';
+        } else if (memoryPick.value !== '__new__') {
+            memoryField.value = memoryPick.value;
+        }
+        const typing = memoryPick.value === '__new__';
+        memoryField.hidden = !typing;
+        if (typing && !fromField) { memoryField.value = ''; memoryField.focus(); }
+        const chosen = memoryField.value.trim();
+        if (memoryOpen) {
+            memoryOpen.hidden = !chosen || !known.includes(chosen);
+            memoryOpen.href = '/harnesses/memory/' + encodeURIComponent(chosen);
+        }
+        syncAccess();
+    };
+    memoryPick?.addEventListener('change', () => syncMemoryPick(false));
+    const askedMemory = new URLSearchParams(window.location.search).get('memory_id');
+    if (askedMemory && memoryField) memoryField.value = askedMemory;
+    syncMemoryPick(true);
+    window.hxSyncMemoryPick = () => syncMemoryPick(true);
     form?.addEventListener('click', (event) => { if (event.target.closest('[data-mode-choice], [data-preset], #hx-add-stage')) setTimeout(syncAccess); });
     syncAccess();
 
@@ -1738,6 +1789,13 @@
         fillModels(document.getElementById('hx-quick-models'), name === 'auto' ? [] : [name], quickModel);
         if (quickModel) quickModel.disabled = name === 'auto';
         if (quickModel && name === 'auto') { quickModel.value = ''; }
+        // A model picked for another harness does not carry over: Codex does
+        // not run a Claude model. The harness's own default is used instead.
+        if (quickModel && name !== 'auto' && quickModel.value.trim()) {
+            const offered = (harnessInfo(name).choices || []).some(group => group.models.includes(quickModel.value.trim()));
+            if (!offered && quickModel.dataset.harness && quickModel.dataset.harness !== name) quickModel.value = '';
+        }
+        if (quickModel) quickModel.dataset.harness = name;
         const select = attachModelSelect(quickModel, name);
         if (select && name === 'auto') select.options[0].textContent = 'Chosen with the harness';
     };

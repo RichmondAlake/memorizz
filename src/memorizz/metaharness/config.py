@@ -17,6 +17,7 @@ HARNESS_NAMES = [
     "deepseek",
     "pi",
     "hermes",
+    "droid",
 ]
 # Names a saved agent may use as its default harness.
 DEFAULT_HARNESS_CHOICES = ("auto", *HARNESS_NAMES[1:], "native")
@@ -46,6 +47,13 @@ def default_harness_config() -> Dict[str, Any]:
                 "command": "pi",
                 "model": None,
                 "provider": None,
+                "enabled": True,
+                "external_isolation": False,
+            },
+            # Factory's Droid, headless (`droid exec`); needs FACTORY_API_KEY.
+            "droid": {
+                "command": "droid",
+                "model": None,
                 "enabled": True,
                 "external_isolation": False,
             },

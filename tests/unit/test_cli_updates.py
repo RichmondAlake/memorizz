@@ -3,6 +3,7 @@
 import json
 import shlex
 import sys
+import time
 from io import StringIO
 from threading import Event, Thread
 from types import SimpleNamespace
@@ -370,6 +371,11 @@ def test_notifier_pins_the_update_on_the_session(release_api, monkeypatch):
     monkeypatch.setattr(updates, "latest_update", tracked)
     with updates.update_notifier(console, session):
         assert finished.wait(5)
+        # The check returning is not the notice printed: the worker prints
+        # after it, and skips the notice once the context has closed.
+        deadline = time.monotonic() + 5
+        while "/update" not in output.getvalue() and time.monotonic() < deadline:
+            time.sleep(0.01)
     assert session.update_notice == {
         "latest": "0.10.0",
         "command": updates.upgrade_command(),

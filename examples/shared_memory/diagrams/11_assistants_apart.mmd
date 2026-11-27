@@ -1,0 +1,16 @@
+flowchart LR
+    Y([You, away from your desk]):::person
+    Y --> M[Muse]:::app
+    Y --> G[Grok Bot]:::app
+    Y --> D[a dot]:::app
+    M --- MM[(what Muse<br/>remembers of you)]:::empty
+    G --- GM[(what Grok Bot<br/>remembers of you)]:::empty
+    D --- DM[(what ChatGPT<br/>remembers of you)]:::empty
+    S[("The shop's memory<br/>fern-ember<br/>on your laptop")]:::mem
+    M -. "no way in" .-x S
+    G -. "no way in" .-x S
+    D -. "no way in" .-x S
+    classDef app fill:#1a0f1f,stroke:#d58cff,color:#f8ecff;
+    classDef mem fill:#0f2a1f,stroke:#3ddc97,color:#eafff5;
+    classDef empty fill:#1b1b1f,stroke:#5a5f6b,color:#9aa1ad,stroke-dasharray: 4 3;
+    classDef person fill:#000000,stroke:#aab2c0,color:#f2f4f7;

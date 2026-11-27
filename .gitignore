@@ -107,9 +107,20 @@ apps/**/src-tauri/target/
 
 # Store written by the continual-learning notebooks
 examples/continual_learning/calderwood_store/
+examples/shared_memory/fern_ember_store/
+examples/shared_memory/fern_ember_home/
+examples/shared_memory/fern_ember_shop/
 
 # Simuground: an unreleased UI page kept out of the repository and the
 # published package for now (the UI loads it only when it is present; see
 # src/memorizz/ui/extensions.py).
 src/memorizz/simuground/
 tests/simuground/
+
+# Working plans (the roadmap and build specs), kept on this machine only.
+plan/
+
+# The hosted platform's deployment (Fly.io): kept on this machine until the
+# private cloud repository exists. The root .dockerignore belongs to it.
+deploy/platform/
+/.dockerignore

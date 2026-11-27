@@ -64,10 +64,12 @@ SETTING_CHOICES = {
     "MEMORIZZ_DEFAULT_LLM_PROVIDER": (
         "openai",
         "anthropic",
+        "gemini",
         "azure",
         "ollama",
         "huggingface",
         "mlx",
+        "openrouter",
         "local-openai",
     ),
     "MEMORIZZ_ORACLE_IN_DATABASE_EMBEDDING": ("true", "false"),

@@ -1,10 +1,10 @@
-# Grok Bot and ChatGPT dots
+# Muse, Grok Bot and ChatGPT dots
 
-Grok Bot (xAI), ChatGPT with its dots, and Claude can use your MemoRizz memory
-as a custom connector. Every app you approve uses the same memory: something Grok
-saves, ChatGPT can find, and the other way round.
+Muse (Meta), Grok Bot (xAI), ChatGPT with its dots, and Claude can use your
+MemoRizz memory as a custom connector. Every app you approve uses the same
+memory: something Grok saves, ChatGPT can find, and the other way round.
 
-Both apps run in the cloud, so they reach MemoRizz only over public HTTPS, and
+These apps run in the cloud, so they reach MemoRizz only over public HTTPS, and
 they sign in with OAuth. `memorizz mcp apps serve` gives you both: it puts the
 MCP server online with an OAuth sign-in, and you approve each app with a
 one-time pairing code.
@@ -57,6 +57,23 @@ Your MemoRizz memory is online for your apps as richmond
 ```
 
 Keep it running. Ctrl-C takes the memory offline.
+
+## Connect Muse
+
+Muse adds a connector when you ask it to. Meta documents custom connectors
+only briefly, so the wording below is what works at the time of writing.
+
+1. In Muse, ask: "Create a custom connector for a remote MCP server at
+   https://…/mcp. It uses OAuth."
+2. Muse confirms the details and opens MemoRizz's approval page in your
+   browser. Type the pairing code and choose **Allow**.
+3. Ask it something the memory holds. If the approval page never opened, ask
+   Muse to sign in to the connector.
+
+Muse asks you before each write, so saving a memory shows a confirmation
+first. It registers itself with the server when the connector is made;
+MemoRizz recognises it from where the sign-in returns to and lists it as
+Muse.
 
 ## Connect Grok Bot
 
@@ -147,6 +164,33 @@ this for each app, and `memorizz mcp apps list` shows which ones share. Sharing
 needs a server that lists only the memory tools, which `memorizz mcp apps serve`
 always does. If you set a user with `memorizz plugin install --user NAME`, a
 shared app uses that user's memory.
+
+## Keep apps to one memory
+
+A store usually holds more than one memory: one per project, drafts, old
+experiments. To give apps one of them and nothing else, name it when you
+start the server:
+
+```bash
+memorizz mcp apps serve --shared --memory-id fern-ember \
+  --public-url https://your-mac.your-tailnet.ts.net
+```
+
+- **Apps read only that memory.** Search, `fetch`, entities and
+  conversations look in `fern-ember`. A record in another memory is not
+  found, and naming another memory is refused.
+- **Apps save to it.** A save with no memory ID goes to `fern-ember`, not
+  to `personal`, so the agents and harnesses that run in that memory find
+  what an app saved. The server's instructions tell the app so.
+- **It is the server's setting**, the same for every app it serves.
+
+Use it with `--shared` when the memory belongs to your local agents, as a
+team's shared memory does. The three
+[shared memory notebooks](https://github.com/RichmondAlake/memorizz/tree/main/examples/shared_memory)
+build one such memory and connect an assistant to it step by step.
+
+To keep reading wide and only change where saves go, set
+`MEMORIZZ_MCP_SERVER_APP_MEMORY_ID` and leave `--memory-id` out.
 
 ## Pairing codes
 

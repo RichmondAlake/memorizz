@@ -50,6 +50,7 @@ EXTRA_LABELS = {
     "mlx": "Apple MLX",
     "ingest-pdf": "PDF ingestion",
     "voice": "Voice (LiveKit)",
+    "sentry": "Sentry observability",
     "sandbox": "E2B sandbox",
     "sandbox-e2b": "E2B sandbox",
     "sandbox-daytona": "Daytona sandbox",
@@ -100,6 +101,7 @@ _PREFERRED_EXTRA = {
     "e2b_code_interpreter": "sandbox-e2b",
     "daytona": "sandbox-daytona",
     "livekit": "voice",
+    "sentry_sdk": "sentry",
     "av": "voice",
 }
 

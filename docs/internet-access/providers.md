@@ -10,7 +10,8 @@ When a MemAgent is created with `ApplicationMode.DEEP_RESEARCH`, MemoRizz automa
 2. **Environment hint** – If `MEMORIZZ_DEFAULT_INTERNET_PROVIDER` is set, MemoRizz instantiates that provider (optionally with `MEMORIZZ_DEFAULT_INTERNET_PROVIDER_API_KEY`).
 3. **Tavily default** – If no override exists but `TAVILY_API_KEY` is present, MemoRizz prefers Tavily for its speed and structured research output.
 4. **Firecrawl fallback** – If Tavily is unavailable yet `FIRECRAWL_API_KEY` exists, MemoRizz creates a Firecrawl provider.
-5. **Offline provider** – When none of the above are configured, MemoRizz falls back to the built-in `offline` provider so the `internet_search` and `open_web_page` tools still exist and inform the agent/user how to enable real access.
+5. **Exa** – If neither of those keys is set but `EXA_API_KEY` is, MemoRizz creates an Exa provider.
+6. **Offline provider** – When none of the above are configured, MemoRizz falls back to the built-in `offline` provider so the `internet_search` and `open_web_page` tools still exist and inform the agent/user how to enable real access.
 
 Regardless of provider, every Deep Research agent (root, delegates, synthesis) registers two tools:
 
@@ -23,10 +24,11 @@ You can also call `agent.search_internet(...)` or `agent.fetch_url(...)` directl
 
 | Setting | Purpose |
 | --- | --- |
-| `MEMORIZZ_DEFAULT_INTERNET_PROVIDER` | Name registered via `register_provider` (e.g., `tavily`, `firecrawl`). |
+| `MEMORIZZ_DEFAULT_INTERNET_PROVIDER` | Name registered via `register_provider` (e.g., `tavily`, `firecrawl`, `exa`). |
 | `MEMORIZZ_DEFAULT_INTERNET_PROVIDER_API_KEY` | API key passed to the provider constructed from the env hint. |
 | `TAVILY_API_KEY` | Shortcut specifically for the Tavily provider (preferred). |
 | `FIRECRAWL_API_KEY` | Shortcut specifically for the Firecrawl provider. |
+| `EXA_API_KEY` | Shortcut specifically for the Exa provider. |
 
 To force a provider in code (e.g., for tests), build it manually and pass it to the builder:
 
@@ -107,6 +109,117 @@ From the environment, only `MEMORIZZ_DEFAULT_INTERNET_PROVIDER` and its API key 
 
 MemoRizz automatically trims long documents to keep responses within the model’s context window, flagging truncated responses via `metadata["content_truncated"]`.
 
+## Exa Provider
+
+[Exa](https://exa.ai) searches by meaning and returns the passages of each page that answer the query. No extra package is needed:
+
+1. Export `EXA_API_KEY="<your-key>"`.
+2. Pick it for an agent (`/web exa` in the CLI, or the internet provider menu in the console), or set `MEMORIZZ_DEFAULT_INTERNET_PROVIDER=exa` to make it the default over Tavily and Firecrawl.
+
+```python
+from memorizz.internet_access import ExaProvider
+
+ExaProvider(
+    api_key="...",
+    config={
+        "search_type": "auto",        # Exa's search type; "deep" reads further
+        "default_max_results": 5,     # up to 25
+        "highlight_chars": 600,       # size of each result's snippet
+        "include_text": False,        # also return each page's text as `content`
+        "max_content_chars": 12_000,  # cap on page text, in search and open_web_page
+    },
+)
+```
+
+`internet_search` results carry Exa's highlights as `snippet`, with `published_at`, `author` and `site` in `metadata`. `search()` also accepts `include_domains`, `exclude_domains`, `start_published_date`, `end_published_date` and `category`. `open_web_page` reads a page through Exa's contents API and raises with Exa's reason when the page cannot be read.
+
+### Websets and Monitors
+
+With Exa as the provider, an agent also gets Exa's Websets and Monitors as
+tools. They are added when the provider is set and removed when it changes.
+
+A **webset** is a dataset Exa builds: it searches for things that match a
+description (companies, people, articles, papers), checks each against your
+criteria and fills in extra columns. It takes a few minutes and costs far
+more than a search, so the agent is told to use it for a list or table of
+many things, and `internet_search` for a question or a single lookup.
+
+| Tool | What it does |
+| --- | --- |
+| `exa_create_webset` | Starts a webset: `query`, `count`, `entity`, up to 5 `criteria`, extra `columns`. |
+| `exa_get_webset` | Reads the rows so far; waits up to `wait_seconds` for it to finish. |
+| `exa_save_webset_to_memory` | Stores the rows in the agent's knowledge base, a chunk per row, attached to the agent so any conversation can recall them. Rows saved before are skipped. |
+| `exa_create_monitor` | Has a search run again every `every` (`"6h"`, `"1d"`). Needs approval. |
+| `exa_list_monitors`, `exa_monitor_results`, `exa_stop_monitor`, `exa_resume_monitor` | List them, read what the latest runs found (or run one now), pause or delete, set running again. |
+
+An agent can read, save and stop only the websets and monitors it made; it
+keeps a note of them in `<MEMORIZZ_HOME>/exa/<agent>.json`. A webset asks for
+at most `webset_max_count` rows (25 by default).
+
+Exa's API requires every monitor to have a public HTTPS address to call
+when a run ends. MemoRizz reads the runs from Exa itself, so the address
+only has to accept the calls:
+
+- Set `EXA_MONITOR_WEBHOOK_URL` where MemoRizz runs (or pass
+  `monitor_webhook_url` to `ExaProvider`) to use your own.
+- With none set, MemoRizz asks webhook.site for a temporary address, which
+  is what Exa's dashboard does when the field is left blank. Only that one
+  request goes to webhook.site, without the Exa key. Anyone holding the
+  address can read what the runs found, and a free address expires, so use
+  your own for private or long-lived monitors.
+- Pass `temporary_webhooks=False` in the Exa config to refuse instead; then
+  `exa_create_monitor` says what is missing and creates nothing.
+
+The same structures are available without an agent:
+
+```python
+from memorizz.internet_access.providers.exa import ExaProvider
+from memorizz.internet_access.exa_tools import webset_table, table_text, monitor_view
+
+exa = ExaProvider()
+webset = exa.create_webset(
+    "AI agent memory startups",
+    count=10,
+    entity="company",
+    criteria=["builds memory infrastructure for AI agents"],
+    enrichments=["Year founded"],
+)
+webset = exa.wait_for_webset(webset["id"], seconds=300)
+table = webset_table(webset, exa.list_webset_items(webset["id"]))
+
+table["columns"]   # [{"key", "label", "kind": "field" | "criterion" | "enrichment"}]
+table["rows"]      # [{"name", "url", "description", "cells", "why"}]
+table_text(table)  # flat rows: column label -> value, for a DataFrame or CSV
+
+monitor = exa.create_monitor("Acme launches", period="1d")
+monitor_view(monitor, exa.list_monitor_runs(monitor["id"]))
+```
+
+In the playground a search shows the pages it found, a webset shows as a
+table that fills in while Exa works (with **Save to memory**, **CSV** and
+**Open in Exa**), and a monitor shows its schedule and what its latest run
+found. In the CLI the same tables are printed under the answer.
+
+### Showing a tool's result
+
+Any tool can give people something to look at beside what the model reads.
+Return a `ToolResult` with a `display`: a small mapping with a `kind`. It
+travels with the `tool.completed` stream event and the stored trace, and is
+never sent to the model.
+
+```python
+from memorizz.tooling import ToolOutcome, ToolOutcomeStatus, ToolResult
+
+return ToolResult(
+    value={"results": results},
+    outcome=ToolOutcome(status=ToolOutcomeStatus.SUCCESS),
+    display={"kind": "web_search", "query": query, "results": pages},
+)
+```
+
+The console draws the kinds `web_search`, `exa_webset` and `exa_monitor`.
+A display over 8,000 characters is cut down to its `kind` and `id`.
+
 ## Offline Provider
 
-If neither `MEMORIZZ_DEFAULT_INTERNET_PROVIDER` nor `TAVILY_API_KEY`/`FIRECRAWL_API_KEY` is configured, the `offline` provider keeps the internet tools available but responds with helpful error messages. This ensures Deep Research prompts remain stable even on air-gapped machines, while clearly signaling that live browsing is disabled.
+If neither `MEMORIZZ_DEFAULT_INTERNET_PROVIDER` nor `TAVILY_API_KEY`/`FIRECRAWL_API_KEY`/`EXA_API_KEY` is configured, the `offline` provider keeps the internet tools available but responds with helpful error messages. This ensures Deep Research prompts remain stable even on air-gapped machines, while clearly signaling that live browsing is disabled.

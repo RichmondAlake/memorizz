@@ -161,6 +161,10 @@ class HarnessBudget:
         return asdict(self)
 
 
+# Other memories one run may read beside its own.
+MAX_READ_MEMORIES = 5
+
+
 @dataclass
 class HarnessPermissions:
     workspace_mode: str = "read_only"
@@ -171,6 +175,12 @@ class HarnessPermissions:
     denied_tools: List[str] = field(default_factory=list)
     allowed_env: List[str] = field(default_factory=list)
     mcp_access: str = "read_only"
+    # What the run's MemoRizz MCP server can reach: "run" keeps it to the
+    # task's own memory_id; "all" opens every memory of the user.
+    mcp_memory_scope: str = "run"
+    # Other memories the run may read and never write: a team knowledge
+    # base beside the run's own memory. Their records join its context too.
+    mcp_read_memory_ids: List[str] = field(default_factory=list)
     require_approval: Optional[bool] = None
     # Let the harness start its own subagents (Claude Code's Task tool, Codex's
     # sub-agents). Off by default: each subagent is another model session.
@@ -187,6 +197,22 @@ class HarnessPermissions:
         self.mcp_access = str(self.mcp_access or "read_only").lower()
         if self.mcp_access not in {"none", "read_only", "governed_write"}:
             raise ValueError("mcp_access must be none, read_only, or governed_write")
+        self.mcp_memory_scope = str(self.mcp_memory_scope or "run").lower()
+        if self.mcp_memory_scope not in {"run", "all"}:
+            raise ValueError("mcp_memory_scope must be run or all")
+        if isinstance(self.mcp_read_memory_ids, str):
+            self.mcp_read_memory_ids = self.mcp_read_memory_ids.split(",")
+        self.mcp_read_memory_ids = list(
+            dict.fromkeys(
+                str(value).strip()
+                for value in self.mcp_read_memory_ids or []
+                if str(value).strip()
+            )
+        )
+        if len(self.mcp_read_memory_ids) > MAX_READ_MEMORIES:
+            raise ValueError(
+                f"A run can read at most {MAX_READ_MEMORIES} other memories"
+            )
         if self.require_approval is None:
             self.require_approval = bool(
                 self.workspace_mode == "direct"

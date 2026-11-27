@@ -14,6 +14,7 @@ from .base import (
     register_provider,
 )
 from .models import InternetPageContent, InternetSearchResult
+from .providers.exa import ExaProvider
 from .providers.firecrawl import FirecrawlProvider
 from .providers.offline import OfflineInternetProvider
 from .providers.tavily import TavilyProvider
@@ -27,6 +28,7 @@ __all__ = [
     "InternetAccessProvider",
     "InternetPageContent",
     "InternetSearchResult",
+    "ExaProvider",
     "FirecrawlProvider",
     "TavilyProvider",
     "OfflineInternetProvider",
@@ -45,7 +47,8 @@ def get_default_internet_access_provider() -> InternetAccessProvider:
     1. Explicit provider via MEMORIZZ_DEFAULT_INTERNET_PROVIDER.
     2. Tavily (TAVILY_API_KEY).
     3. Firecrawl (FIRECRAWL_API_KEY).
-    4. Offline provider placeholder so the tool still responds.
+    4. Exa (EXA_API_KEY).
+    5. Offline provider placeholder so the tool still responds.
     """
 
     provider_name = os.getenv(DEFAULT_PROVIDER_ENV)
@@ -77,8 +80,15 @@ def get_default_internet_access_provider() -> InternetAccessProvider:
         except Exception as exc:  # pragma: no cover - best effort fallback
             logger.warning("Failed to initialize Firecrawl provider: %s", exc)
 
+    exa_key = os.getenv("EXA_API_KEY")
+    if exa_key:
+        try:
+            return ExaProvider(api_key=exa_key)
+        except Exception as exc:  # pragma: no cover - best effort fallback
+            logger.warning("Failed to initialize Exa provider: %s", exc)
+
     reason = (
-        "Set TAVILY_API_KEY, FIRECRAWL_API_KEY, or MEMORIZZ_DEFAULT_INTERNET_PROVIDER "
+        "Set TAVILY_API_KEY, FIRECRAWL_API_KEY, EXA_API_KEY, or MEMORIZZ_DEFAULT_INTERNET_PROVIDER "
         "to enable live internet access."
     )
     return OfflineInternetProvider(reason=reason)

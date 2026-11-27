@@ -157,6 +157,7 @@ class ObservabilityStore:
         # memory is addressed through ``retrieve_by_id`` (filesystem/Oracle)
         # or its logical ``memory_id`` via ``retrieve_by_name`` (MongoDB), so
         # try both portable APIs before using the legacy scan fallback.
+        by_id = getattr(self.provider, "shared_records_found_by_id", None) is True
         for method_name in ("retrieve_by_id", "retrieve_by_name"):
             method = getattr(self.provider, method_name, None)
             if not callable(method):
@@ -169,6 +170,10 @@ class ObservabilityStore:
                 payload = self._payload(row)
                 if payload and str(payload.get("record_id") or "") == str(record_id):
                     return payload
+            if by_id:
+                # The ID lookup is the answer (Notion): no second lookup by
+                # name and no scan of every shared record.
+                return None
         for payload in self._all():
             if str(payload.get("record_id") or "") == str(record_id):
                 return payload

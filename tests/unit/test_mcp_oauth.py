@@ -1080,3 +1080,190 @@ def test_apps_serve_refuses_the_reserved_principal(tmp_path, monkeypatch):
         ],
     )
     assert result.exit_code != 0
+
+
+MUSE_REDIRECT = "https://agent.meta.ai/api/hatch/oauth/callback"
+
+
+def test_muse_registers_itself_sends_no_resource_and_is_named_by_its_callback(server):
+    """Meta's Muse registers a client for the connector and leaves ``resource``
+    out of its sign-in; the host its sign-in returns to says it is Muse."""
+    registered = server.post(
+        "/register",
+        json={
+            "redirect_uris": [MUSE_REDIRECT],
+            "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+        },
+    )
+    assert registered.status_code == 201, registered.text
+    client_id = registered.json()["client_id"]
+    verifier, challenge = _pkce()
+    asked = server.get(
+        "/authorize",
+        params={
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": MUSE_REDIRECT,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "state": "st-1",
+        },
+    )
+    assert asked.status_code == 302, asked.text
+    request_id = parse_qs(urlparse(asked.headers["location"]).query)["request"][0]
+    page = server.get("/oauth/approve", params={"request": request_id})
+    assert "Connect Muse to your MemoRizz memory?" in page.text
+    code, _ = server.store.create_pairing_code("richmond", ["memorizz:read"])
+    approved = server.post(
+        "/oauth/approve", data={"request": request_id, "action": "allow", "code": code}
+    )
+    auth_code = parse_qs(urlparse(approved.headers["location"]).query)["code"][0]
+    tokens = server.post(
+        "/token",
+        data={
+            "grant_type": "authorization_code",
+            "client_id": client_id,
+            "code": auth_code,
+            "redirect_uri": MUSE_REDIRECT,
+            "code_verifier": verifier,
+        },
+    )
+    assert tokens.status_code == 200, tokens.text
+    # The token is for this server's own endpoint all the same.
+    listed = _mcp(server, tokens.json()["access_token"], "tools/list")
+    assert "result" in listed
+    assert [grant["app_name"] for grant in server.store.list_grants()] == ["Muse"]
+
+
+def test_a_server_kept_to_one_memory_keeps_its_apps_there(tmp_path, monkeypatch):
+    """``apps serve --memory-id team``: a connected app searches, fetches and
+    saves in that memory and no other, however much the store holds."""
+    monkeypatch.setenv("MEMORIZZ_HOME", str(tmp_path))
+    config = MemorizzMCPServerConfig(
+        transport="streamable-http",
+        oauth=True,
+        allow_writes=True,
+        allow_agent_execution=False,
+        tool_set="memory",
+        app_memory_id="team",
+        memory_ids={"team"},
+    )
+    provider = FileSystemProvider(
+        FileSystemConfig(
+            root_path=tmp_path / "memory",
+            embedding_provider=None,
+            lazy_vector_indexes=True,
+        )
+    )
+    runtime = MemorizzRuntime(
+        config,
+        provider=provider,
+        approval_store=SQLiteApprovalStore(tmp_path / "approvals.sqlite3"),
+    )
+    store = OAuthStore(tmp_path / "apps.sqlite3")
+    app = create_memorizz_http_app(config, runtime=runtime, oauth_store=store)
+    ours = provider.store(
+        {"content": "The sale ends on 12 March", "memory_id": "team", "user_id": None},
+        memory_store_type="knowledge_base",
+    )
+    other = provider.store(
+        {"content": "The sale ends on 9 March", "memory_id": "old", "user_id": None},
+        memory_store_type="knowledge_base",
+    )
+    with TestClient(app, base_url=BASE, follow_redirects=False) as client:
+        client.store = store
+        registered = client.post(
+            "/register",
+            json={
+                "redirect_uris": [MUSE_REDIRECT],
+                "token_endpoint_auth_method": "none",
+            },
+        ).json()
+        token = _connect(
+            client,
+            registered["client_id"],
+            MUSE_REDIRECT,
+            principal=LOCAL_AGENTS_PRINCIPAL,
+        )
+        instructions = _mcp(
+            client,
+            token,
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "t", "version": "0"},
+            },
+        )["result"]["instructions"]
+        assert "goes to the memory `team`" in instructions
+
+        found = _tool(client, token, "search", {"query": "sale ends"})["results"]
+        assert [row["id"] for row in found] == [f"knowledge_base:{ours}"]
+        assert (
+            "12 March" in _tool(client, token, "fetch", {"id": found[0]["id"]})["text"]
+        )
+        refused = _mcp(
+            client,
+            token,
+            "tools/call",
+            {"name": "fetch", "arguments": {"id": f"knowledge_base:{other}"}},
+        )
+        assert refused["result"]["isError"] is True
+        assert "9 March" not in json.dumps(refused)
+
+        saved = _tool(
+            client, token, "memorizz_store_memory", {"content": "200 pots on 1 March"}
+        )
+        assert saved["memory_id"] == "team"
+        elsewhere = _mcp(
+            client,
+            token,
+            "tools/call",
+            {
+                "name": "memorizz_store_memory",
+                "arguments": {"content": "x", "memory_id": "old"},
+            },
+        )
+        assert elsewhere["result"]["isError"] is True
+
+
+def test_apps_can_be_given_another_memory_to_save_to(server, monkeypatch):
+    """``MEMORIZZ_MCP_SERVER_APP_MEMORY_ID`` names where a save with no
+    memory ID goes; reading is not narrowed."""
+    monkeypatch.setenv("MEMORIZZ_MCP_SERVER_APP_MEMORY_ID", "team")
+    assert MemorizzMCPServerConfig.from_env().app_memory_id == "team"
+    assert MemorizzMCPServerConfig().app_memory_id == PERSONAL_MEMORY_ID
+    server.runtime.config.app_memory_id = "team"
+    token = _connect(server, GROK, GROK_REDIRECT, principal=LOCAL_AGENTS_PRINCIPAL)
+
+    saved = _tool(server, token, "memorizz_store_memory", {"content": "A note"})
+
+    assert saved["memory_id"] == "team"
+    assert server.runtime.config.public_dict()["app_memory_id"] == "team"
+
+
+def test_apps_serve_keeps_apps_to_the_memory_it_names(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from memorizz.cli import mcp_apps
+
+    monkeypatch.setenv("MEMORIZZ_HOME", str(tmp_path))
+    started = []
+    monkeypatch.setattr(
+        "memorizz.mcp_server.run_memorizz_mcp_server",
+        lambda config, **more: started.append(config),
+    )
+
+    result = CliRunner().invoke(
+        mcp_apps.apps_app,
+        ["serve", "--public-url", "https://m.example", "--memory-id", "fern-ember"],
+        env={"COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "apps read and save only here" in result.output
+    assert "Muse" in result.output
+    (config,) = started
+    assert (config.app_memory_id, config.memory_ids) == ("fern-ember", {"fern-ember"})

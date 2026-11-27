@@ -19,6 +19,10 @@ _CONTEXT_TYPES = (
 )
 
 
+#: Memory types whose records belong to one conversation thread.
+_THREADED_TYPES = frozenset({MemoryType.CONVERSATION_MEMORY, MemoryType.SUMMARIES})
+
+
 def _field(row: Dict[str, Any], key: str) -> Any:
     if key in row:
         return row.get(key)
@@ -55,6 +59,12 @@ def _safe_record(row: Dict[str, Any], memory_type: MemoryType) -> Dict[str, Any]
     return value
 
 
+def _left_out(row: Dict[str, Any]) -> bool:
+    return bool(_field(row, "distilled")) or bool(
+        str(_field(row, "superseded_by") or "").strip()
+    )
+
+
 class HarnessContextBuilder:
     def __init__(
         self,
@@ -79,7 +89,10 @@ class HarnessContextBuilder:
         if self.provider is None:
             return []
         kwargs: Dict[str, Any] = {"user_id": user_id}
-        if thread_id:
+        if thread_id and memory_type in _THREADED_TYPES:
+            # Only conversations are kept by thread. A record with no thread
+            # (an entity, a knowledge note) belongs to the whole memory, and a
+            # provider asked for one thread would leave it out.
             kwargs["thread_id"] = thread_id
         try:
             result = self.provider.retrieve_by_query(
@@ -156,6 +169,12 @@ class HarnessContextBuilder:
             ):
                 key = (memory_type.value, _source_id(row))
                 if key in seen:
+                    continue
+                if _left_out(row):
+                    # A raw answer already distilled into findings, or a
+                    # finding a newer one replaced. Kept in the store; the
+                    # run is handed what replaced it.
+                    seen.add(key)
                     continue
                 if exclude is not None and exclude(row):
                     seen.add(key)

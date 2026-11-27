@@ -43,8 +43,9 @@ The Memorizz local UI gives you a browser-based workflow for connecting to your 
   mechanism** section (importance rater, recency decay and weights, suppression
   thresholds, reflection). Each agent's form has a *Forgetting (per-agent
   overrides)* group for the same values.
-- Create agents from templates (productivity, personal finance, research,
-  customer support, writing, study coach) or from your own, and see the
+- Create agents from templates (productivity, project management, personal
+  finance, research, customer support, writing, study coach) or from your
+  own, and see the
   configuration and its Python SDK equivalent as you edit (see
   [Creating agents](#creating-agents)).
 - Set the agent's background model (summaries, compaction and consolidation),
@@ -226,10 +227,36 @@ the database.
 
 ## 4. Navigation Map
 
-Once connected, the sidebar is your main navigation. Its pages are grouped
-under Build, Memory, Connect, Operate and Admin, and it folds to icons with
-the arrow beside the logo.
+Once connected, the console opens on the playground: a composer where you
+pick the agent and the model that answer, with every agent listed below. The
+logo takes you back there from any page.
 
+The sidebar is your main navigation. **Playground** is first, above the
+groups; the other pages sit under Build, Memory, Connect, Operate and Admin,
+and the sidebar folds to icons with the arrow beside the logo. The
+**Dashboard** (runs, failures, run time, tokens and spend across every
+agent) is the first page under Operate.
+
+- **Agents and Memory types.** Selecting the group's name opens its page
+  (the list of agents, or memory) and unfolds its list in the sidebar. The
+  arrow at its right only folds and unfolds the list.
+- **Who shares a memory.** *Memory types → Shared* lists every memory ID in
+  the store with the agents that run in it, the harnesses that ran in it and
+  the connected apps that saved to it, most shared first. Open one to see
+  which agents may change its records and which only read them, the records
+  with who last changed each, the handbooks its agents carry, the tasks a
+  coordinator split across its delegates, and who wrote what. The stored
+  rows of the coordination boards are one link away, under **Stored
+  records**.
+- **What each agent is doing.** The agents under *Agents* each carry a
+  second line: the step of a reply in progress (*Thinking*, *Running
+  find_order*, *Writing a reply*, *Needs approval*) with a pulsing dot, or
+  the last message the agent itself wrote in its newest conversation (not
+  another agent's, when several share a memory) and how long ago it
+  was. Replies streamed by this console are followed live; a run made
+  elsewhere shows once its turn is stored.
+- **Fold the sidebar.** ⌘B on a Mac, Ctrl+B elsewhere, or the arrow beside
+  the logo. On a phone the same keys open and close the drawer.
 - **Search.** The field at the top of every page (⌘K on a Mac, Ctrl+K
   elsewhere) finds any page, any agent in the connected store and a few
   actions such as *Create agent*. Type to filter, use the arrow keys to move
@@ -243,12 +270,12 @@ the arrow beside the logo.
 
   | Keys | Page | Keys | Page |
   |---|---|---|---|
-  | `g` `o` | Overview | `g` `l` | Continual learning |
+  | `g` `p` | Playground | `g` `l` | Continual learning |
   | `g` `a` | Agents | `g` `c` | MCP connections |
   | `g` `h` | Agent harnesses | `g` `k` | Skills |
-  | `g` `p` | Playground | `g` `t` | Observability |
-  | `g` `u` | Automations | `g` `e` | Evalground |
-  | `g` `m` | Memory types | `g` `s` | Settings |
+  | `g` `u` | Automations | `g` `d` | Dashboard (also `g` `o`) |
+  | `g` `m` | Memory types | `g` `t` | Observability |
+  | `g` `e` | Evalground | `g` `s` | Settings |
 
   Shortcuts do nothing while you type in a field or while a dialog is open.
 - **Waiting for you.** The bell in the top bar counts what needs a person:
@@ -259,7 +286,7 @@ the arrow beside the logo.
   the sidebar, to list the FileSystem stores on this computer and connect to
   another one. *Connect to another store or database* opens the connect
   page.
-- **First steps.** On a new store the Overview lists five steps, from
+- **First steps.** On a new store the Dashboard lists five steps, from
   creating an agent to scheduling it, and ticks each one as the store fills.
   *Hide* removes the list in this browser.
 - **Your name.** Select the person button in the top bar and enter your
@@ -274,13 +301,13 @@ the arrow beside the logo.
   write it elsewhere.
 - **Budget meter.** Once a monthly budget is set on *Usage & cost*, the foot
   of the sidebar shows this month's spend against it on every page.
-- **Run drawer.** Select a row under *Recent runs* (Overview or
+- **Run drawer.** Select a row under *Recent runs* (Dashboard or
   Observability) to read the run in a drawer; *Open the full trace* goes to
   its timeline.
 - **Row menus and export.** The *⋮* at the end of an agent or memory row
   lists its actions. *Export CSV* on a table page downloads the rows shown,
   with the filters applied.
-- **Customize the Overview.** *Customize* hides or reorders the Overview's
+- **Customize the Dashboard.** *Customize* hides or reorders the Dashboard's
   sections, and *Compared with* chooses what its change figures compare
   against. Both choices stay in this browser or in the page's address.
 - **Preview pane.** In the playground, a reply containing an HTML page, SVG,
@@ -300,7 +327,7 @@ the arrow beside the logo.
   browser.
 - **Several rows at once.** Tick rows to act on them together: add agents to
   favorites, copy their IDs or delete them; copy or download memory records
-  as JSON; compare two runs of one agent from the Overview's recent runs.
+  as JSON; compare two runs of one agent from the Dashboard's recent runs.
   Deleting agents removes the agent records only. Their memories,
   conversations and traces are kept.
 - **Theme.** The UI follows your system's light or dark setting until you
@@ -311,10 +338,9 @@ the arrow beside the logo.
 
 | Section | Route | Purpose |
 |---|---|---|
-| Overview | `/dashboard` | Runs, success rate, run time, tokens and spend across every agent, each with its change from the period before, plus what needs attention and the memory counts. |
+| Playground (home) | `/`, `/playground` and `/agents/{id}/playground` | Interactive chat, thread switching, token/context stats, and per-agent runtime config. [Timers](../guides/automations.md#timers) show as a live card above the chat box. |
 | Agents | `/agents` | Browse agents, sort, quick-chat, and jump into edit/playground. |
 | Create Agent | `/agents/new` | Start from a template or a blank form; set identity, model, persona, memory, learning, tools and runtime, with a live summary and the Python SDK code. `?template=<key>` opens it filled in. |
-| Playground | `/playground` and `/agents/{id}/playground` | Interactive chat, thread switching, token/context stats, and per-agent runtime config. [Timers](../guides/automations.md#timers) show as a live card above the chat box. |
 | MCP Connections | `/mcp` | Configure/test MCP servers, authorize OAuth, inspect capabilities, and invoke governed tools. |
 | Automations | `/automations` | Create schedules, inspect runs, and manage worker-backed agent jobs. |
 | Memory Types | `/memory/{type}` | Browse stored memory entries by type (`personas`, `toolbox`, `workflow-memory`, `skillbox`, `conversations`, etc.). Workflows lists every MCP and [desktop control](../desktop-control/index.md) run with its steps. |
@@ -323,6 +349,7 @@ the arrow beside the logo.
 | Model registry | `/fine-tuning/models` | Every model per job: what runs now, each fine-tuned version as a family tree (data, training result and its significance, fixed-set scores, size), failed runs with their errors, and the base models to start from; swap in, rename or delete a version. |
 | Learning Control Plane | `/learning-control-plane` | Inspect scoped event/artifact counts, compile pending events, plan/apply reversible forgetting of compiled artifacts, plan/approve/restore reversible suppression of primary memories, and review, approve and undo [persona learning](../guides/persona-learning.md) changes. |
 | Agent Harnesses | `/harnesses` | Probe adapters, launch bounded runs, decide exact approvals, cancel work, and inspect verification evidence. |
+| Dashboard | `/dashboard` | Runs, success rate, run time, tokens and spend across every agent, each with its change from the period before, plus what needs attention and the memory counts. |
 | Traces | `/traces` | Filter/search agents and inspect thread-level trace timelines. |
 | Memory Evolution | `/traces/memory-evolution` | Scroll memory versions, inspect actors and origins, and follow explicit branches; also embedded in playground and harness evidence. |
 | Evalground | `/evalground` | Run local open-model memory suites, monitor logs, and review run history/results. |
@@ -373,8 +400,9 @@ anything first. **Start blank** clears it again.
 | Template | What it sets up |
 |---|---|
 | Personal productivity assistant | Gmail, Google Calendar and Notion over MCP; drafts but never sends. |
+| Project management assistant | Runs projects in your Notion over MCP: a tasks database with a kanban board, timeline and per-person views, sprints, a RAID log and status reports. Asks before every change, shows a snapshot of each page it makes, and has learning on. |
 | Personal finance assistant | Budgets, bills and savings goals with the arithmetic shown; background consolidation keeps figures current. Gives general information, not investment advice, and never stores card or account numbers. |
-| Research assistant | Web search with citations when a Tavily or Firecrawl key is set; tool-result cache. |
+| Research assistant | Web search with citations when a Tavily, Firecrawl or Exa key is set; tool-result cache. |
 | Customer support agent | Answers from the knowledge base; every conversation sealed, so one customer's details never reach another; no automations. |
 | Writing partner | Drafts and edits in your voice and learns your style. |
 | Study coach | Explains, quizzes and brings back what you got wrong. |
@@ -393,8 +421,12 @@ readable only by you, and show on the create page marked *Yours*, with
 **Delete**. Saving under an existing name replaces that template.
 
 The form is grouped into Identity, Model, Persona, Memory, Learning, Tools &
-integrations, Runtime & orchestration, and Automations & channels; each
-section's header shows what is set in it. Beside the form, an overview lists
+integrations, Runtime & orchestration, Automations & channels, and
+Observability; each section's header shows what is set in it. Observability
+says whether the agent is traced and whether its traces are also sent to
+Sentry; an agent that sends them there links to Sentry from the Agents page
+and its playground (see
+[Observability Providers](../guides/observability-providers.md)). Beside the form, an overview lists
 the sections, summarises the configuration (models, memory types, whether
 conversations are sealed, consolidation, integrations, limits), and shows the
 same agent as Python SDK code. Select **Expand** to read it full width, or
@@ -412,6 +444,8 @@ verification, and pending exact-envelope proposals. `MEMORIZZ_UI_READ_ONLY=true`
 blocks launches, cancellation, approval, rejection, and resume endpoints.
 The `memagent` adapter runs a saved agent: pick one, or MemoRizz uses the one
 you last ran a harness with (native execution never wins automatic routing).
+A workflow's stages are listed top to bottom on a numbered rail; open one for
+its full answer, its trace and the memory it used.
 Running items spin and update in place; select a run to see its trajectory, and
 **Continue** keeps talking to the same harness with the run's setup. Filter the
 runs by task, harness, MemAgent name or ID, and tick two to four runs for
@@ -449,8 +483,121 @@ that single-use proposal; **Reject** prevents execution. A model-visible
 
 See the [Browser Control guide](../browser-control/index.md).
 
+### Gemini models
+
+Choose **Google Gemini** as the provider (the key goes in **Settings →
+Google Gemini API key**, saved as `GEMINI_API_KEY`) and pick a model. The
+provider is offered everywhere a model is chosen: the create and edit form,
+the background model, the playground's **Settings** tab and its model
+picker, the default agent model in Settings, the coding model of a
+self-aware agent and the model that refines shared harness memory. See
+[Model providers](model-providers.md#google-gemini).
+
+### Models on OpenRouter
+
+Choose **OpenRouter** as the provider (the key goes in **Settings →
+`OPENROUTER_API_KEY`**) and type or pick any model name it serves. A
+**Routing** group appears below the model, on the create and edit form and in
+the playground's **Settings** tab: fallback models, which providers to prefer,
+allow or avoid, the most to pay, and whether to use only providers that do
+not keep prompts. Empty fields mean OpenRouter's defaults. The same rules can
+be set from Python; see
+[Model Providers](model-providers.md#openrouter-and-other-model-gateways).
+
+### Playground settings
+
+The **Settings** tab of the playground is six groups: Model, Web and tools,
+Memory, Instruction and persona, Self-awareness, and Automations. Each header
+says what is set now, for example *Web search: Exa · Code: off · Browser:
+off*, so you can read an agent's setup without opening anything. Open a group
+to change it and select **Save Config**. A group marked *Needs attention*
+holds a setting that cannot work as chosen, with the reason inside.
+
+The code sandbox menu separates **Default (from Settings)**, which follows
+the console-wide default, from **None (disabled)**, which turns code
+execution off for this agent whatever the default is.
+
+### Memory across conversations
+
+Each conversation in the playground's list has a memory of its own. By
+default a chat still knows about the others: before each reply the agent is
+given a short list of its other recent conversations (how each opened, when
+it was last active and what was last asked), and what was said in them can be
+recalled when it is relevant. So a new chat can answer "what have we been
+talking about?" and pick up an earlier subject.
+
+To keep each conversation on its own, turn off **Settings → Memory → Across
+conversations** for that agent. An agent with sealed conversations (set under
+*Conversation privacy* on its page) never crosses, in either direction.
+
+The list covers every conversation shown for the agent, including ones made
+from the CLI, the SDK or Simuground. From Python, the same reach is
+`RetrievalPolicy(also_recall_from=[...])`, passed to `agent.run`; only name
+memories that belong to the same person.
+
+### Self-aware agents
+
+An agent that can read and change its own code shows a **Self-aware** chip
+beside its model in the playground (with the version of its source it is on,
+such as *Self-aware · v2*), a row in the Dashboard's Agent card, and a pill in
+the agent list. Each opens the agent's source page; see
+[An Agent's Own Source](../guides/self-source.md).
+
 ## Playground conversations
 
+- **A store with no agents:** the playground, which is the console's home,
+  opens on a first-run view. Type a message and MemoRizz makes an agent
+  named Assistant on your default model, with conversation, knowledge and
+  entity memory, then opens the conversation with the message already sent.
+  Below it are a few templates to start from and the five first steps. If
+  the default model's key is not set, the page names the variable to add
+  (for example `OPENAI_API_KEY`) instead of a composer. The default model
+  comes from `MEMORIZZ_DEFAULT_LLM_PROVIDER` and `MEMORIZZ_DEFAULT_LLM_MODEL`.
+- **Starting from the playground home:** `/playground` opens on a composer.
+  Pick the agent and, beside it, the model that answers: the agent's own,
+  another its provider offers, or one you type. Another model applies to the
+  conversation that opens and is not saved on the agent. **Create agent** is
+  at the top right.
+- **Answered by a harness:** the composer's **Answered by** control picks
+  who answers the conversation: the agent's own model, or a ready harness
+  (Codex, Claude Code, Droid, pi, Hermes, DeepSeek) and optionally its
+  model. The choice is kept per conversation in the browser and is never
+  saved on the agent. MemoRizz still supplies the conversation's memory, the
+  trace and approvals, and the harness reads and writes that conversation's
+  memory only.
+    - A harness turn is shown as a job: who is working, for how long, each
+      step as it happens, **Open run** and **Stop**. When it ends the steps
+      fold away under the answer, and a stored answer keeps a line with
+      **Open run** and **Memory it used**.
+    - It works in a folder of the conversation's own, read-only and without
+      web access, until you allow more in the inspector under the harness's
+      access: a project folder, edits and web access, with your name as the
+      approver.
+    - A turn carries on if you reload or close the page; reopen the
+      conversation and it is shown again, still working. **Stop** is what
+      ends it.
+    - Live voice is turned off while a harness answers, since a turn can
+      take minutes.
+- **What a tool found:** a web search shows the pages it found in the
+  reply. With Exa, a webset shows as a table that fills in while it is
+  built, with **Save to memory**, **CSV** and **Open in Exa**, and a monitor
+  shows its schedule and latest run. See
+  [Websets and Monitors](../internet-access/providers.md#websets-and-monitors).
+- **Signing in to a connected app:** when one of the agent's connected
+  apps (Notion, Gmail, Calendar) is not signed in, a bar above the message
+  box says so and has the **Sign in** button. The sign-in opens in its own
+  window, so the conversation stays open; once it is done the bar goes and
+  you can ask again. A reply that needed the app carries the same button.
+- **A page the agent made:** an agent with an MCP connection can show a
+  snapshot of a page it created or changed. A Notion page is read as it is
+  at that moment (title, properties and the start of its content) and shown
+  as a card with **Open in Notion**; it stays in the conversation when you
+  come back to it. See
+  [Page snapshots](../guides/mcp-connectivity.md#page-snapshots).
+- **From a reply to its trace:** each finished step of a reply, such as
+  *Used internet_search*, opens that step's own row in Traces. The line
+  under a reply has a **Trace** link for the whole turn, and the rows of a
+  stored turn's activity each have **Open in Traces**.
 - **Stop a reply:** while a reply streams, the send button turns into a red
   stop button; click it or press Esc. The partial answer is kept.
 - **Rename or delete:** hover a conversation in the left pane. The pencil

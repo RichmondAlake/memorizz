@@ -160,7 +160,19 @@ def test_every_page_has_grouped_navigation_search_and_one_theme_switch(client):
             f'<div class="nav-section" role="presentation"><span>{section}</span>'
             in html
         )
-    assert "<span>Overview</span>" in html
+    # The playground is home: first in the sidebar, above the sections. The
+    # run and spend figures are the Dashboard, first under Operate.
+    nav = html.split('<nav class="app-crumbs"')[0]
+    assert "<span>Overview</span>" not in html
+    assert nav.index("<span>Playground</span>") < nav.index("<span>Build</span>")
+    operate = nav.index('role="presentation"><span>Operate</span>')
+    assert (
+        operate
+        < nav.index("<span>Dashboard</span>")
+        < nav.index("<span>Observability</span>")
+    )
+    # The logo leads to the playground's chat home, for every agent.
+    assert '<a href="/playground" class="logo"' in html
     # Search opens from the top bar and, on a phone, from the top strip.
     assert html.count("data-cmdk-open") == 2
     assert html.count('id="theme-toggle-btn"') == 1
@@ -175,7 +187,8 @@ def test_every_page_has_grouped_navigation_search_and_one_theme_switch(client):
 @pytest.mark.parametrize(
     "path, group, area, href",
     [
-        ("/dashboard", None, "Overview", "/dashboard"),
+        ("/dashboard", "Operate", "Dashboard", "/dashboard"),
+        ("/playground", None, "Playground", "/playground"),
         ("/agents/new", "Build", "Agents", "/agents"),
         ("/memory/entity", "Memory", "Memory types", "/memory/knowledge-base"),
         ("/fine-tuning", "Memory", "Continual learning", "/memory/workflows"),
@@ -274,3 +287,26 @@ def test_the_phone_drawer_is_not_left_under_its_scrim():
     )
     shell = (css / "shell.css").read_text()
     assert "body.mobile-nav-open .layout {\n        z-index: auto;" in shell
+
+
+@pytest.mark.unit
+def test_home_is_the_playground_for_every_agent(client):
+    home = client.get("/", follow_redirects=False)
+    assert home.status_code == 302
+    assert home.headers["location"] == "/playground"
+
+
+@pytest.mark.unit
+def test_a_selected_section_is_filled_not_striped():
+    """A stripe down the edge of a rounded item bends around its corner."""
+    from pathlib import Path
+
+    import memorizz.ui
+
+    UI = Path(memorizz.ui.__file__).parent
+    styles = (UI / "static/css/styles.css").read_text()
+    rule = styles.split(".builder-nav a.is-active {")[1].split("}")[0]
+    assert "background:" in rule and "inset" not in rule
+    settings = (UI / "static/css/pages/settings.css").read_text()
+    chosen = settings.split('.settings-index a[aria-current="true"] {')[1].split("}")[0]
+    assert "background:" in chosen and "inset" not in chosen

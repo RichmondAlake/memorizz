@@ -191,6 +191,8 @@ def save_agent(agent):
             ),
             voice=bool(getattr(agent, "voice", False)),
             voice_config=getattr(agent, "voice_config", None),
+            observability=bool(getattr(agent, "observability", True)),
+            observability_config=getattr(agent, "observability_config", None),
             memory_routing=(
                 agent.memory_routing.to_dict()
                 if getattr(agent, "memory_routing", None) is not None
@@ -208,9 +210,10 @@ def save_agent(agent):
                 else None
             ),
             entity_policy=(
-                agent.entity_policy.to_dict()
+                # The default policy is not saved; a bound user record or a
+                # read-only agent is.
+                agent.entity_policy.stored
                 if getattr(agent, "entity_policy", None) is not None
-                and agent.entity_policy.active
                 else None
             ),
             delegation_config=normalize_delegation_config(
@@ -684,6 +687,23 @@ def _saved_voice_config(value: Any) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _saved_observability_config(value: Any) -> Optional[Dict[str, Any]]:
+    """A stored observability configuration, or None (the built-in provider)
+    when it is absent or no longer valid: an agent must still load, and keep
+    its MemoRizz traces, when the provider it named is gone."""
+    if not isinstance(value, dict) or not value:
+        return None
+    from ..observability.providers import ObservabilityConfig
+
+    try:
+        config = ObservabilityConfig.from_value(value)
+    except ValueError as exc:
+        logger.warning("Ignoring a stored observability configuration: %s", exc)
+        return None
+    data = config.to_dict()
+    return None if data == {"provider": "memorizz"} else data
+
+
 def _saved_settings(saved_memagent: Any) -> Dict[str, Any]:
     """The settings a stored agent record restores, normalized.
 
@@ -737,6 +757,9 @@ def _saved_settings(saved_memagent: Any) -> Dict[str, Any]:
 
     sandbox_provider = field("sandbox_provider")
     if not isinstance(sandbox_provider, (str, dict)):
+        sandbox_provider = None
+    if isinstance(sandbox_provider, str) and sandbox_provider.strip().lower() == "none":
+        # The console's "no sandbox, whatever the default": nothing to start.
         sandbox_provider = None
 
     browser_control = field("browser_control")
@@ -818,6 +841,11 @@ def _saved_settings(saved_memagent: Any) -> Dict[str, Any]:
         "persona_learning": _dict_or_none(field("persona_learning")),
         "voice": bool(field("voice")),
         "voice_config": _saved_voice_config(field("voice_config")),
+        # Records saved before the switch existed have no value: traces on.
+        "observability": field("observability") is not False,
+        "observability_provider": _saved_observability_config(
+            field("observability_config")
+        ),
         "memory_routing": _dict_or_none(field("memory_routing")),
         "reranker": _dict_or_none(field("reranker")),
         "decision_model": _dict_or_none(field("decision_model")),
@@ -1160,6 +1188,10 @@ def _refresh_memory_models(agent, memory_routing, reranker, entity_policy) -> No
     ):
         agent.reranker = saved
     agent.entity_policy = EntityPolicy.from_value(entity_policy)
+    # A reader of entity memory holds no tool that changes it.
+    sync = getattr(agent, "_sync_entity_write_tool", None)
+    if callable(sync):
+        sync()
     agent._register_memory_routing_tools()
 
 
@@ -1193,6 +1225,13 @@ def _refresh_persona_learning(agent, persona_learning) -> None:
     from ..learning.persona_learning import PersonaLearningConfig
 
     agent.persona_learning = PersonaLearningConfig.from_value(persona_learning)
+
+
+def _refresh_observability(agent, observability, observability_provider) -> None:
+    if observability_provider != agent.observability_config:
+        agent._close_observability_provider()
+        agent.observability_config = observability_provider
+    agent.observability = bool(observability)
 
 
 def _refresh_voice(agent, voice, voice_config) -> None:
@@ -1496,6 +1535,7 @@ _REFRESH_STEPS: Tuple[Tuple[Tuple[str, ...], Callable[..., None]], ...] = (
     (("persona",), _refresh_persona),
     (("persona_learning",), _refresh_persona_learning),
     (("voice", "voice_config"), _refresh_voice),
+    (("observability", "observability_provider"), _refresh_observability),
     (
         ("name",),
         _set(

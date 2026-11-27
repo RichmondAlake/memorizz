@@ -43,7 +43,7 @@ def test_models_lists_the_catalog_then_newer_models_for_the_key(monkeypatch):
     text = out.getvalue()
     assert "Models for openai:" in text
     listed = [line.strip("• ").strip() for line in text.splitlines() if "•" in line]
-    assert listed[:3] == ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"]
+    assert listed[:3] == ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-terra"]
     assert listed[-1] == "gpt-7-preview" and listed.count("gpt-6.1-sol") == 1
     assert "gpt-4o" not in listed
 
@@ -52,8 +52,8 @@ def test_anthropic_choices_lead_with_the_5_5_models(monkeypatch):
     monkeypatch.setattr("memorizz.llms.model_lists.latest_models", lambda provider: [])
     values = [row["value"] for row in commands._model_choices("anthropic")]
     assert values[:4] == [
+        "claude-fable-5-2",
         "claude-opus-5-5",
         "claude-sonnet-5-5",
         "claude-haiku-5-5",
-        "claude-fable-5-1",
     ]

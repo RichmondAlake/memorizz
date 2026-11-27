@@ -1812,8 +1812,16 @@ details.agent-templates > summary::before {
     color: var(--text-primary);
 }
 
+/* The section on screen: a tinted fill and stronger text. No stripe down
+   the edge, which bends around the rounded corner. */
 .builder-nav a.is-active {
-    box-shadow: inset 2px 0 0 var(--accent-primary);
+    background: color-mix(in srgb, var(--accent-primary) 14%, transparent);
+    font-weight: 600;
+}
+
+.builder-nav a.is-active .builder-nav-status {
+    color: var(--text-secondary);
+    font-weight: 400;
 }
 
 .builder-nav-status {
@@ -1976,6 +1984,23 @@ details.builder-section > summary::before {
 
 .agent-form .builder-section > .section-body > :is(.form-group, .form-grid, details, .form-hint) + :is(.form-group, .form-grid, details, .form-hint) {
     margin-top: 16px;
+}
+
+/* One provider's own settings, shown while that provider is chosen (Sentry
+   under Observability). */
+.agent-form .provider-fields {
+    display: grid;
+    gap: 16px;
+    margin-top: 16px;
+}
+
+.agent-form .provider-fields[hidden] {
+    display: none;
+}
+
+.agent-form .provider-fields .observability-provider-link {
+    margin-left: 6px;
+    white-space: nowrap;
 }
 
 /* A group inside a section, such as Delegates under Runtime. */

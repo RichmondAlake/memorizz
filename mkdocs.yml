@@ -24,6 +24,7 @@ nav:
       - Tools, Safety & Approvals: guides/tools-and-approvals.md
       - Scheduled Automations: guides/automations.md
       - Voice: guides/voice.md
+      - An Agent's Own Source: guides/self-source.md
       - Agent Modes:
           - Assistant: use-cases/assistant-mode.md
           - Workflow: use-cases/workflow-mode.md
@@ -31,7 +32,7 @@ nav:
       - MCP Integrations:
           - Connect to MCP Servers: guides/mcp-connectivity.md
           - Expose MemoRizz as an MCP Server: guides/mcp-server.md
-          - Grok Bot and ChatGPT dots: guides/cloud-apps.md
+          - Muse, Grok Bot and ChatGPT dots: guides/cloud-apps.md
           - Failures and alerts: guides/failures-and-alerts.md
           - MemoRizz in Codex and Claude Code: guides/coding-agent-plugins.md
       - Internet Access: internet-access/providers.md
@@ -78,6 +79,7 @@ nav:
   - Operate:
       - Configuration & Secrets: reference/configuration.md
       - Observability & Trace Inspection: observability-ui.md
+      - Observability Providers (Sentry): guides/observability-providers.md
       - Usage, Cost & Memory Analytics: usage-analytics.md
       - Production Governance: guides/production-governance.md
       - Capabilities & Preflight: reference/capabilities.md

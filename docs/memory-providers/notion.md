@@ -21,6 +21,17 @@ This is intended for a human-editable, modest-volume memory library. It is not
 a low-latency replacement for an operational database or a distributed agent
 coordination store. Existing providers and streaming defaults are unchanged.
 
+### How long a turn takes
+
+Notion allows about three requests a second, and the provider spaces its
+requests to stay under that, so a turn takes as long as the requests it
+makes. Measured on 2026-11-26 with a small library: `agent.run()` from the
+SDK made 18 requests (about 12 seconds); a turn in the local UI's playground,
+which also stores traces, context snapshots and each memory's change history
+in Notion, made about 100 requests (about 48 seconds, with the answer shown
+after about 21). Opening the playground makes about 25. Use another provider
+where a reply has to come back in a few seconds.
+
 ## Create the Notion area
 
 Install `pip install "memorizz[notion]"`. The adapter uses the existing Requests

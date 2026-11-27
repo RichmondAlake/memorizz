@@ -198,6 +198,25 @@ Notion's desktop app exposes no content to macOS Accessibility, so
 [desktop control](../desktop-control/index.md) cannot read it; use this
 preset for Notion.
 
+### Page snapshots
+
+An agent with an MCP connection has one more tool, `send_page_snapshot(url,
+title, summary)`. It calls it after it creates or changes a page, and the
+local UI shows the page in the reply: title, properties and the first blocks
+(headings, text, to-dos, tables, sub-pages), with a link to open it.
+
+- A Notion page is read when the snapshot is taken, through the agent's own
+  Notion connection (`notion-fetch`) or, when `NOTION_TOKEN` is set, with
+  that integration token. The snapshot shows what is on the page, not the
+  model's account of it.
+- The snapshot goes to the person and is stored with the turn's trace. The
+  model is told only that it was shown, with the page's title.
+- A page that cannot be read (Notion signed out, or the token has no access)
+  and a page on any other site are shown as a link with the title and
+  summary the agent gave, and the card says the page was not read.
+- In the SDK the snapshot is the `display` of the tool's result, of kind
+  `page_snapshot`, on the `tool.completed` stream event.
+
 ## Google Calendar
 
 Google Calendar MCP is currently a Google Developer Preview. Before connecting,

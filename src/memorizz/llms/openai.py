@@ -42,6 +42,7 @@ class OpenAI(ResponsesToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
         prompt_cache_retention: Optional[str] = None,
         api_mode: str = "auto",
         additional_config: Optional[Dict[str, Any]] = None,
+        default_headers: Optional[Dict[str, str]] = None,
         **_ignored: Any,
     ):
         """
@@ -93,6 +94,8 @@ class OpenAI(ResponsesToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
         client_kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
             client_kwargs["base_url"] = base_url
+        if default_headers:
+            client_kwargs["default_headers"] = dict(default_headers)
 
         self.client = openai.OpenAI(**client_kwargs)
         self.model = model
@@ -178,7 +181,15 @@ class OpenAI(ResponsesToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
         normalized = model.lower() if model else ""
         if any(
             normalized == name or normalized.startswith(name + "-")
-            for name in ("gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna")
+            for name in (
+                "gpt-6.2-sol",
+                "gpt-6.2-astra",
+                "gpt-6.1-terra",
+                "gpt-6-astra",
+                "gpt-6.1-sol",
+                "gpt-6-sol",
+                "gpt-6-luna",
+            )
         ):
             return 1_050_000
         context_map = {
@@ -360,6 +371,34 @@ class OpenAI(ResponsesToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
         if marked:
             kwargs[field] = items
 
+    # Whether tool calls in the history keep ``extra_content``, the fields
+    # a provider adds beside the OpenAI ones (Gemini's thought signature).
+    keeps_tool_call_extras = False
+
+    @staticmethod
+    def _without_tool_call_extras(messages: Any) -> Any:
+        """The history without ``extra_content`` on its tool calls: a step
+        another provider answered is sent on in plain OpenAI form."""
+        if not isinstance(messages, list):
+            return messages
+        plain: List[Any] = []
+        for message in messages:
+            calls = message.get("tool_calls") if isinstance(message, dict) else None
+            if calls and any(
+                isinstance(call, dict) and "extra_content" in call for call in calls
+            ):
+                message = {
+                    **message,
+                    "tool_calls": [
+                        {k: v for k, v in call.items() if k != "extra_content"}
+                        if isinstance(call, dict)
+                        else call
+                        for call in calls
+                    ],
+                }
+            plain.append(message)
+        return plain
+
     def _create_chat_completion(self, kwargs: Dict[str, Any]) -> Any:
         """Call chat.completions.create, dropping cache params on old SDKs.
 
@@ -367,6 +406,11 @@ class OpenAI(ResponsesToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
         prompt-cache parameters; retry once without them rather than failing
         the whole request.
         """
+        if not self.keeps_tool_call_extras and "messages" in kwargs:
+            kwargs = {
+                **kwargs,
+                "messages": self._without_tool_call_extras(kwargs["messages"]),
+            }
         try:
             return self.client.chat.completions.create(**kwargs)
         except TypeError:

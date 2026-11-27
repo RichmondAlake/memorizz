@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}Memory · {{ memory.memory_id }} - Memorizz{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="/static/css/pages/harnesses.css?v=31">
+<script src="/static/js/harness-memory.js?v=1" defer></script>
+{% endblock %}
+{% block content %}
+{% from '_ui.html' import page_header %}
+<div class="hx-memory">
+    {% call page_header('Shared memory', memory.memory_id, back=('/harnesses', '← Agent harnesses')) %}
+        <a class="btn" href="/harnesses?memory_id={{ memory.memory_id|urlencode }}#launch">Run a harness on this memory</a>
+    {% endcall %}
+    <p class="hx-memory-lead">
+        {% if memory.runs %}{{ memory.runs|length }} run{{ '' if memory.runs|length == 1 else 's' }} by
+        {{ memory.harnesses|length }} harness{{ '' if memory.harnesses|length == 1 else 'es' }} wrote here;
+        {{ memory.saved }} answer{{ '' if memory.saved == 1 else 's' }} saved for later runs to recall.{% else %}No run has written here yet.{% endif %}
+        {% if memory.readers %}{{ memory.readers|length }} run{{ '' if memory.readers|length == 1 else 's' }} read it without writing.{% endif %}
+    </p>
+    {% if memory.harnesses %}
+    <ul class="hx-memory-tally" aria-label="Harnesses that wrote to this memory">
+        {% for item in memory.harnesses %}
+        <li><strong>{{ item.harness }}</strong><span>{{ item.runs }} run{{ '' if item.runs == 1 else 's' }} · {{ item.saved }} saved</span></li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    <section class="hx-knows" id="hx-knows" data-memory="{{ memory.memory_id }}" data-read-only="{{ 'true' if read_only else 'false' }}">
+        <div class="hx-knows-head">
+            <h2 class="hx-memory-title">What this memory knows <span>{{ refine.findings|length }}</span></h2>
+            <div class="hx-knows-actions">
+                <span class="hx-knows-note" id="hx-refine-status" role="status" aria-live="polite">{% if refine.waiting %}{{ refine.waiting }} new answer{{ '' if refine.waiting == 1 else 's' }} not distilled yet{% elif refine.answers %}Every answer has been distilled{% endif %}</span>
+                <button type="button" class="btn btn-sm" id="hx-refine-preview"{% if not refine.waiting %} disabled{% endif %}>Preview</button>
+                <button type="button" class="btn btn-sm btn-primary" id="hx-refine-run"{% if not refine.waiting or read_only %} disabled{% endif %}>Refine now</button>
+            </div>
+        </div>
+        <p class="hx-knows-lead">A refine cycle reads the raw answers below and keeps the lasting facts as findings, each quoted from the answer it came from. Later runs are handed the findings; every raw answer stays in memory.</p>
+        {% if refine.findings %}
+        <ul class="hx-findings">
+            {% for item in refine.findings %}
+            <li>
+                <p class="hx-finding-text">{{ item.text }}</p>
+                <p class="hx-finding-facts">
+                    {% if item.confirmations > 1 %}<span class="hx-finding-agree">{{ item.confirmations }} runs agree</span>{% else %}<span>1 run</span>{% endif %}
+                    <span>{{ item.harnesses|join(', ') }}</span>
+                    {% for run in item.runs[:4] %}<a href="/harnesses/runs/{{ run }}">{{ run[:8] }}</a>{% endfor %}
+                    {% if item.replaces %}<span>replaced an earlier finding</span>{% endif %}
+                </p>
+                {% if item.quote %}<p class="hx-finding-quote">“{{ item.quote }}”</p>{% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p class="hx-knows-empty">No findings yet. {% if refine.waiting %}Run a refine cycle to distil the {{ refine.waiting }} answer{{ '' if refine.waiting == 1 else 's' }} below.{% else %}They appear after harness runs save answers here.{% endif %}</p>
+        {% endif %}
+        {% if refine.replaced %}
+        <details class="hx-knows-more">
+            <summary>{{ refine.replaced|length }} finding{{ '' if refine.replaced|length == 1 else 's' }} replaced by a newer one</summary>
+            <ul class="hx-findings hx-findings--old">
+                {% for item in refine.replaced %}<li><p class="hx-finding-text">{{ item.text }}</p><p class="hx-finding-facts"><span>{{ item.why_replaced or 'a newer run corrected it' }}</span></p></li>{% endfor %}
+            </ul>
+        </details>
+        {% endif %}
+        <div id="hx-refine-report" class="hx-refine-report" hidden></div>
+        <details class="hx-knows-more"{% if not refine.settings.model %} open{% endif %}>
+            <summary>Refine settings{% if refine.settings.model %} · {{ refine.settings.provider }} · {{ refine.settings.model }}{% if refine.settings.auto %} · starts by itself after {{ refine.settings.after_answers }} new answers{% endif %}{% else %} · choose a model to refine{% endif %}</summary>
+            <form id="hx-refine-settings" class="hx-refine-settings">
+                <label>Provider
+                    <select name="provider">
+                        <option value="">Choose…</option>
+                        {% for name in refine.providers %}<option value="{{ name }}"{% if name == refine.settings.provider %} selected{% endif %}>{{ name }}</option>{% endfor %}
+                    </select>
+                </label>
+                <label>Model <input name="model" value="{{ refine.settings.model }}" placeholder="e.g. gpt-6.2-sol" autocomplete="off"></label>
+                <label class="hx-refine-auto"><input type="checkbox" name="auto"{% if refine.settings.auto %} checked{% endif %}> Start by itself after</label>
+                <label><input type="number" name="after_answers" min="1" max="50" value="{{ refine.settings.after_answers }}" aria-label="New answers before a cycle starts"> new answers</label>
+                <button type="submit" class="btn btn-sm"{% if read_only %} disabled{% endif %}>Save</button>
+                <span class="hx-knows-note" id="hx-refine-saved" role="status" aria-live="polite"></span>
+            </form>
+            <p class="hx-knows-lead">The model applies to every shared memory on this machine; its key is read from the environment. A cycle spends tokens, so it never starts by itself until a model is chosen.</p>
+        </details>
+        {% if refine.runs %}
+        <details class="hx-knows-more">
+            <summary>Refine cycles · last {{ (refine.runs[0].finished_at or refine.runs[0].started_at)[:16]|replace('T', ' ') }}</summary>
+            <ul class="hx-cycles">
+                {% for run in refine.runs %}
+                <li>
+                    <span class="hx-memory-status hx-memory-status--{{ 'succeeded' if run.status == 'done' else 'failed' if run.status == 'failed' else 'none' }}">{{ run.status|replace('_', ' ') }}</span>
+                    <time>{{ (run.finished_at or run.started_at)[:16]|replace('T', ' ') }}</time>
+                    <span>{{ run.trigger }}</span>
+                    {% for job in run.jobs %}{% for kind, count in job.changes.items() %}<span>{{ count }} {{ kind|replace('_', ' ') }}</span>{% endfor %}{% endfor %}
+                    {% if run.reason %}<span>{{ run.reason }}</span>{% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+        </details>
+        {% endif %}
+    </section>
+
+    {% macro run_list(rows, wrote) %}
+    <ol class="hx-memory-runs">
+        {% for run in rows %}
+        <li class="hx-memory-run">
+            <div class="hx-memory-run-head">
+                <strong>{{ run.harness }}</strong>
+                <span class="hx-memory-status hx-memory-status--{{ run.status }}">{{ run.status|replace('_', ' ') }}</span>
+                <time data-local-time="{{ run.at }}">{{ run.at[:16]|replace('T', ' ') }}</time>
+                <a href="/harnesses/runs/{{ run.run_id }}#used">Open run</a>
+            </div>
+            <p class="hx-memory-asked">{{ run.asked or 'No task text was kept.' }}</p>
+            {% if run.answer %}<p class="hx-memory-answer">{{ run.answer }}</p>{% endif %}
+            <p class="hx-memory-facts">
+                Given {{ run.given }} record{{ '' if run.given == 1 else 's' }} from memory at the start
+                {% if wrote %}· {{ 'its answer was saved here' if run.saved else 'nothing was saved (it failed or gave no answer)' }}{% else %}· read-only, wrote nothing here{% endif %}
+            </p>
+        </li>
+        {% endfor %}
+    </ol>
+    {% endmacro %}
+
+    {% if memory.runs %}
+    <h2 class="hx-memory-title">Raw answers: runs that wrote here, oldest first</h2>
+    {{ run_list(memory.runs, true) }}
+    {% endif %}
+    {% if memory.readers %}
+    <h2 class="hx-memory-title">Runs that only read it</h2>
+    {{ run_list(memory.readers, false) }}
+    {% endif %}
+    {% if others %}
+    <h2 class="hx-memory-title">Other memories harnesses use</h2>
+    <ul class="hx-memory-others">
+        {% for entry in others %}
+        <li><a href="/harnesses/memory/{{ entry.memory_id|urlencode }}">{{ entry.memory_id }}</a><span>{{ entry.runs }} run{{ '' if entry.runs == 1 else 's' }} · {{ entry.harnesses|join(', ') }}</span></li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+</div>
+{% endblock %}

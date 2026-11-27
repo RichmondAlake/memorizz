@@ -1236,30 +1236,35 @@ class MemoryProvider(ABC):
             now_value = now.isoformat()
         else:
             now_value = now
+        from ..memory_history import _suspend_recording
+
         touched = 0
-        for record_id in record_ids:
-            identifier = str(record_id or "").strip()
-            if not identifier:
-                continue
-            try:
-                row = self.retrieve_by_id(identifier, memory_store_type)
-            except Exception:
-                row = None
-            if not isinstance(row, dict):
-                continue
-            try:
-                count = int(row.get("access_count") or 0)
-            except (TypeError, ValueError):
-                count = 0
-            try:
-                if self.update_by_id(
-                    identifier,
-                    {"last_accessed_at": now_value, "access_count": count + 1},
-                    memory_store_type,
-                ):
-                    touched += 1
-            except Exception as exc:
-                logger.debug("touch_many could not update %s: %s", identifier, exc)
+        # A recall is bookkeeping, not a change to the memory: it stays out of
+        # the memory's history, as it does where one UPDATE does this.
+        with _suspend_recording(self):
+            for record_id in record_ids:
+                identifier = str(record_id or "").strip()
+                if not identifier:
+                    continue
+                try:
+                    row = self.retrieve_by_id(identifier, memory_store_type)
+                except Exception:
+                    row = None
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    count = int(row.get("access_count") or 0)
+                except (TypeError, ValueError):
+                    count = 0
+                try:
+                    if self.update_by_id(
+                        identifier,
+                        {"last_accessed_at": now_value, "access_count": count + 1},
+                        memory_store_type,
+                    ):
+                        touched += 1
+                except Exception as exc:
+                    logger.debug("touch_many could not update %s: %s", identifier, exc)
         return touched
 
     def purge_expired_semantic_cache(self, now=None) -> int:

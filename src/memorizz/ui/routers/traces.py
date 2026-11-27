@@ -296,6 +296,28 @@ def _targeted_runtime_agent(agent_id, thread_id=None):
     return None
 
 
+def _step_event_id(trace_events: List[Dict[str, Any]], step: str) -> Optional[str]:
+    """The event a chat's step link means: the one whose span, tool call or
+    trace ID is ``step``. A tool's result is preferred to its call, since the
+    result says how it went. None when the step is not in what was loaded."""
+    wanted = str(step or "").strip()
+    if not wanted:
+        return None
+    found = [
+        event
+        for event in trace_events
+        if wanted
+        in {
+            str(event.get(key) or "")
+            for key in ("event_id", "span_id", "tool_call_id", "trace_id")
+        }
+    ]
+    if not found:
+        return None
+    found.sort(key=lambda event: event.get("trace_kind") != "tool_result")
+    return found[0].get("event_id")
+
+
 @router.get("/observability")
 async def observability_redirect(request: Request):
     """Backwards-compatible redirect to traces page."""
@@ -319,6 +341,7 @@ async def traces_page(
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
     tag: Optional[List[str]] = Query(None),
+    step: Optional[str] = None,
 ):
     """Show traces dashboard with searchable agent table and per-agent timeline.
 
@@ -524,6 +547,10 @@ async def traces_page(
                 tags=tag_filter,
             )
             trace_query_metadata = selected_snapshot.query_metadata
+            if step and not event_id:
+                # A link from a chat names a step the way the chat knows it
+                # (its span or tool call); find that step here.
+                event_id = _step_event_id(trace_events, step)
             if event_id and not any(
                 e.get("event_id") == event_id for e in trace_events
             ):

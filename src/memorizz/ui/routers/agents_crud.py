@@ -62,6 +62,7 @@ from ..helpers import (
     _normalize_memory_type_values,
     _normalize_skills_marketplace_provider_name,
     _parse_bool,
+    _parse_routing,
     _parse_self_aware_root_paths,
     _persist_mcp_configs_to_toolbox,
     _retrieve_conversation_history,
@@ -162,6 +163,11 @@ def _build_agent_recent_messages(
             role = _to_text(message.get("role")).strip().lower()
             if role not in {"user", "assistant"}:
                 continue
+            writer = _to_text(message.get("agent_id")).strip()
+            if writer and writer != agent_id:
+                # A memory several agents and harnesses share holds their
+                # turns too; this is the agent's own latest conversation.
+                continue
             content = _to_text(
                 message.get("content") or message.get("text", "")
             ).strip()
@@ -235,6 +241,13 @@ def _parse_llm_config(
                     config.update(extra)
         except Exception as exc:
             error = f"Invalid LLM config JSON: {exc}"
+
+    if config and not error and "routing" in config:
+        routing, error = _parse_routing(config.get("routing"))
+        if routing and config.get("provider") == "openrouter":
+            config["routing"] = routing
+        else:
+            config.pop("routing", None)
 
     return config, error
 
@@ -617,6 +630,7 @@ def _build_agent_form_data(agent: Any) -> Dict[str, Any]:
         "tool_access": getattr(agent, "tool_access", None) or "private",
         "semantic_cache": bool(getattr(agent, "semantic_cache", False)),
         **_voice_form_values(agent),
+        **_observability_form_values(agent),
         "tool_cache": bool(getattr(agent, "tool_cache_config", None)),
         "continual_learning": bool(getattr(agent, "continual_learning", False)),
         "learning_control_plane": bool(getattr(agent, "learning_control_plane", False)),
@@ -1307,6 +1321,8 @@ def _decision_model_groups(runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 _BACKGROUND_PROVIDERS = (
     "openai",
     "anthropic",
+    "gemini",
+    "openrouter",
     "azure",
     "ollama",
     "huggingface",
@@ -1373,6 +1389,64 @@ def _voice_form_values(agent: Any = None) -> Dict[str, Any]:
         "voice_provider": config.get("provider") or DEFAULT_VOICE_PROVIDER,
         "voice_name": config.get("voice") or "",
     }
+
+
+def _observability_form_values(agent: Any = None) -> Dict[str, Any]:
+    """The agent form's observability fields, from a stored agent (or the
+    defaults: traces on, kept in MemoRizz)."""
+    config = _as_dict(getattr(agent, "observability_config", None)) if agent else {}
+    return {
+        "observability": getattr(agent, "observability", None) is not False
+        if agent
+        else True,
+        "observability_provider": config.get("provider") or "memorizz",
+        "observability_org": config.get("org") or "",
+        "observability_project": config.get("project") or "",
+        "observability_include_content": bool(config.get("include_content")),
+    }
+
+
+def _observability_value(
+    posted: Optional[str],
+    enabled: Optional[str],
+    provider: Optional[str],
+    org: Optional[str],
+    project: Optional[str],
+    include_content: Optional[str],
+    existing: Any = None,
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """``(observability, observability_config)`` from the form.
+
+    A form without the section (``posted`` empty: an older page, a template)
+    changes nothing. Settings the form does not show (a custom link, the
+    environment, the sample rate) are kept from the stored configuration when
+    the provider is unchanged."""
+    from ...observability.providers import ObservabilityConfig, registered_providers
+
+    kept = _as_dict(getattr(existing, "observability_config", None))
+    if not posted:
+        was_on = getattr(existing, "observability", None) is not False
+        return (was_on if existing is not None else True), (kept or None)
+    chosen = str(provider or "").strip().lower()
+    if chosen not in registered_providers():
+        chosen = "memorizz"
+    is_on = _parse_bool(enabled)
+    config: Dict[str, Any] = dict(kept) if kept.get("provider") == chosen else {}
+    config["provider"] = chosen
+    if chosen == "memorizz":
+        # The built-in provider has nothing to configure here.
+        return is_on, (config if len(config) > 1 else None)
+    for key, value in (("org", org), ("project", project)):
+        text = str(value or "").strip()
+        if text:
+            config[key] = text
+        else:
+            config.pop(key, None)
+    config["include_content"] = _parse_bool(include_content)
+    try:
+        return is_on, ObservabilityConfig.from_value(config).to_dict()
+    except ValueError:
+        return is_on, {"provider": chosen}
 
 
 def _voice_value(
@@ -1703,6 +1777,28 @@ async def agent_toggle_favorite(
     return RedirectResponse(url=redirect_target, status_code=302)
 
 
+def _default_sandbox_for_form() -> Dict[str, Any]:
+    """The sandbox a new agent's form starts on: the default from Settings
+    when it can run, else none with the reason. A default that is not set up
+    (GraalPy with no executable) would refuse a save the person never chose."""
+    default = os.environ.get("MEMORIZZ_DEFAULT_SANDBOX_PROVIDER", "").strip()
+    if not default:
+        return {"sandbox_provider": "", "sandbox_default_note": ""}
+    try:
+        problem = _validate_sandbox_provider_choice(default)
+    except Exception as exc:
+        problem = str(exc)
+    if not problem:
+        return {"sandbox_provider": default, "sandbox_default_note": ""}
+    return {
+        "sandbox_provider": "",
+        "sandbox_default_note": (
+            f"The default sandbox ({default}) is not set up, so this agent "
+            "starts with none. Set it up in Settings to use it."
+        ),
+    }
+
+
 @router.get("/agents/new", response_class=HTMLResponse)
 async def agent_create_page(
     request: Request, template: str = "", saved: str = "", deleted: str = ""
@@ -1734,6 +1830,7 @@ async def agent_create_page(
             "tool_access": "private",
             "semantic_cache": False,
             **_voice_form_values(),
+            **_observability_form_values(),
             "tool_cache": False,
             "continual_learning": False,
             "learning_control_plane": False,
@@ -1749,7 +1846,7 @@ async def agent_create_page(
             "llm_provider": default_llm_provider,
             "llm_model": default_llm_model,
             "llm_config_json": "",
-            "sandbox_provider": os.environ.get("MEMORIZZ_DEFAULT_SANDBOX_PROVIDER", ""),
+            **_default_sandbox_for_form(),
             "browser_control_provider": os.environ.get(
                 "MEMORIZZ_BROWSER_CONTROL_PROVIDER", ""
             ),
@@ -2021,6 +2118,83 @@ async def agent_create_from_template(
     )
 
 
+FIRST_AGENT_NAME = "Assistant"
+FIRST_AGENT_INSTRUCTION = (
+    "You are a helpful assistant with long-term memory. Remember what the "
+    "user tells you about themselves and their work, and use it in later "
+    "conversations. Be direct, and say when you are unsure."
+)
+
+
+@router.post("/playground/first-agent")
+async def playground_first_agent(request: Request, prompt: str = Form("")):
+    """Make a store's first agent from the playground's first message and
+    open the conversation with that message already sent.
+
+    The agent gets the default model and the memory types of an assistant;
+    everything about it can be changed afterwards. With an agent already in
+    the store nothing is made: the newest one takes the message.
+    """
+    if not _state["provider"]:
+        return RedirectResponse(url="/connect", status_code=302)
+    if _state.get("read_only"):
+        raise HTTPException(status_code=403, detail="This console is read-only")
+
+    from urllib.parse import quote
+
+    from starlette.concurrency import run_in_threadpool
+
+    from ...memagent.models import MemAgentModel
+    from ..helpers import _list_agents, first_agent_model
+
+    def opened(agent_id: str) -> RedirectResponse:
+        message = prompt.strip()
+        suffix = f"?prompt={quote(message)}" if message else ""
+        return RedirectResponse(
+            url=f"/agents/{quote(str(agent_id), safe='')}/playground{suffix}",
+            status_code=303,
+        )
+
+    existing = await run_in_threadpool(_list_agents)
+    if existing:
+        # A second submit, or another tab: do not make the same agent twice.
+        newest = _sort_agents_by_created_at_desc(list(existing))[0]
+        return opened(_extract_agent_identifier(newest))
+
+    chosen = first_agent_model()
+    llm_config, llm_error = _parse_llm_config(chosen["provider"], chosen["model"], "")
+    if llm_error:
+        raise HTTPException(status_code=400, detail=llm_error)
+    memagent = MemAgentModel(
+        name=FIRST_AGENT_NAME,
+        instruction=FIRST_AGENT_INSTRUCTION,
+        application_mode="assistant",
+        memory_types=_build_memory_types_for_agent(
+            application_mode="assistant",
+            enable_entity_memory=True,
+            enable_workflow_memory=False,
+        ),
+        llm_config=llm_config,
+        default_timezone=_to_text(
+            os.environ.get("MEMORIZZ_DEFAULT_TIMEZONE", "")
+        ).strip()
+        or None,
+    )
+    try:
+        agent_id = _extract_agent_id(
+            await run_in_threadpool(_state["provider"].store_memagent, memagent),
+            memagent.agent_id,
+        )
+    except Exception as exc:
+        logger.error("Failed to create the first agent: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Failed to create the agent"
+        ) from exc
+    if not agent_id:
+        raise HTTPException(status_code=500, detail="Failed to create the agent")
+    return opened(agent_id)
+
+
 @router.post("/agents/new", response_class=HTMLResponse)
 async def agent_create_submit(
     request: Request,
@@ -2054,6 +2228,12 @@ async def agent_create_submit(
     voice: Optional[str] = Form(None),
     voice_provider: Optional[str] = Form(None),
     voice_name: Optional[str] = Form(None),
+    observability_form: str = Form(""),
+    observability: Optional[str] = Form(None),
+    observability_provider: Optional[str] = Form(None),
+    observability_org: Optional[str] = Form(None),
+    observability_project: Optional[str] = Form(None),
+    observability_include_content: Optional[str] = Form(None),
     skill_injection_role: str = Form("user"),
     continual_learning_require_shadow: Optional[str] = Form(None),
     continual_learning_shadow_evaluation: Optional[str] = Form(None),
@@ -2146,6 +2326,14 @@ async def agent_create_submit(
         persona_learning, persona_learning_every_n_turns, persona_learning_auto_apply
     )
     voice_enabled, voice_config_value = _voice_value(voice, voice_provider, voice_name)
+    observability_enabled, observability_config_value = _observability_value(
+        observability_form,
+        observability,
+        observability_provider,
+        observability_org,
+        observability_project,
+        observability_include_content,
+    )
     if memory_models_form:  # an empty select posts nothing: it means none
         reranker, memory_routing = reranker or "", memory_routing or ""
         decision_model = decision_model or ""
@@ -2265,6 +2453,15 @@ async def agent_create_submit(
         "voice": voice_enabled,
         "voice_provider": (voice_config_value or {}).get("provider") or "livekit",
         "voice_name": (voice_config_value or {}).get("voice") or "",
+        "observability": observability_enabled,
+        "observability_provider": (observability_config_value or {}).get("provider")
+        or "memorizz",
+        "observability_org": (observability_config_value or {}).get("org") or "",
+        "observability_project": (observability_config_value or {}).get("project")
+        or "",
+        "observability_include_content": bool(
+            (observability_config_value or {}).get("include_content")
+        ),
         "tool_cache": tool_cache_enabled,
         "continual_learning": continual_learning_enabled,
         "learning_control_plane": learning_control_plane_enabled,
@@ -2398,6 +2595,8 @@ async def agent_create_submit(
         persona_learning=persona_learning_value,
         voice=voice_enabled,
         voice_config=voice_config_value,
+        observability=observability_enabled,
+        observability_config=observability_config_value,
         memory_routing=memory_routing_value,
         reranker=reranker_value,
         decision_model=decision_model_value,
@@ -2491,6 +2690,12 @@ async def agent_edit_submit(
     voice: Optional[str] = Form(None),
     voice_provider: Optional[str] = Form(None),
     voice_name: Optional[str] = Form(None),
+    observability_form: str = Form(""),
+    observability: Optional[str] = Form(None),
+    observability_provider: Optional[str] = Form(None),
+    observability_org: Optional[str] = Form(None),
+    observability_project: Optional[str] = Form(None),
+    observability_include_content: Optional[str] = Form(None),
     skill_injection_role: str = Form("user"),
     continual_learning_require_shadow: Optional[str] = Form(None),
     continual_learning_shadow_evaluation: Optional[str] = Form(None),
@@ -2597,6 +2802,15 @@ async def agent_edit_submit(
     )
     voice_enabled, voice_config_value = _voice_value(
         voice, voice_provider, voice_name, getattr(existing, "voice_config", None)
+    )
+    observability_enabled, observability_config_value = _observability_value(
+        observability_form,
+        observability,
+        observability_provider,
+        observability_org,
+        observability_project,
+        observability_include_content,
+        existing,
     )
     if memory_models_form:  # an empty select posts nothing: it means none
         reranker, memory_routing = reranker or "", memory_routing or ""
@@ -2754,6 +2968,15 @@ async def agent_edit_submit(
         "voice": voice_enabled,
         "voice_provider": (voice_config_value or {}).get("provider") or "livekit",
         "voice_name": (voice_config_value or {}).get("voice") or "",
+        "observability": observability_enabled,
+        "observability_provider": (observability_config_value or {}).get("provider")
+        or "memorizz",
+        "observability_org": (observability_config_value or {}).get("org") or "",
+        "observability_project": (observability_config_value or {}).get("project")
+        or "",
+        "observability_include_content": bool(
+            (observability_config_value or {}).get("include_content")
+        ),
         "tool_cache": tool_cache_enabled,
         "continual_learning": continual_learning_enabled,
         "learning_control_plane": learning_control_plane_enabled,
@@ -2933,6 +3156,8 @@ async def agent_edit_submit(
             "persona_learning": persona_learning_value,
             "voice": voice_enabled,
             "voice_config": voice_config_value,
+            "observability": observability_enabled,
+            "observability_config": observability_config_value,
             "memory_routing": memory_routing_value,
             "reranker": reranker_value,
             "decision_model": decision_model_value,

@@ -615,3 +615,54 @@ def test_agent_saves_with_a_persona_are_journalled_as_create_then_update(
     assert [e["action"] for e in events][-2:] == ["created", "updated"]
     assert "instruction" in events[-1]["changed_fields"]
     assert "persona" not in events[-1]["changed_fields"]
+
+
+def test_a_recall_is_not_a_change_and_a_trace_is_stored_without_extra_reads(
+    history_provider, monkeypatch
+):
+    provider = history_provider
+    history = MemoryHistory(provider)
+    with history.recording(actor="operator-a", agent_id="a", memory_id="ns"):
+        fact = provider.store(
+            {"content": "likes tea", "memory_id": "ns"}, MemoryType.KNOWLEDGE_BASE
+        )
+
+    # Recalling a memory bumps its counters and leaves its history alone.
+    assert provider.touch_many([fact], MemoryType.KNOWLEDGE_BASE) == 1
+    assert provider.retrieve_by_id(fact, MemoryType.KNOWLEDGE_BASE)["access_count"] == 1
+    assert [e["action"] for e in history.timeline(agent_id="a")["events"]] == [
+        "created"
+    ]
+    # A real edit after it is still an update of the same chain.
+    with history.recording(actor="operator-a", agent_id="a", memory_id="ns"):
+        provider.update_by_id(
+            fact, {"content": "likes coffee"}, MemoryType.KNOWLEDGE_BASE
+        )
+    assert [e["action"] for e in history.timeline(agent_id="a")["events"]] == [
+        "created",
+        "updated",
+    ]
+
+    # A trace is never journalled, so storing it reads nothing before or after.
+    from memorizz.observability.store import ObservabilityStore
+
+    reads = []
+    for name in ("retrieve_by_id", "retrieve_by_name"):
+        original = getattr(provider, name)
+        monkeypatch.setattr(
+            provider,
+            name,
+            lambda *a, _original=original, _name=name, **k: (
+                reads.append(_name),
+                _original(*a, **k),
+            )[1],
+        )
+    ObservabilityStore(provider)._put(
+        {
+            "record_id": "ctx-span-1",
+            "record_type": "observability_context_snapshot",
+            "agent_id": "a",
+        }
+    )
+    assert reads == []
+    assert len(history.timeline(agent_id="a")["events"]) == 2

@@ -27,6 +27,8 @@ PRICING_FIELDS = (
     "service_tier",
     "cache_write_tokens",
 )
+# Where a provider documents the charge it reports with each response.
+REPORTED_SOURCES = {"openrouter": "openrouter.ai/docs/use-cases/usage-accounting"}
 # Why a call has no price when no card matches its provider, model and tier.
 NO_RATE_CARD = "No rate card for this provider, model and service tier"
 
@@ -133,6 +135,23 @@ class PricingRegistry:
         provider = str(usage.get("provider") or "").lower()
         model = str(usage.get("model") or "")
         tier = str(usage.get("service_tier") or "default")
+        reported = usage.get("provider_cost_usd")
+        if reported is not None:
+            # A gateway that bills per call says what the call cost; that is
+            # the charge, so no rate card is needed.
+            try:
+                charged = Decimal(str(reported))
+            except InvalidOperation:
+                charged = None
+            if charged is not None and charged.is_finite() and charged >= 0:
+                return {
+                    "cost_usd": str(charged),
+                    "cost_status": "provider_reported",
+                    "cost_reason": "The charge the provider reported for this call",
+                    "pricing_version": f"{provider or 'provider'}-reported",
+                    "pricing_source": REPORTED_SOURCES.get(provider, provider),
+                    "pricing_as_of": date.today().isoformat(),
+                }
         # Only OpenAI's dated snapshots inherit a base model's list rate.
         card = self.cards.get((provider, model, tier))
         if card is None and provider in {"openai", "anthropic"}:
@@ -208,6 +227,9 @@ def _openai_cards():
         "gpt-4o-mini": (0.15, 0.075, 0.6),
         "o3": (2, 0.5, 8),
         "o4-mini": (1.1, 0.275, 4.4),
+        "gpt-6.2-astra": (8, 0.4, 40),
+        "gpt-6.2-sol": (2, 0.1, 10),
+        "gpt-6.1-terra": (1, 0.05, 5),
         "gpt-6-astra": (10, 1, 50),
         "gpt-6.1-sol": (2, 0.1, 10),
         "gpt-6-sol": (2, 0.2, 10),
@@ -217,19 +239,29 @@ def _openai_cards():
         "gpt-5.6-luna": (0.2, 0.02, 1.2),
     }
     updated_models = {"gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"}
+    # Read from the price page on 2026-11-26.
+    newest_models = {"gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-terra"}
     for model, (inputs, cached, outputs) in rates.items():
         new_cache = model.startswith(("gpt-5.6", "gpt-6-", "gpt-6."))
         long = model in {"gpt-5.5", "gpt-5.4"} or new_cache
         tiers = {"default": Decimal(1)}
-        if model in updated_models:
+        if model in updated_models | newest_models:
             # Fast mode also accepts the legacy priority tier name.
             tiers.update(
                 fast=Decimal(2),
                 priority=Decimal(2),
                 batch=Decimal("0.5"),
-                flex=Decimal("0.5"),
             )
-        as_of = "2026-10-03" if model in updated_models else "2026-09-07"
+            if not model.startswith("gpt-6.2"):
+                # Flex is being wound down and is not offered on GPT-6.2.
+                tiers.update(flex=Decimal("0.5"))
+        as_of = (
+            "2026-11-26"
+            if model in newest_models
+            else "2026-10-03"
+            if model in updated_models
+            else "2026-09-07"
+        )
         for tier, multiplier in tiers.items():
             yield RateCard(
                 provider="openai",
@@ -256,6 +288,8 @@ def _anthropic_cards():
     # (input, cache read, output) USD per million tokens. 5-minute cache writes
     # bill at 1.25x input; MemoRizz does not request 1-hour writes.
     rates = {
+        "claude-fable-5-2": (8, 0.2, 40),
+        "claude-mythos-5-2": (8, 0.2, 40),
         "claude-fable-5-1": (10, 0.25, 50),
         "claude-mythos-5-1": (10, 0.25, 50),
         "claude-fable-5": (10, 1, 50),
@@ -280,7 +314,9 @@ def _anthropic_cards():
     long_prompt = {"claude-haiku-5-5": 100_000}
     for model, (inputs, cached, outputs) in rates.items():
         as_of = (
-            "2026-10-21"
+            "2026-11-26"
+            if model in {"claude-fable-5-2", "claude-mythos-5-2"}
+            else "2026-10-21"
             if model in long_prompt or model == "claude-sonnet-5-5"
             else "2026-09-28"
         )
@@ -302,4 +338,58 @@ def _anthropic_cards():
         )
 
 
-DEFAULT_PRICING = PricingRegistry((*_openai_cards(), *_anthropic_cards()))
+def _gemini_cards(today=None):
+    """Google's standard paid rates for the Gemini API, read 2026-11-26.
+
+    (input, cached input, output) USD per million tokens; output includes
+    thinking tokens. Google has announced new rates for some models from a
+    set date, so those rows carry both and the date picks one. Explicit
+    caches are also billed for storage by the hour; MemoRizz creates none.
+    Gemini 3.5 Flash and 3.7 Flash are not on Google's price page and stay
+    unpriced.
+    """
+    from datetime import date
+
+    today = today or date.today()
+    source = "https://aistudio.google.com/docs/pricing"
+    rates = {
+        "gemini-4-neon": (3, 0.15, 15),
+        "gemini-4-hydrogen": (1.5, 0.075, 7.5),
+        "gemini-3.5-flash-lite": (0.3, 0.03, 2.5),
+        "gemini-3.1-flash-lite": (0.25, 0.025, 1.5),
+        "gemini-3.1-pro-preview": (2, 0.2, 12),
+        "gemini-3-flash-preview": (0.5, 0.05, 3),
+    }
+    # model: (until that day, from it, the day the rates change)
+    dated = {
+        "gemini-4-carbon": ((2, 0.1, 10), (4, 0.2, 20), date(2026, 12, 1)),
+        "gemini-4-argon": ((2, 0.1, 10), (4, 0.2, 20), date(2026, 12, 1)),
+        "gemini-3.8-flash": ((0.75, 0.075, 3.75), (1.5, 0.15, 7.5), date(2027, 1, 1)),
+        "gemini-3.6-flash": ((0.75, 0.075, 3.75), (1.5, 0.15, 7.5), date(2027, 1, 1)),
+    }
+    as_of = {model: "2026-11-26" for model in rates}
+    for model, (before, after, change) in dated.items():
+        rates[model] = after if today >= change else before
+        as_of[model] = change.isoformat() if today >= change else "2026-11-26"
+    for model, (inputs, cached, outputs) in rates.items():
+        # A prompt over 200,000 tokens doubles 3.1 Pro's input and cached
+        # rates and raises its output rate by half.
+        long = model == "gemini-3.1-pro-preview"
+        yield RateCard(
+            provider="gemini",
+            model=model,
+            input_per_million=inputs,
+            cached_input_per_million=cached,
+            output_per_million=outputs,
+            source_url=source,
+            as_of=as_of[model],
+            version=f"gemini-standard-{as_of[model]}",
+            long_context_threshold=200_000 if long else None,
+            long_input_multiplier=Decimal(2) if long else Decimal(1),
+            long_output_multiplier=Decimal("1.5") if long else Decimal(1),
+        )
+
+
+DEFAULT_PRICING = PricingRegistry(
+    (*_openai_cards(), *_anthropic_cards(), *_gemini_cards())
+)

@@ -140,7 +140,7 @@ SETTINGS_SECTIONS = [
     },
     {
         "title": "LLM & embeddings",
-        "description": "Keys used by OpenAI, Anthropic, Azure OpenAI, Ollama, Voyage AI, and Hugging Face integrations.",
+        "description": "Keys used by OpenAI, Anthropic, Google Gemini, Azure OpenAI, OpenRouter, Ollama, Voyage AI, and Hugging Face integrations.",
         "fields": [
             {
                 "env": "OPENAI_API_KEY",
@@ -155,10 +155,22 @@ SETTINGS_SECTIONS = [
                 "hint": "Required for Anthropic Claude LLM provider.",
             },
             {
+                "env": "GEMINI_API_KEY",
+                "label": "Google Gemini API key",
+                "placeholder": "Gemini API key",
+                "hint": "Required for Gemini models. Create one at aistudio.google.com/apikey. GOOGLE_API_KEY is read too when this is not set. A key with no billing reaches only the models Google offers on its free tier.",
+            },
+            {
                 "env": "AZURE_OPENAI_API_KEY",
                 "label": "Azure OpenAI API key",
                 "placeholder": "azure-...",
                 "hint": "Used by Azure OpenAI LLM and embedding providers.",
+            },
+            {
+                "env": "OPENROUTER_API_KEY",
+                "label": "OpenRouter API key",
+                "placeholder": "sk-or-...",
+                "hint": "One key for the models OpenRouter serves.",
             },
             {
                 "env": "OLLAMA_HOST",
@@ -245,10 +257,12 @@ SETTINGS_SECTIONS = [
                 "options": [
                     {"value": "openai", "label": "OpenAI"},
                     {"value": "anthropic", "label": "Anthropic"},
+                    {"value": "gemini", "label": "Google Gemini"},
                     {"value": "azure", "label": "Azure OpenAI"},
                     {"value": "ollama", "label": "Ollama (Local)"},
                     {"value": "huggingface", "label": "HuggingFace"},
                     {"value": "mlx", "label": "MLX (Apple Silicon)"},
+                    {"value": "openrouter", "label": "OpenRouter"},
                     {
                         "value": "local-openai",
                         "label": "Local OpenAI-compatible (llama.cpp / LM Studio)",
@@ -267,7 +281,7 @@ SETTINGS_SECTIONS = [
     },
     {
         "title": "Internet access",
-        "description": "Keys for Tavily, Firecrawl, and other web browsing providers.",
+        "description": "Keys for Tavily, Firecrawl, Exa, and other web browsing providers.",
         "fields": [
             {
                 "env": "TAVILY_API_KEY",
@@ -280,6 +294,12 @@ SETTINGS_SECTIONS = [
                 "label": "Firecrawl API key",
                 "placeholder": "fc-...",
                 "hint": "Fallback provider for web browsing workflows.",
+            },
+            {
+                "env": "EXA_API_KEY",
+                "label": "Exa API key",
+                "placeholder": "Exa API key",
+                "hint": "Search by meaning, with the passages that answer the query.",
             },
             {
                 "env": "MEMORIZZ_DEFAULT_INTERNET_PROVIDER_API_KEY",
@@ -368,6 +388,25 @@ SETTINGS_SECTIONS = [
                 "field_type": "text",
                 "placeholder": "https://your-tunnel.example.com",
                 "hint": "Vapi asks the agent for each reply from its own servers, so it needs an https address that reaches this UI (a tunnel or a deployment). LiveKit and ElevenLabs do not need it.",
+            },
+        ],
+    },
+    {
+        "title": "Observability",
+        "description": "Keys for agents whose traces are also sent to Sentry. Where an agent's traces go is chosen on the agent; without a provider they stay in MemoRizz and need nothing here.",
+        "fields": [
+            {
+                "env": "SENTRY_DSN",
+                "label": "Sentry DSN",
+                "placeholder": "https://<key>@o<org>.ingest.sentry.io/<project>",
+                "hint": "From the Sentry project's Client Keys. Each turn of an agent whose observability provider is Sentry is sent there as one trace. Needs the sentry extra.",
+            },
+            {
+                "env": "SENTRY_ORG",
+                "label": "Sentry organisation slug",
+                "field_type": "text",
+                "placeholder": "acme",
+                "hint": "The name in your Sentry address (acme.sentry.io). Used for the link that opens an agent's traces in Sentry; an agent can name its own.",
             },
         ],
     },
@@ -764,9 +803,11 @@ _SIGNATURE_AUTHENTICATED_PATHS = frozenset({"/webhook/whatsapp/incoming"})
 _SIGNATURE_AUTHENTICATED_PREFIXES = ("/webhook/voice/vapi/",)
 
 
-def _authenticates_itself(path: str) -> bool:
-    return path in _SIGNATURE_AUTHENTICATED_PATHS or path.startswith(
-        _SIGNATURE_AUTHENTICATED_PREFIXES
+def _authenticates_itself(path: str, extra_paths: Any = ()) -> bool:
+    return (
+        path in _SIGNATURE_AUTHENTICATED_PATHS
+        or path in extra_paths
+        or path.startswith(_SIGNATURE_AUTHENTICATED_PREFIXES)
     )
 
 
@@ -978,6 +1019,7 @@ def create_app(
         lifespan=lifespan,
     )
     access = UIAccessController()
+    app.state.ui_access = access
     if persona_evolution is not None and not access.enabled:
         raise ValueError(
             "Host-owned persona profiles require Memorizz UI authentication"
@@ -1023,10 +1065,10 @@ def create_app(
         from .trace_access import current_principal
 
         path = request.url.path
+        ext_self_auth = getattr(app.state, "extension_self_auth_paths", ())
+        self_auth = _authenticates_itself(path, ext_self_auth)
         public_path = (
-            path == "/login"
-            or path.startswith("/static/")
-            or _authenticates_itself(path)
+            path in {"/login", "/healthz"} or path.startswith("/static/") or self_auth
         )
         principal = access.principal_for_request(request)
 
@@ -1071,7 +1113,7 @@ def create_app(
         # stay same-site only.
         if (
             request.method.upper() not in _SAFE_METHODS
-            and not _authenticates_itself(path)
+            and not self_auth
             and _request_is_cross_origin(request)
         ):
             if path.startswith("/traces") or path.startswith("/persona-evolution"):
@@ -1089,7 +1131,7 @@ def create_app(
             read_only_mode
             and request.method.upper() not in _SAFE_METHODS
             and path not in READ_ONLY_ALLOWED_POSTS
-            and not _authenticates_itself(path)
+            and not self_auth
             and not (
                 path == "/persona-evolution/action"
                 and app.state.persona_evolution_actions
@@ -1171,6 +1213,9 @@ def create_app(
     from .routers.timers import router as timers_router
 
     app.include_router(timers_router)
+    from .routers.exa import router as exa_router
+
+    app.include_router(exa_router)
     from .routers.shell_api import router as shell_api_router
 
     app.include_router(shell_api_router)
@@ -1217,6 +1262,9 @@ def create_app(
     from .routers.voice import router as voice_router
 
     app.include_router(voice_router)
+    from .routers.self_source import router as self_source_router
+
+    app.include_router(self_source_router)
     # Optional pages that are not part of the published package (none in a
     # normal install); see ui/extensions.py.
     from . import extensions as ui_extensions
@@ -1242,6 +1290,30 @@ def create_app(
     # -------------------------------------------------------------------------
     # Page Routes
     # -------------------------------------------------------------------------
+
+    @app.get("/healthz")
+    async def healthz(request: Request):
+        """Unauthenticated liveness probe; pool metrics require auth when enabled."""
+        provider = _state.get("provider")
+        raw_provider = getattr(provider, "wrapped_provider", provider)
+        payload: Dict[str, Any] = {
+            "ok": True,
+            "provider_connected": provider is not None,
+        }
+        if not access.enabled or access.request_is_authenticated(request):
+            payload["provider_type"] = _state.get("provider_type")
+            pool = getattr(raw_provider, "pool", None)
+            if pool is not None:
+                opened = getattr(pool, "opened", None)
+                busy = getattr(pool, "busy", None)
+                maximum = getattr(pool, "max", None)
+                if any(v is not None for v in (opened, busy, maximum)):
+                    payload["pool"] = {
+                        "open": opened,
+                        "busy": busy,
+                        "max": maximum,
+                    }
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request, next: str = "/"):
@@ -1288,9 +1360,10 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
-        """Redirect to connect page or dashboard based on connection state."""
+        """Home is the playground: a composer and every agent to pick from.
+        Not connected, the connect page."""
         if _state["provider"]:
-            return RedirectResponse(url="/dashboard", status_code=302)
+            return RedirectResponse(url="/playground", status_code=302)
         return RedirectResponse(url="/connect", status_code=302)
 
     def _connect_context(
@@ -1419,7 +1492,7 @@ def create_app(
                 read_only=read_only_mode,
                 port=request.url.port,
             )
-            return RedirectResponse(url="/dashboard", status_code=302)
+            return RedirectResponse(url="/", status_code=302)
         except Exception as e:
             error = format_connect_error(provider_type, e)
             logger.error("Connection failed: %s", error)

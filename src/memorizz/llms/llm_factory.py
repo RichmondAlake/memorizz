@@ -72,6 +72,9 @@ def create_llm_provider(config: Dict[str, Any]) -> LLMProvider:
         Example for Azure: {"provider": "azure", "deployment_name": "my-gpt4"}
         Example for Anthropic: {"provider": "anthropic", "model": "claude-sonnet-4-5-20250929"}
         Example for Ollama: {"provider": "ollama", "model": "llama3.1"}
+        Example for Gemini: {"provider": "gemini", "model": "gemini-4-hydrogen"}
+        Example for OpenRouter: {"provider": "openrouter", "model": "openrouter/auto",
+            "routing": {"sort": "price"}}
 
     Returns:
     --------
@@ -108,6 +111,21 @@ def create_llm_provider(config: Dict[str, Any]) -> LLMProvider:
         from .ollama import OllamaLLM
 
         return OllamaLLM(**_filter_kwargs_for_class(config, OllamaLLM))
+
+    elif provider_name == "openrouter":
+        from .gateway import OpenRouter
+
+        return OpenRouter(**_filter_kwargs_for_class(config, OpenRouter))
+
+    elif provider_name in ("gemini", "google"):
+        from .gateway import Gemini
+
+        return Gemini(**_filter_kwargs_for_class(config, Gemini))
+
+    elif provider_name == "gateway":
+        from .gateway import ModelGateway
+
+        return ModelGateway(**_filter_kwargs_for_class(config, ModelGateway))
 
     elif provider_name == "mlx":
         from .mlx import MLXLLM

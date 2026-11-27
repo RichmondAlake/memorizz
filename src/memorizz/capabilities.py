@@ -229,6 +229,7 @@ def capabilities() -> Dict[str, Any]:
                     "deepseek",
                     "pi",
                     "hermes",
+                    "droid",
                 ],
                 "routing": "deterministic_policy_and_outcome",
                 "durable_runs": True,

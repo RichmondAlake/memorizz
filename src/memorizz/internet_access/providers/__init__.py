@@ -4,7 +4,8 @@
 
 """Available internet access providers."""
 
+from .exa import ExaProvider
 from .firecrawl import FirecrawlProvider
 from .tavily import TavilyProvider
 
-__all__ = ["FirecrawlProvider", "TavilyProvider"]
+__all__ = ["ExaProvider", "FirecrawlProvider", "TavilyProvider"]

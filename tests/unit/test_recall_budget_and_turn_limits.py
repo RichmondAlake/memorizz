@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -535,3 +535,46 @@ def test_entity_and_evidence_pack_ids_join_their_refs(work_dir):
     assert by_source["evidence_pack"]["memory_type"] == "conversation_memory"
     assert by_source["evidence_pack"]["ref"] == evidence["evidence_refs"][0]["ref"]
     agent.close()
+
+
+def test_a_memory_recalled_a_moment_ago_does_not_outrank_one_that_answers():
+    """Recall refreshes a memory's last access. A handbook's few chunks, sent
+    with every turn, then held full recency and were chosen again whatever
+    was asked, ahead of the memory that answered the question."""
+    now = datetime.now(timezone.utc)
+    written = (now - timedelta(hours=18)).isoformat()
+
+    def saved(name, text, score, recalled=False):
+        row = {"_id": name, "content": text, "score": score, "timestamp": written}
+        if recalled:  # put in the prompt of the turn before this one
+            row["last_accessed_at"] = (now - timedelta(seconds=20)).isoformat()
+        return row
+
+    rows = [
+        ("knowledge_base", saved("gift-cards", "Rule: gift cards", 0.39, True)),
+        ("knowledge_base", saved("delivery", "Rule: delivery", 0.27, True)),
+        ("knowledge_base", saved("damaged", "Rule: damaged plants", 0.24, True)),
+        ("knowledge_base", saved("brand-voice", "Rule: brand voice", 0.12, True)),
+        ("episodic", saved("review", "The build passed its check", 0.57)),
+        ("episodic", saved("build", "pricing.py was changed", 0.55)),
+        ("episodic", saved("brief", "The sale's rules", 0.49)),
+    ]
+    ledger: List[Dict[str, Any]] = []
+
+    selected = dedupe_and_select(rows, max_items=4, selection_ledger=ledger)
+
+    # The three that answer are in; one slot is left for the nearest chunk.
+    assert {item["id"] for item in selected} == {
+        "review",
+        "build",
+        "brief",
+        "gift-cards",
+    }
+    reasons = {entry["candidate_rank"]: entry["selection_reason"] for entry in ledger}
+    assert [reasons[rank] for rank in (2, 3, 4)] == ["less_relevant"] * 3
+
+    # With room for everything, nothing is left out for being less relevant.
+    assert len(dedupe_and_select(rows, max_items=7)) == 7
+    # And with nothing more relevant to place first, the chunks are recalled.
+    only_chunks = dedupe_and_select(rows[:4], max_items=2)
+    assert {item["id"] for item in only_chunks} == {"gift-cards", "delivery"}

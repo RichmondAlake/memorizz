@@ -154,6 +154,29 @@ def _run_key(event: Dict[str, Any]) -> str:
     return str(event.get("turn_id") or event.get("root_trace_id") or "")
 
 
+# What an agent's turn leaves in its trace. A bundle with none of these is
+# not a turn: a harness run's evidence is kept as one, with events of its own
+# kinds, and its run is on the harness pages. Counted here it was an agent
+# run with no result, shown as running and then as incomplete for good.
+_TURN_KINDS = frozenset(
+    {
+        "turn_start",
+        "turn_result",
+        "model_call",
+        "model_result",
+        "tool_call",
+        "tool_result",
+    }
+)
+
+
+def _is_turn(events: List[Dict[str, Any]]) -> bool:
+    return any(
+        (event.get("trace_kind") or event.get("kind")) in _TURN_KINDS
+        for event in events
+    )
+
+
 def _recorded_cost(event: Dict[str, Any]) -> Optional[Decimal]:
     return _decimal(event.get("cost_usd"))
 
@@ -448,7 +471,9 @@ def build_operations_overview(
     runs = [
         run
         for run in (
-            _summarize_run(key, rows, now, price) for key, rows in grouped.items()
+            _summarize_run(key, rows, now, price)
+            for key, rows in grouped.items()
+            if _is_turn(rows)
         )
         if run["started_at"] and start <= run["started_at"] <= end
     ]

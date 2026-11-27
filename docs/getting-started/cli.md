@@ -104,7 +104,7 @@ export OPENAI_API_KEY=sk-...      # or ANTHROPIC_API_KEY=...
 memorizz
 ```
 
-Cloud keys are auto-detected (Anthropic → OpenAI → Azure → local Ollama). You can
+Cloud keys are auto-detected (Anthropic → OpenAI → Azure → Gemini → OpenRouter → local Ollama). You can
 also save a key from inside the REPL with `/login`. The default models are
 `claude-opus-5-5` (Anthropic) and `gpt-6.1-sol` (OpenAI), the same as the local
 UI's; set `MEMORIZZ_DEFAULT_LLM_MODEL`, pass `--model`, or use `/models` to
@@ -264,6 +264,31 @@ memorizz harness delegate create --harness codex --coordinator AGENT_ID --attach
 
 Unknown IDs and refused requests end with a message and exit code 1.
 
+A run reads and writes one memory, the one `--memory-id` names. Without it
+the run is private: it starts with nothing from memory and its answer is not
+saved. `run`, `plan` and `compare` take two more options, and `continue`
+keeps what the conversation had:
+
+| Option | What it does |
+| --- | --- |
+| `--read-memory ID` | Another memory the run may read and never write. Repeat it, up to 5. |
+| `--memory-scope all` | Open the run to every memory of the user. `run` is the default. |
+
+The raw answers runs save to a memory stay there. A refine cycle turns them
+into what the memory knows:
+
+```bash
+memorizz harness refine-settings --provider openai --model gpt-6.2-sol --auto --after 3
+memorizz harness refine billing-repo --dry-run   # what a cycle would change
+memorizz harness refine billing-repo             # run it
+memorizz harness findings billing-repo           # what the memory knows
+memorizz harness findings billing-repo --raw     # the raw answers, kept
+```
+
+`refine` exits 1 when the cycle could not run, for example with no model
+set; `--provider` and `--model` choose one for a single cycle. See
+[the refine cycle of a shared memory](../guides/meta-harness.md#the-refine-cycle-of-a-shared-memory).
+
 ## Run memory evaluations
 
 The `eval` group uses versioned protocol manifests and never upgrades a smoke
@@ -367,9 +392,9 @@ Running `memorizz` with no arguments launches the interactive loop:
 | `/update` | Check PyPI now for a newer release and show the upgrade command for your installer. |
 | `/menu` | Quick actions: the arrow-key shortcuts and the most used commands, plus the current model, memory and harness. |
 | `/models [name]` | Show the current model and pick another, or switch to the one named (keeps the provider). Ollama lists its installed models; OpenAI, Anthropic and the other cloud providers list the same models as the local UI, then any newer ones your key can use. |
-| `/provider [name]` | Switch provider: `openai`/`anthropic`/`ollama`/`azure`/`huggingface`/`mlx`. |
+| `/provider [name]` | Switch provider: `openai`/`anthropic`/`ollama`/`azure`/`huggingface`/`mlx`/`openrouter`. |
 | `/ollama [list\|pull <tag>\|host <url>]` | List/pull Ollama models or set `OLLAMA_HOST`. |
-| `/web [on\|off\|tavily\|firecrawl]` | Enable/disable internet search (Tavily/Firecrawl). |
+| `/web [on\|off\|tavily\|firecrawl\|exa]` | Enable/disable internet search (Tavily/Firecrawl/Exa). |
 | `/code [on\|off]` | Toggle coding tools (file read/write + bounded commands, scoped to cwd). |
 | `/browser [status\|on\|off\|run <task>]` | Inspect/configure Browser Use or run an explicit host browser task. |
 | `/desktop [on\|off\|status\|doctor]` | Computer use: let the agent open apps and links, read windows, click and type on this Mac (alias `/computer-use`). No restart needed. |
@@ -604,12 +629,12 @@ therefore does not represent a model approval.
 
 ## Internet access
 
-Give the agent web search + page reading via [Tavily](https://tavily.com) or
-[Firecrawl](https://firecrawl.dev). No extra install is needed — the providers
+Give the agent web search + page reading via [Tavily](https://tavily.com),
+[Firecrawl](https://firecrawl.dev) or [Exa](https://exa.ai). No extra install is needed — the providers
 call the REST APIs directly.
 
 ```bash
-export TAVILY_API_KEY=tvly-...      # or FIRECRAWL_API_KEY=fc-...
+export TAVILY_API_KEY=tvly-...      # or FIRECRAWL_API_KEY=fc-... or EXA_API_KEY=...
 memorizz                            # internet tools auto-enable when a key is set
 ```
 
@@ -617,7 +642,7 @@ Or manage it from the REPL:
 
 ```
 /login tavily       # save the key AND enable internet immediately
-/web                # show status  (also: /web on | off | tavily | firecrawl)
+/web                # show status  (also: /web on | off | tavily | firecrawl | exa)
 ```
 
 When enabled, the agent gains `internet_search` (web search) and `open_web_page`

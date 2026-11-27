@@ -1301,50 +1301,9 @@ details[open].panel.hx-launch > summary {
     content: none;
 }
 
-.hx-flow-edges {
-    position: absolute;
-    inset: 0;
-    z-index: 0;
-    overflow: visible;
-    pointer-events: none;
-}
-
-.hx-edge {
-    fill: none;
-    stroke: var(--border-color);
-    stroke-width: 1.5;
-    color: var(--border-color);
-}
-
-.hx-edge-head { fill: var(--border-color); stroke: none; }
-.hx-edge-head--good { fill: var(--accent-secondary); }
-.hx-edge-head--bad { fill: var(--accent-danger); }
-.hx-edge-head--warn { fill: var(--accent-warning); }
-.hx-edge-head--active { fill: var(--accent-primary); }
-
-.hx-edge--good { stroke: var(--accent-secondary); color: var(--accent-secondary); }
-.hx-edge--bad { stroke: var(--accent-danger); color: var(--accent-danger); }
-.hx-edge--warn { stroke: var(--accent-warning); color: var(--accent-warning); }
-
-.hx-edge--active {
-    stroke: var(--accent-primary);
-    stroke-dasharray: 6 5;
-    color: var(--accent-primary);
-    animation: hx-flow-dash 0.9s linear infinite;
-}
-
-@keyframes hx-flow-dash {
-    to { stroke-dashoffset: -11; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-    .hx-edge--active { animation: none; }
-}
-
 @media (max-width: 640px) {
     .hx-flow { grid-template-columns: 1fr; gap: 12px; }
     .hx-flow-root { justify-self: start; }
-    .hx-flow-edges { display: none; }
 }
 
 /* ---------- Trajectory ---------- */
@@ -2221,3 +2180,233 @@ details[open].panel.hx-launch > summary {
 .hx-traj-run:hover {
     background: color-mix(in srgb, var(--accent-primary) 12%, transparent);
 }
+
+/* A lookup refused because it reached outside the run's memory. */
+.hx-traj-step.is-refused > .hx-traj-icon { color: var(--accent-warning); }
+.hx-traj-step.is-refused .hx-traj-summary { color: var(--accent-warning); }
+.hx-traj-refused, .hx-refused-count {
+    margin-left: 8px;
+    padding: 1px 7px;
+    background: color-mix(in srgb, var(--accent-warning) 16%, transparent);
+    border-radius: 999px;
+    color: var(--accent-warning);
+    font-size: 11px;
+    font-weight: 600;
+}
+.hx-refused-count[hidden] { display: none; }
+
+/* A run's Memory tab. */
+.hx-used { max-width: 920px; }
+.hx-used-scope { margin: 4px 0 14px; color: var(--text-secondary); font-size: 13.5px; line-height: 1.55; }
+.hx-used-refusals { margin: 0 0 14px; padding: 10px 12px; background: color-mix(in srgb, var(--accent-warning) 10%, transparent); border-radius: 8px; color: var(--text-primary); font-size: 13px; }
+.hx-used h3 { margin: 22px 0 8px; font-size: 13.5px; font-weight: 600; }
+.hx-used h3 span { margin-left: 6px; color: var(--text-muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+.hx-used-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+.hx-used-list li { padding: 10px 0; border-top: 1px solid var(--border-subtle, var(--border-color)); }
+.hx-used-list li:first-child { border-top: 0; }
+.hx-used-list p { margin: 4px 0 0; color: var(--text-secondary); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.hx-used-list p.mono { color: var(--text-muted); font-size: 12px; }
+.hx-used-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; color: var(--text-muted); font-size: 12.5px; }
+.hx-used-head a, .hx-used-memory, .hx-memory-link { color: var(--accent-primary); text-decoration: none; }
+.hx-used-head a:hover, .hx-used-memory:hover, .hx-memory-link:hover { text-decoration: underline; }
+.hx-used-kind { color: var(--text-primary); font-weight: 600; text-transform: capitalize; }
+.hx-used-tag { padding: 0 6px; background: var(--bg-hover); border-radius: 999px; font-size: 11px; }
+.hx-used-score, .hx-used-outcome { margin-left: auto; font-variant-numeric: tabular-nums; }
+.hx-used-call--refused .hx-used-outcome, .hx-used-why { color: var(--accent-warning); }
+.hx-used-call--failed .hx-used-outcome { color: var(--accent-danger); }
+.hx-used-none, .hx-used-saved { margin: 4px 0 0; color: var(--text-muted); font-size: 13px; }
+.hx-used-saved { margin-top: 20px; }
+.hx-memory-link { margin-left: 6px; font-size: 12px; }
+
+/* One memory shared between harnesses. */
+.hx-memory { max-width: 980px; }
+.hx-memory-lead { margin: 0 0 16px; color: var(--text-secondary); font-size: 14px; line-height: 1.55; }
+.hx-memory-tally { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 0 0 8px; padding: 0; list-style: none; }
+.hx-memory-tally li { display: flex; flex-direction: column; gap: 1px; }
+.hx-memory-tally strong { font-size: 14px; }
+.hx-memory-tally span { color: var(--text-muted); font-size: 12.5px; }
+.hx-memory-title { margin: 28px 0 6px; font-size: 14px; font-weight: 600; }
+.hx-memory-runs { margin: 0; padding: 0; list-style: none; counter-reset: run; }
+.hx-memory-run { position: relative; padding: 14px 0 14px 34px; border-top: 1px solid var(--border-subtle, var(--border-color)); counter-increment: run; }
+.hx-memory-run:first-child { border-top: 0; }
+.hx-memory-run::before {
+    content: counter(run);
+    position: absolute;
+    left: 0;
+    top: 14px;
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    background: var(--bg-hover);
+    border-radius: 50%;
+    color: var(--text-secondary);
+    font-size: 11.5px;
+    font-weight: 600;
+}
+.hx-memory-run-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; font-size: 13px; }
+.hx-memory-run-head time { color: var(--text-muted); font-size: 12.5px; }
+.hx-memory-run-head a { margin-left: auto; color: var(--accent-primary); font-size: 12.5px; text-decoration: none; }
+.hx-memory-run-head a:hover { text-decoration: underline; }
+.hx-memory-status { color: var(--text-muted); font-size: 12.5px; text-transform: capitalize; }
+.hx-memory-status--succeeded { color: var(--accent-secondary); }
+.hx-memory-status--failed { color: var(--accent-danger); }
+.hx-memory-asked { margin: 6px 0 0; color: var(--text-primary); font-size: 13.5px; line-height: 1.5; }
+.hx-memory-answer { margin: 6px 0 0; padding-left: 12px; border-left: 2px solid var(--border-color); color: var(--text-secondary); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.hx-memory-facts { margin: 6px 0 0; color: var(--text-muted); font-size: 12.5px; }
+.hx-memory-others { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; font-size: 13px; }
+.hx-memory-others a { color: var(--accent-primary); text-decoration: none; }
+.hx-memory-others span { margin-left: 10px; color: var(--text-muted); font-size: 12.5px; }
+#harness-memory:not([hidden]) { margin-top: 8px; }
+
+/* What a shared memory knows, and its refine cycle. */
+.hx-knows { margin: 4px 0 8px; }
+.hx-knows-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; }
+.hx-knows-head .hx-memory-title { margin-top: 18px; }
+.hx-memory-title span { margin-left: 6px; color: var(--text-muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+.hx-knows-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.hx-knows-note { color: var(--text-muted); font-size: 12.5px; }
+.hx-knows-lead, .hx-knows-empty { margin: 0 0 10px; color: var(--text-muted); font-size: 13px; line-height: 1.5; }
+.hx-findings { margin: 0; padding: 0; list-style: none; }
+.hx-findings li { padding: 11px 0; border-top: 1px solid var(--border-subtle, var(--border-color)); }
+.hx-findings li:first-child { border-top: 0; }
+.hx-finding-text { margin: 0; color: var(--text-primary); font-size: 14px; line-height: 1.5; }
+.hx-finding-facts { display: flex; flex-wrap: wrap; gap: 2px 12px; margin: 4px 0 0; color: var(--text-muted); font-size: 12.5px; }
+.hx-finding-facts a { color: var(--accent-primary); font-family: var(--console-mono); font-size: 12px; text-decoration: none; }
+.hx-finding-facts a:hover { text-decoration: underline; }
+.hx-finding-agree { color: var(--accent-secondary); font-weight: 600; }
+.hx-finding-quote { margin: 4px 0 0; color: var(--text-secondary); font-size: 12.5px; font-style: italic; overflow-wrap: anywhere; }
+.hx-findings--old .hx-finding-text { color: var(--text-muted); text-decoration: line-through; }
+.hx-knows-more { margin-top: 12px; font-size: 13px; }
+.hx-knows-more > summary { color: var(--text-secondary); cursor: pointer; }
+.hx-refine-settings { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin: 12px 0 8px; }
+.hx-refine-settings label { display: inline-flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 13px; }
+.hx-refine-settings input[name="model"] { width: 220px; }
+.hx-refine-settings input[type="number"] { width: 64px; }
+.hx-refine-report { margin-top: 14px; padding: 12px 14px; background: var(--bg-secondary); border-radius: 10px; }
+.hx-refine-report[hidden] { display: none; }
+.hx-refine-head { margin: 0 0 8px; color: var(--text-primary); font-size: 13.5px; }
+.hx-refine-items { margin: 0; padding: 0; list-style: none; }
+.hx-refine-item { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 10px; padding: 8px 0; border-top: 1px solid var(--border-subtle, var(--border-color)); }
+.hx-refine-item:first-child { border-top: 0; }
+.hx-refine-item p { margin: 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.hx-refine-kind { color: var(--accent-secondary); font-size: 12px; font-weight: 600; }
+.hx-refine-item--confirmed .hx-refine-kind { color: var(--accent-primary); }
+.hx-refine-item--replaced .hx-refine-kind { color: var(--accent-warning); }
+.hx-refine-item--not_taken .hx-refine-kind, .hx-refine-item--not_taken p { color: var(--text-muted); }
+.hx-refine-detail { color: var(--text-muted); font-size: 12.5px !important; }
+.hx-cycles { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
+.hx-cycles li { display: flex; flex-wrap: wrap; gap: 2px 12px; color: var(--text-muted); font-size: 12.5px; }
+
+/* ---------- A workflow's stages, top to bottom on one rail ---------- */
+.hx-seq { margin: 4px 0 0; padding: 0; list-style: none; }
+.hx-seq-step { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 0 12px; }
+.hx-seq-rail { position: relative; display: flex; justify-content: center; }
+/* The line that joins a stage to the next one. */
+.hx-seq-rail::after {
+    content: "";
+    position: absolute;
+    top: 34px;
+    bottom: -6px;
+    width: 1px;
+    background: var(--border-color);
+}
+.hx-seq-step:last-child .hx-seq-rail::after { content: none; }
+.hx-seq-mark {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    margin-top: 10px;
+    background: var(--bg-card);
+    border: 1.5px solid var(--border-color);
+    border-radius: 50%;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+.hx-step--good .hx-seq-mark { border-color: var(--accent-secondary); color: var(--accent-secondary); }
+.hx-step--warn .hx-seq-mark { border-color: var(--accent-warning); color: var(--accent-warning); }
+.hx-step--bad .hx-seq-mark { border-color: var(--accent-danger); color: var(--accent-danger); }
+.hx-step--active .hx-seq-mark { border-color: var(--accent-primary); color: var(--accent-primary); }
+/* A comparison has no order: a plain dot per harness, and no joining line. */
+.hx-seq--compare .hx-seq-mark { width: 9px; height: 9px; margin-top: 17px; border-width: 0; background: var(--border-color); }
+.hx-seq--compare .hx-step--good .hx-seq-mark { background: var(--accent-secondary); }
+.hx-seq--compare .hx-step--bad .hx-seq-mark { background: var(--accent-danger); }
+.hx-seq--compare .hx-step--warn .hx-seq-mark { background: var(--accent-warning); }
+.hx-seq--compare .hx-step--active .hx-seq-mark { background: var(--accent-primary); }
+.hx-seq--compare .hx-seq-rail::after { content: none; }
+
+.hx-seq-main { min-width: 0; border-bottom: 1px solid var(--border-subtle, var(--border-color)); }
+.hx-seq-step:last-child .hx-seq-main { border-bottom: 0; }
+.hx-seq-head {
+    display: grid;
+    gap: 3px;
+    width: 100%;
+    padding: 10px 8px 10px 0;
+    background: none;
+    border: 0;
+    color: var(--text-secondary);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.hx-seq-head:disabled { cursor: default; }
+.hx-seq-head:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; border-radius: 6px; }
+.hx-seq-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.hx-seq-name { color: var(--text-primary); font-size: 13.5px; font-weight: 600; }
+.hx-seq-head:hover:not(:disabled) .hx-seq-name { color: var(--accent-primary); }
+.hx-seq-harness { color: var(--text-secondary); font-size: 12.5px; }
+.hx-seq-model { color: var(--text-muted); font-size: 11.5px; }
+.hx-seq-figures { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-left: auto; font-size: 12px; }
+.hx-seq-chevron { color: var(--text-muted); transition: transform 0.15s ease; }
+.hx-seq-step.is-open .hx-seq-chevron { transform: rotate(180deg); }
+.hx-seq-excerpt {
+    display: block;
+    color: var(--text-muted);
+    font-size: 12.5px;
+    line-height: 1.45;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
+}
+.hx-seq-excerpt.is-bad { color: var(--accent-danger); }
+.hx-seq-excerpt.is-warn { color: var(--accent-warning); }
+/* Open, the full answer says it; the one-line excerpt steps aside. */
+.hx-seq-step.is-open .hx-seq-excerpt { display: none; }
+
+.hx-seq-body { padding: 2px 8px 16px 0; }
+.hx-seq-body[hidden] { display: none; }
+.hx-seq-answer {
+    max-height: 520px;
+    padding: 12px 14px;
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 13.5px;
+    line-height: 1.6;
+    overflow: auto;
+    overflow-wrap: anywhere;
+}
+.hx-seq-answer.is-bad { color: var(--accent-danger); }
+.hx-seq-answer > :first-child { margin-top: 0; }
+.hx-seq-answer > :last-child { margin-bottom: 0; }
+.hx-seq-answer h1, .hx-seq-answer h2, .hx-seq-answer h3 { margin: 14px 0 6px; font-size: 14px; }
+.hx-seq-answer pre { padding: 10px 12px; background: var(--bg-primary); border-radius: 6px; font-size: 12.5px; overflow-x: auto; }
+.hx-seq-answer code { font-family: var(--console-mono); font-size: 12.5px; }
+.hx-seq-answer a { color: var(--accent-primary); }
+.hx-seq-none { margin: 0; color: var(--text-muted); font-size: 13px; }
+.hx-seq-files { margin: 10px 0 0; color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+.hx-seq-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.hx-seq-actions a.btn { text-decoration: none; }
+.hx-seq-body .hx-node-trace { margin-top: 10px; }
+@media (prefers-reduced-motion: reduce) { .hx-seq-chevron { transition: none; } }
+@media (max-width: 720px) { .hx-seq-figures { margin-left: 0; flex-basis: 100%; } }
+
+/* The old left-to-right arrow between plan stages has no place on the rail. */
+.hx-workflow--plan .hx-seq-step:not(:last-child)::after { content: none; }
+/* The quick ask now follows Availability. */
+.hx-avail + .hx-quick { margin-top: 14px; }

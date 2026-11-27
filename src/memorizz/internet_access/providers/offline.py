@@ -25,7 +25,7 @@ class OfflineInternetProvider(InternetAccessProvider):
     ) -> List[InternetSearchResult]:
         message = (
             f"Internet access unavailable: {self.reason}. Configure FIRECRAWL_API_KEY, "
-            "TAVILY_API_KEY, or MEMORIZZ_DEFAULT_INTERNET_PROVIDER to enable live search."
+            "TAVILY_API_KEY, EXA_API_KEY, or MEMORIZZ_DEFAULT_INTERNET_PROVIDER to enable live search."
         )
         return [
             InternetSearchResult(
@@ -39,7 +39,7 @@ class OfflineInternetProvider(InternetAccessProvider):
     def fetch_url(self, url: str, **kwargs: Any) -> InternetPageContent:
         message = (
             f"Cannot fetch '{url}' because internet access is disabled. "
-            "Configure FIRECRAWL_API_KEY, TAVILY_API_KEY, or MEMORIZZ_DEFAULT_INTERNET_PROVIDER "
+            "Configure FIRECRAWL_API_KEY, TAVILY_API_KEY, EXA_API_KEY, or MEMORIZZ_DEFAULT_INTERNET_PROVIDER "
             "to enable browsing."
         )
         return InternetPageContent(

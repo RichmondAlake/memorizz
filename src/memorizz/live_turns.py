@@ -126,7 +126,7 @@ class LiveTurn:
                 message=message,
                 **{
                     key: event[key]
-                    for key in ("span_id", "harness_run_id")
+                    for key in ("span_id", "harness_run_id", "harness")
                     if event.get(key)
                 },
             )

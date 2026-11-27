@@ -10,10 +10,13 @@ secret manager so saved agent definitions remain portable and safe to inspect.
 |---|---|---|---|
 | OpenAI | Base package | `OPENAI_API_KEY` | `openai` |
 | Anthropic | `memorizz[anthropic]` | `ANTHROPIC_API_KEY` | `anthropic` |
+| Google Gemini | Base package | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | `gemini` |
 | Ollama | Base package plus Ollama daemon | optional `OLLAMA_HOST` (models and embeddings) | `ollama` |
 | Azure OpenAI | Base package | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `OPENAI_API_VERSION` | `azure` |
 | Hugging Face | `memorizz[huggingface]` | optional `HF_TOKEN` | `huggingface` |
 | MLX | `memorizz[mlx]` on native Apple Silicon | none for public models | `mlx` |
+| OpenRouter | Base package | `OPENROUTER_API_KEY` | `openrouter` |
+| Another gateway | Base package | the variable you name in `api_key_env` | `gateway` |
 
 Use a model identifier or Azure deployment that is available to your account
 and supports the tool behavior your agent requires. Model availability and
@@ -109,6 +112,149 @@ limits change independently of Memorizz.
 
 The snippets assume `from memorizz import MemAgentBuilder` and provider
 credentials in the environment.
+
+
+## Google Gemini
+
+Gemini models are reached through the Gemini API with a key from
+[Google AI Studio](https://aistudio.google.com/apikey):
+
+```python
+from memorizz import Gemini, MemAgent
+
+agent = MemAgent(
+    model=Gemini("gemini-4-hydrogen", reasoning_effort="low"),
+    memory_provider=memory_provider,
+)
+```
+
+The same model as a saved, secret-free config:
+
+```python
+{"provider": "gemini", "model": "gemini-4-hydrogen"}
+```
+
+- **The key** is read from `GEMINI_API_KEY`, then `GOOGLE_API_KEY`. In the
+  local UI it goes in **Settings → Google Gemini API key**; in the CLI,
+  `/login gemini`.
+- **Models.** The pickers list the Gemini 4 and Gemini 3 models that chat
+  and call tools, and add any newer ones your key lists. Any model code from
+  the Gemini API works as a custom model.
+- **Thinking.** `reasoning_effort` takes `minimal`, `low`, `medium`, `high`
+  and, on some Gemini 4 models, `xhigh`. Gemini 3 and 4 always think; it
+  cannot be turned off.
+- **Tools.** Gemini 3 and 4 sign each step that calls a tool and refuse a
+  conversation that leaves the signature out. MemoRizz keeps it with the tool
+  call and sends it back, including when the answer is streamed. A step
+  another model answered (after switching models mid-conversation) has no
+  signature, and is sent with the stand-in value Google documents for that.
+- **Free tier.** A key with no billing reaches only some models. On
+  2026-11-25 a free key could call Gemini 3.5 Flash, 3.5 Flash-Lite,
+  3.6 Flash and 3.8 Flash (a few requests a minute), and Google refused
+  Gemini 4 Neon, Carbon and Argon outright. When Google refuses a request,
+  the run says why, for example "Google does not offer gemini-4-neon on the
+  Gemini API free tier. Turn on billing for the key's Google project…".
+- **Cost.** Runs are priced from Google's standard list rates (read
+  2026-11-26), including the dated rate changes Google has announced. A
+  free-tier key is not charged, so treat the figure as what the run would
+  cost on a paid key. Gemini 3.5 Flash and 3.7 Flash are not on Google's
+  price page and show tokens only.
+
+Requests go to Google's OpenAI-compatible endpoint, which Google marks as
+beta. Gemini models are also available through [OpenRouter](#openrouter-and-other-model-gateways)
+as `google/gemini-...`.
+
+## OpenRouter and other model gateways
+
+A gateway serves many models behind one address and one key.
+[OpenRouter](https://openrouter.ai) is built in:
+
+```python
+from memorizz import MemAgent, ModelRouting, OpenRouter
+
+agent = MemAgent(
+    model=OpenRouter(
+        "anthropic/claude-sonnet-5.5",   # any name from openrouter.ai/models
+        routing=ModelRouting(
+            fallback_models=["openai/gpt-6.2-sol"],
+            sort="throughput",
+            data_collection="deny",
+        ),
+    ),
+    memory_provider=memory_provider,
+)
+```
+
+The key is read from `OPENROUTER_API_KEY`. The same model as a saved,
+secret-free config:
+
+```python
+{
+    "provider": "openrouter",
+    "model": "anthropic/claude-sonnet-5.5",
+    "routing": {"fallback_models": ["openai/gpt-6.2-sol"], "sort": "throughput"},
+}
+```
+
+### Routing
+
+`ModelRouting` says who may answer. Every setting is optional.
+
+| Setting | What it does |
+|---|---|
+| `fallback_models` | Models to try, in order, when the agent's model errors, is rate limited or is down. The answer is billed at the rate of the model that gave it. |
+| `providers` | Providers to try first, in order. |
+| `only`, `ignore` | The only providers allowed, and providers never to use. |
+| `allow_fallbacks` | `False` fails a request instead of moving to a provider outside `providers`. |
+| `sort` | `"price"`, `"throughput"` or `"latency"`. |
+| `data_collection` | `"deny"` uses only providers that do not keep or train on prompts. |
+| `zero_data_retention` | `True` uses only endpoints that retain nothing. |
+| `require_parameters` | `True` uses only providers that support every parameter sent. |
+| `quantizations` | Accepted quantization levels, such as `["fp8"]`. |
+| `max_price` | The most to pay per million tokens: `{"prompt": 1, "completion": 2}`. |
+
+Change the rules on an agent at any time; they are saved with it:
+
+```python
+agent.with_model_routing(ModelRouting(fallback_models=["openrouter/free"]))
+agent.get_model_routing()        # {"fallback_models": ["openrouter/free"]}
+agent.with_model_routing(None)   # back to OpenRouter's defaults
+```
+
+Routing applies to every request the agent's model makes, including the
+plain-text calls behind summaries and tool descriptions. The model that
+actually answered is recorded on the trace as the response model.
+
+In the console, the same settings are the **Routing** group under the model
+on the agent form and in the playground's **Settings** tab.
+
+### What a call cost
+
+OpenRouter returns the charge for each call with its token counts. MemoRizz
+records it as the call's cost, so **Observability → Usage & cost**, the trace
+view and `agent.get_last_run_usage()` show spend for any model OpenRouter
+serves, with no rate card to maintain. See
+[Usage, cost and memory analytics](../usage-analytics.md).
+
+### Another gateway
+
+`ModelGateway` talks to any service that speaks the OpenAI chat protocol on
+its own address with its own key (a company gateway, vLLM, LiteLLM):
+
+```python
+from memorizz import ModelGateway
+
+model = ModelGateway(
+    "team-coder",
+    base_url="https://gateway.example/v1",
+    api_key_env="TEAM_GATEWAY_KEY",      # the variable's name; never the key
+    extra_body={"tier": "fast"},          # the gateway's own request options
+)
+```
+
+Only the variable's name is saved with an agent. A gateway is never sent
+`OPENAI_API_KEY`; without a key it gets a placeholder, which is what a local
+server expects.
 
 ## Saving and changing models
 

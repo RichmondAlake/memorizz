@@ -32,7 +32,7 @@ from ..mcp import catalog, oauth_handoff
 
 # Capabilities turned on by a setting rather than a connection.
 SETTING_HINTS = {
-    "web_search": "/web tavily or /web firecrawl turns it on",
+    "web_search": "/web tavily, /web firecrawl or /web exa turns it on",
     "browser": "/browser on turns it on",
     "desktop": "/desktop on turns it on",
     "code_execution": "choose a sandbox in the agent's settings (/ui)",

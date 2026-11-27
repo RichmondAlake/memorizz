@@ -31,6 +31,7 @@ from .adapters import (
     ClaudeCodeHarness,
     CodexHarness,
     DeepSeekHarness,
+    DroidHarness,
     HermesHarness,
     OpenHandsHarness,
     PiHarness,
@@ -100,6 +101,15 @@ def _parse_iso(value: Any) -> Optional[float]:
         return datetime.fromisoformat(str(value)).timestamp()
     except (TypeError, ValueError):
         return None
+
+
+# A run that ends like this and changed no file left no answer worth sharing.
+UNSAVED_STATUSES = frozenset({"failed", "canceled", "interrupted"})
+
+
+def private_memory_id(run_id: str) -> str:
+    """The memory a run with no ``memory_id`` is kept to: its own, unshared."""
+    return f"harness-run-{run_id}"
 
 
 class MetaHarness:
@@ -244,6 +254,22 @@ class MetaHarness:
                     external_isolation=(
                         env_bool("MEMORIZZ_PI_EXTERNAL_ISOLATION")
                         or bool(pi.get("external_isolation", False))
+                    ),
+                )
+            )
+        droid = dict(adapter_config.get("droid") or {})
+        if droid.get("enabled", True):
+            adapters.append(
+                DroidHarness(
+                    command=os.getenv(
+                        "MEMORIZZ_DROID_COMMAND", droid.get("command") or "droid"
+                    ),
+                    default_model=os.getenv("MEMORIZZ_DROID_MODEL")
+                    or droid.get("model")
+                    or None,
+                    external_isolation=(
+                        env_bool("MEMORIZZ_DROID_EXTERNAL_ISOLATION")
+                        or bool(droid.get("external_isolation", False))
                     ),
                 )
             )
@@ -942,6 +968,20 @@ class MetaHarness:
         }
         if task.agent_id:
             server_env["MEMORIZZ_MCP_SERVER_AGENT_IDS"] = task.agent_id
+        # The run reads and writes the memory it was given, and no other.
+        # Given none, it gets a private one of its own rather than every
+        # memory of the user. Named extras are read-only.
+        if task.permissions.mcp_memory_scope == "run":
+            server_env["MEMORIZZ_MCP_SERVER_MEMORY_IDS"] = str(
+                task.memory_id or private_memory_id(task.run_id)
+            )
+            readable = [
+                value
+                for value in task.permissions.mcp_read_memory_ids
+                if value != task.memory_id
+            ]
+            if readable:
+                server_env["MEMORIZZ_MCP_SERVER_READ_MEMORY_IDS"] = ",".join(readable)
         # Some hosts start MCP servers with a bare environment. These settings
         # are paths and names, never secrets, and keep the same memory store,
         # credentials and cached tool lists in reach. Connection strings stay
@@ -1366,6 +1406,7 @@ class MetaHarness:
                     "query": memory_query,
                     "strategy": strategy,
                     "memory_id": task.memory_id,
+                    "read_memory_ids": list(task.permissions.mcp_read_memory_ids),
                     "user_id": task.user_id,
                     "thread_id": task.thread_id,
                     "context_agent_id": context_agent_id,
@@ -1417,6 +1458,51 @@ class MetaHarness:
             },
         )
 
+    def _with_read_memories(self, pack, task: HarnessTask, memory_query: str):
+        """Add what the run's read-only memories hold on the question."""
+        extras = [
+            value
+            for value in task.permissions.mcp_read_memory_ids
+            if value != task.memory_id
+        ]
+        if not extras:
+            return pack
+        from .models import HarnessContextPack
+
+        rendered = [pack.rendered] if pack.rendered else []
+        records, sources = list(pack.records), list(pack.source_ids)
+        tokens, truncated = pack.token_estimate, pack.truncated
+        for memory_id in extras:
+            more = self.context_builder.build(
+                memory_query,
+                memory_id=memory_id,
+                user_id=task.user_id,
+                thread_id=None,
+            )
+            fresh = [
+                (record, source)
+                for record, source in zip(more.records, more.source_ids)
+                if source not in sources
+            ]
+            if not fresh:
+                continue
+            # The standing line about treating memory as context is said once.
+            body = more.rendered.split("\n\n", 1)[-1] if rendered else more.rendered
+            rendered.append(f"From the read-only memory {memory_id!r}:\n{body}")
+            records += [record for record, _ in fresh]
+            sources += [source for _, source in fresh]
+            tokens += more.token_estimate
+            truncated = truncated or more.truncated
+        return HarnessContextPack(
+            query=pack.query,
+            rendered="\n\n".join(rendered),
+            records=records,
+            source_ids=sources,
+            token_estimate=tokens,
+            truncated=truncated,
+            metadata={**dict(pack.metadata or {}), "read_memory_ids": extras},
+        )
+
     @staticmethod
     def _context_agent_id(task: HarnessTask) -> str:
         return str(
@@ -1428,6 +1514,22 @@ class MetaHarness:
     def _build_context_pack(
         self, task: HarnessTask, memory_query: str, *, strategy: str
     ):
+        if not task.memory_id and task.permissions.mcp_memory_scope == "run":
+            # Given no memory, the run is private: it starts with nothing
+            # from anyone else's, only what its read-only memories hold.
+            from .models import HarnessContextPack
+
+            pack = self._with_read_memories(
+                HarnessContextPack(query=memory_query), task, memory_query
+            )
+            pack.metadata.update(
+                {
+                    "strategy": "private",
+                    "context_agent_id": self._context_agent_id(task),
+                    "shared_context_reused": False,
+                }
+            )
+            return pack
         if strategy == "evidence_pack" and self.memory_provider is not None:
             plane = self._learning_plane(task)
             if plane is not None and getattr(
@@ -1492,6 +1594,7 @@ class MetaHarness:
             user_id=task.user_id,
             thread_id=task.thread_id,
         )
+        pack = self._with_read_memories(pack, task, memory_query)
         pack.metadata.update(
             {
                 "strategy": "retrieval",
@@ -2024,7 +2127,19 @@ class MetaHarness:
         """
         base = task if isinstance(task, HarnessTask) else HarnessTask.from_dict(task)
         prior: List[Dict[str, Any]] = []
-        for run in self.conversation(conversation_id):
+        earlier = self.conversation(conversation_id)
+        # A conversation keeps the memory it could reach: a turn that names
+        # none inherits the read-only memories and scope of the turn before.
+        if earlier and not base.permissions.mcp_read_memory_ids:
+            kept = dict((earlier[-1].get("task") or {}).get("permissions") or {})
+            base.permissions.mcp_read_memory_ids = list(
+                kept.get("mcp_read_memory_ids") or []
+            )
+            if base.permissions.mcp_memory_scope == "run":
+                base.permissions.mcp_memory_scope = str(
+                    kept.get("mcp_memory_scope") or "run"
+                )
+        for run in earlier:
             if not HarnessStatus(run.get("status")).terminal:
                 continue
             events = self.events(run["run_id"], limit=10_000)
@@ -2131,6 +2246,12 @@ class MetaHarness:
         so retrieval, compaction and summaries can use it like any turn."""
         if self.memory_provider is None or not task.memory_id:
             return None
+        if str(handoff.get("status") or "") in UNSAVED_STATUSES and not handoff.get(
+            "files_changed"
+        ):
+            # A run that failed and changed nothing left an error, not an
+            # answer. Later runs sharing this memory should not recall it.
+            return None
         record = handoff_memory_record(
             handoff,
             workflow=workflow,
@@ -2139,6 +2260,7 @@ class MetaHarness:
             agent_id=task.agent_id or "metaharness",
             user_id=task.user_id,
         )
+        self._embed_answer(record)
         try:
             from ..enums.memory_type import MemoryType
 
@@ -2152,7 +2274,69 @@ class MetaHarness:
             # provider must not fail a workflow whose harness work succeeded.
             logger.warning("Could not save harness handoff to memory", exc_info=True)
             return None
+        try:
+            # What the host saw the run do is a fact at once, with no cycle.
+            self.memory_refine.record_outcome(
+                task.memory_id, task.user_id, handoff, task.task
+            )
+        except Exception:
+            logger.warning("Could not save the run's outcome to memory", exc_info=True)
+        # Enough new answers start a refine cycle, when that is turned on.
+        self.memory_refine.maybe_start(task.memory_id, task.user_id)
         return str(stored) if stored else None
+
+    def _embed_answer(self, record: Dict[str, Any]) -> None:
+        """Give a saved answer its vector, so agents that share the memory
+        find it by meaning as they find each other's turns. A provider that
+        embeds what it stores does this itself; without an embedding model
+        the answer is still saved, and found by its words."""
+        if record.get("embedding"):
+            return
+        try:
+            from ..memory_provider.base import provider_manages_embeddings
+
+            if provider_manages_embeddings(self.memory_provider):
+                return
+            text = str(record.get("content") or "").strip()
+            if text:
+                record["embedding"] = self.memory_provider.embed_text(text[:8000])
+        except Exception as exc:
+            logger.debug("A harness answer was saved without a vector: %s", exc)
+
+    # -- the refine cycle of a shared memory ---------------------------------
+
+    @property
+    def memory_refine(self):
+        """The refine cycles of the memories harnesses share
+        (:class:`memorizz.metaharness.memory_refine.HarnessMemoryRefine`)."""
+        if getattr(self, "_memory_refine", None) is None:
+            from .memory_refine import HarnessMemoryRefine
+
+            def task_of(run_id: str) -> str:
+                try:
+                    run = self.get_run(run_id) or {}
+                except Exception:
+                    run = {}
+                return str((run.get("task") or {}).get("task") or "")
+
+            self._memory_refine = HarnessMemoryRefine(
+                self.memory_provider, task_of=task_of
+            )
+        return self._memory_refine
+
+    def refine_memory(
+        self,
+        memory_id: str,
+        *,
+        user_id: Optional[str] = None,
+        dry_run: bool = False,
+        model: Any = None,
+    ) -> Dict[str, Any]:
+        """Distil the raw answers harnesses saved to ``memory_id`` into
+        findings: quoted from the answer, confirmed when a run agrees,
+        replaced when one corrects them. Every raw answer is kept.
+        ``dry_run`` plans and changes nothing."""
+        return self.memory_refine.run(memory_id, user_id, dry_run=dry_run, model=model)
 
     @staticmethod
     def _stage_permissions(

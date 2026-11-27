@@ -7,12 +7,14 @@ import importlib.util
 import json
 import logging
 import os
+import pickle
 import re
 import sqlite3
 import sys
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -111,6 +113,79 @@ class FileSystemConfig:
     def __post_init__(self) -> None:
         self.root_path = Path(self.root_path).expanduser().resolve()
         self.embedding_config = self.embedding_config or {}
+
+
+def _document_cache_bytes() -> int:
+    try:
+        megabytes = float(os.environ.get("MEMORIZZ_FS_DOCUMENT_CACHE_MB", "256"))
+    except ValueError:
+        megabytes = 256.0
+    return int(max(0.0, megabytes) * 1024 * 1024)
+
+
+class _DocumentCache:
+    """Parsed documents, kept while their files are unchanged.
+
+    A page of the console lists a store several times, and each listing
+    read and parsed every file again. An entry is the document pickled after
+    parsing, stamped with its file's write time, size and inode; a read that
+    finds the same stamp unpickles a fresh copy (cheaper than reading and
+    parsing the file, and nothing a caller does to its copy reaches another).
+    Bounded by total size; the least recently read go first.
+    """
+
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max(0, int(max_bytes))
+        self._entries: "OrderedDict[Tuple[Any, str], Tuple[Any, bytes]]" = OrderedDict()
+        self._bytes = 0
+        self._lock = threading.Lock()
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, memory_type: Any, document_id: str, version: Any) -> Optional[Any]:
+        if not self.max_bytes:
+            return None
+        key = (memory_type, document_id)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None or entry[0] != version:
+                self.misses += 1
+                return None
+            self._entries.move_to_end(key)
+            self.hits += 1
+            data = entry[1]
+        return pickle.loads(data)
+
+    def put(self, memory_type: Any, document_id: str, version: Any, doc: Any) -> None:
+        if not self.max_bytes:
+            return
+        try:
+            data = pickle.dumps(doc, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception:
+            return
+        if len(data) > self.max_bytes // 8:
+            return
+        key = (memory_type, document_id)
+        with self._lock:
+            previous = self._entries.pop(key, None)
+            if previous is not None:
+                self._bytes -= len(previous[1])
+            self._entries[key] = (version, data)
+            self._bytes += len(data)
+            while self._bytes > self.max_bytes and self._entries:
+                _, dropped = self._entries.popitem(last=False)
+                self._bytes -= len(dropped[1])
+
+    def forget(self, memory_type: Any, document_id: str) -> None:
+        with self._lock:
+            previous = self._entries.pop((memory_type, document_id), None)
+            if previous is not None:
+                self._bytes -= len(previous[1])
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._bytes = 0
 
 
 class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
@@ -240,6 +315,9 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
         # (mtime_ns, size) of index.json at the last read/write per store, so a
         # read path can notice another process's write with one stat() call.
         self._index_signatures: Dict[MemoryType, Any] = {}
+        # Parsed documents, reused while their files are unchanged.
+        # MEMORIZZ_FS_DOCUMENT_CACHE_MB sizes it; 0 turns it off.
+        self._document_cache = _DocumentCache(_document_cache_bytes())
         self._locks: Dict[MemoryType, threading.RLock] = {
             memory_type: threading.RLock() for memory_type in MemoryType
         }
@@ -1090,8 +1168,17 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
             # An id that cannot name a file inside the store is a plain miss
             # for readers; only writers reject it loudly.
             return None
-        if not file_path.exists():
+        try:
+            stat = file_path.stat()
+        except OSError:
+            self._document_cache.forget(memory_type, document_id)
             return None
+        # A file is rewritten by replacing it, so the same inode, size and
+        # write time mean the same contents: parse it once, hand out copies.
+        version = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+        cached = self._document_cache.get(memory_type, document_id, version)
+        if cached is not None:
+            return cached
         try:
             with file_path.open("r", encoding="utf-8") as handle:
                 doc = json.load(handle)
@@ -1102,7 +1189,6 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
             ):
                 # Agents saved before created_at was recorded: use the file's
                 # creation time (macOS/BSD), else its last write.
-                stat = file_path.stat()
                 created = getattr(stat, "st_birthtime", None) or stat.st_mtime
                 doc["created_at"] = datetime.fromtimestamp(
                     created, timezone.utc
@@ -1115,6 +1201,7 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
                 and "associated_thread_ids" not in doc
             ):
                 doc["associated_thread_ids"] = doc.pop("associated_conversation_ids")
+            self._document_cache.put(memory_type, document_id, version, doc)
             return doc
         except Exception as exc:
             logger.warning("Failed to read %s: %s", file_path, exc)

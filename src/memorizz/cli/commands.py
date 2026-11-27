@@ -168,7 +168,16 @@ def cmd_provider(session, args: str):
     if not name:
         console.print(f"Provider: [cyan]{session.provider_name}[/cyan]")
         console.print("Available providers:")
-        for prov in ("openai", "anthropic", "ollama", "azure", "huggingface", "mlx"):
+        for prov in (
+            "openai",
+            "anthropic",
+            "gemini",
+            "ollama",
+            "azure",
+            "huggingface",
+            "mlx",
+            "openrouter",
+        ):
             console.print(f"  • {prov}")
         console.print("Usage: /provider <name>")
         return
@@ -242,7 +251,7 @@ def cmd_web(session, args: str):
         except Exception:
             name = None
         console.print(f"Internet access: [cyan]{name or 'off'}[/cyan]")
-        console.print("Usage: /web on | off | tavily | firecrawl | open <url>")
+        console.print("Usage: /web on | off | tavily | firecrawl | exa | open <url>")
         return
 
     if sub in ("off", "false", "no", "0"):
@@ -297,7 +306,7 @@ def cmd_web(session, args: str):
         if provider is None or getattr(provider, "provider_name", None) == "offline":
             console.print(
                 "[yellow]No internet key configured.[/yellow] Add one with "
-                "/login tavily (or /login firecrawl)."
+                "/login tavily (or /login firecrawl, /login exa)."
             )
             return
         agent.with_internet_access_provider(provider)
@@ -307,7 +316,9 @@ def cmd_web(session, args: str):
         console.print(
             f"[red]Could not enable internet access:[/red] {escape(str(exc))}"
         )
-        console.print("Add a key first with /login tavily (or /login firecrawl).")
+        console.print(
+            "Add a key first with /login tavily (or /login firecrawl, /login exa)."
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -1345,10 +1356,13 @@ def cmd_ui(session, args: str):
 _LOGIN_PROVIDERS = [
     ("openai", "OPENAI_API_KEY", "OpenAI — LLM + embeddings"),
     ("anthropic", "ANTHROPIC_API_KEY", "Anthropic — LLM"),
+    ("gemini", "GEMINI_API_KEY", "Google Gemini — LLM"),
     ("azure", "AZURE_OPENAI_API_KEY", "Azure OpenAI"),
+    ("openrouter", "OPENROUTER_API_KEY", "OpenRouter — many models, one key"),
     ("ollama", "", "Ollama Cloud — sign in for ':cloud' models (e.g. glm-5.2:cloud)"),
     ("tavily", "TAVILY_API_KEY", "Tavily — internet search"),
     ("firecrawl", "FIRECRAWL_API_KEY", "Firecrawl — internet search"),
+    ("exa", "EXA_API_KEY", "Exa — internet search"),
     ("browseruse", "BROWSER_USE_API_KEY", "Browser Use — browser-control model"),
     ("voyage", "VOYAGE_API_KEY", "Voyage AI — embeddings"),
     ("notion", "NOTION_TOKEN", "Notion — memory documents and agent views"),
@@ -1473,7 +1487,7 @@ def cmd_login(session, args: str):
 
     # Internet keys take effect immediately: attach the provider to the live
     # agent so the user doesn't also have to run /web.
-    if key_name in ("TAVILY_API_KEY", "FIRECRAWL_API_KEY"):
+    if key_name in ("TAVILY_API_KEY", "FIRECRAWL_API_KEY", "EXA_API_KEY"):
         try:
             provider = agent_factory.make_internet_provider()
             if provider is not None:
@@ -2445,7 +2459,7 @@ COMMANDS: Dict[str, Command] = {
     "web": Command(
         cmd_web,
         "Enable/disable internet access; open a URL.",
-        "/web [on|off|tavily|firecrawl|open <url>]",
+        "/web [on|off|tavily|firecrawl|exa|open <url>]",
     ),
     "browser": Command(
         cmd_browser,

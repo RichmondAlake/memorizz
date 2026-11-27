@@ -5,6 +5,7 @@
 """The inbox bell, the store switcher, first steps on the Overview and the
 actions a table offers for several selected rows."""
 
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -236,6 +237,24 @@ def test_playground_home_opens_on_a_composer_and_hands_the_message_on(client):
     assert playground.index("params.delete('prompt')") < playground.index(
         "if (document.body.dataset.readOnly !== 'true') void sendMessage();"
     )
+    # The page's one action is at its top, not beside the table's heading.
+    assert html.count(">Create agent</a>") == 1
+    assert html.index('class="chat-home-actions"') < html.index('id="chat-home-form"')
+    heading = html.split('class="chat-home-all"')[1].split("</div>")[0]
+    assert "Create agent" not in heading
+    # The model that answers can be changed for the conversation that opens:
+    # it travels as ?model= and the playground runs its messages on it.
+    assert '<select id="chat-home-model" aria-label="Model">' in html
+    assert 'data-provider="' in html
+    assert (
+        '<input type="hidden" name="model" id="chat-home-model-value" disabled>' in html
+    )
+    assert (
+        "params.get('model')" in playground and "pgUseModel(askedModel)" in playground
+    )
+    assert playground.index("pgUseModel(askedModel)") < playground.index(
+        "const handoff = (params.get('prompt') || '').trim();"
+    )
 
 
 @pytest.mark.unit
@@ -395,3 +414,25 @@ def test_tables_get_export_row_menus_a_drawer_and_a_preview_pane():
     assert (
         "/static/js/chat-preview.js" in (UI / "templates/playground.html").read_text()
     )
+
+
+def test_a_sidebar_groups_name_opens_its_page_and_its_list(client):
+    page = client.get("/agents").text
+    agents = re.search(
+        r'<details class="nav-dropdown"[^>]*>\s*<summary[^>]*data-nav-href="/agents".*?</details>',
+        page,
+        re.S,
+    ).group(0)
+    # On the agents page the list is unfolded and the group marks the page.
+    assert re.match(r'<details class="nav-dropdown" open>', agents)
+    assert "nav-dropdown-toggle--page" in agents
+    # The list holds the agents themselves; "All agents" is the group's name.
+    assert "All agents" not in agents and '<a href="/agents"' not in agents
+    assert "data-nav-agent=" in agents
+    assert 'data-nav-href="/memory/knowledge-base"' in page
+
+    script = (UI / "static" / "js" / "app.js").read_text(encoding="utf-8")
+    assert "summary.dataset.navHref" in script
+    # The caret still only folds the list, and search still finds the page.
+    assert 'event.target.closest(".nav-caret")' in script
+    assert "summary[data-nav-href]" in script

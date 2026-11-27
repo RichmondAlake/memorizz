@@ -119,15 +119,90 @@ async def agent_listen(agent_id: str, audio: UploadFile = File(...)):
     return {"text": text}
 
 
+def conversation_brain(agent_id: str, memory_id: str):
+    """Answer a live call inside one playground conversation: each thing
+    said is a turn of that conversation, as if it had been typed there."""
+
+    def reply(said: str) -> str:
+        from ...cli.conversations import latest_thread_id
+        from .playground import _playground_recall_policy
+
+        agent = _load(agent_id)
+        try:
+            options: Dict[str, Any] = {"memory_id": memory_id}
+            try:
+                thread_id = latest_thread_id(
+                    _state["provider"], memory_id, agent_id=agent_id
+                )
+            except Exception:
+                thread_id = None
+            if thread_id:
+                options["thread_id"] = thread_id
+            policy = _playground_recall_policy(agent, memory_id)
+            if policy is not None:
+                options["retrieval_policy"] = policy
+            answer = agent.run(said, **options)
+            # The conversation joins the agent's list, as a typed one does.
+            if memory_id not in (agent.memory_ids or []):
+                agent.memory_ids.append(memory_id)
+                update = getattr(_state["provider"], "update_memagent_memory_ids", None)
+                if callable(update):
+                    update(agent_id, agent.memory_ids)
+            return answer
+        finally:
+            agent.close(close_memory_provider=False)
+
+    return reply
+
+
+def _call_provider(agent: Any) -> Any:
+    """The agent's own voice when it can hold a live call; otherwise LiveKit
+    with its default voice, so any agent can be talked to."""
+    from ...voice import VoiceConfig, create_voice_provider
+
+    own = None
+    if getattr(agent, "voice", False):
+        try:
+            own = agent.voice_provider
+        except Exception:
+            own = None
+    status = own.status() if own is not None else {}
+    if status.get("ready") and status.get("realtime"):
+        return own
+    return create_voice_provider(VoiceConfig(provider="livekit"))
+
+
 @router.post("/api/agents/{agent_id}/voice/session")
-async def agent_voice_session(agent_id: str):
-    """Start a live call; returns what the browser needs to join it."""
+async def agent_voice_session(agent_id: str, request: Request):
+    """Start a live call; returns what the browser needs to join it.
+
+    With a JSON body that has ``memory_id`` (empty for a new conversation)
+    the call is part of that playground conversation and works for an agent
+    without a voice of its own. Without one it is the agent's own voice line.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
     try:
         agent = await asyncio.to_thread(_load, agent_id)
+        name = agent.name or "the agent"
+        if isinstance(body, dict) and "memory_id" in body:
+            memory_id = str(body.get("memory_id") or "").strip() or str(uuid.uuid4())
+            provider = _call_provider(agent)
+            details = await asyncio.to_thread(
+                lambda: provider.realtime_session(
+                    agent_id=agent_id,
+                    agent_name=name,
+                    reply=conversation_brain(agent_id, memory_id),
+                )
+            )
+            details["memory_id"] = memory_id
+            return details
         details = await asyncio.to_thread(
             lambda: agent.voice_provider.realtime_session(
                 agent_id=agent_id,
-                agent_name=agent.name or "the agent",
+                agent_name=name,
                 reply=default_brain(agent_id),
             )
         )
@@ -140,7 +215,10 @@ async def agent_voice_session(agent_id: str):
 async def agent_voice_session_end(agent_id: str, session_id: str):
     try:
         agent = await asyncio.to_thread(_load, agent_id)
-        await asyncio.to_thread(agent.end_voice_session, session_id)
+        # The call may be on the agent's voice or on LiveKit's default one.
+        await asyncio.to_thread(_call_provider(agent).end_realtime_session, session_id)
+        if getattr(agent, "voice", False):
+            await asyncio.to_thread(agent.end_voice_session, session_id)
     except Exception as exc:
         raise _failure(exc) from exc
     return {"ok": True}

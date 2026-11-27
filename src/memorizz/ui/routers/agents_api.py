@@ -276,6 +276,19 @@ async def api_agent_resume(
 ):
     """Consume an approval and resume its serialized checkpoint exactly once."""
     agent = await _load_runtime_agent(agent_id)
+    # What the approved tools found, for the page to show (a table, a card).
+    displays: list = []
+
+    def collect(event):
+        shown = event.get("display") if isinstance(event, dict) else None
+        if isinstance(shown, dict) and shown.get("kind") and shown not in displays:
+            displays.append(shown)
+
+    # Not every runtime agent streams; without a stream there is nothing to
+    # show beyond the result itself.
+    listen = getattr(agent, "set_stream_event_callback", None)
+    if callable(listen):
+        listen(collect)
     try:
         result = await (
             run_in_threadpool(agent.resume_approval, proposal_id)
@@ -287,7 +300,14 @@ async def api_agent_resume(
             )
         )
         payload = result.to_dict() if hasattr(result, "to_dict") else result
-        return {"ok": bool(getattr(result, "ok", True)), "result": payload}
+        return {
+            "ok": bool(getattr(result, "ok", True)),
+            "result": payload,
+            "displays": displays,
+        }
     except Exception as exc:
         logger.error("Failed to resume proposal %s: %s", proposal_id, exc)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        if callable(listen):
+            listen(None)
