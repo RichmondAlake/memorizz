@@ -625,6 +625,7 @@ class MemAgent:
         background_llm_config: Optional[Dict[str, Any]] = None,
         memory_consolidation: Optional[Union[bool, Dict[str, Any]]] = None,
         persona_learning: Optional[Union[bool, Dict[str, Any]]] = None,
+        proactive: Any = None,
         memory_routing: Optional[Union[bool, str, Dict[str, Any]]] = None,
         reranker: Any = None,
         entity_policy: Optional[Union[Dict[str, Any], Any]] = None,
@@ -1030,6 +1031,12 @@ class MemAgent:
         from ..learning.persona_learning import PersonaLearningConfig
 
         self.persona_learning = PersonaLearningConfig.from_value(persona_learning)
+        from ..proactive.policy import ProactivePolicy
+
+        # Whether the agent offers next steps, and how freely it takes them:
+        # see ProactivePolicy. Off unless asked for.
+        self.proactive = ProactivePolicy.from_value(proactive)
+        self._proactive_engine: Any = None
         from ..reranking import RerankerConfig
         from .memory_routing import MemoryRoutingConfig
 
@@ -7400,10 +7407,14 @@ class MemAgent:
                 )
             finally:
                 self._retrieval_policy_override = previous_policy
+        from ..proactive.guard import CAREFUL as _PROACTIVE_CAREFUL
+        from ..proactive.guard import active_guard as _active_proactive_guard
+
         if (
             self.meta_harness is not None
             and self.meta_harness_mode == "runtime"
             and not (tool_context or {}).get("_memorizz_harness_native")
+            and (_active_proactive_guard() or {}).get("mode") != _PROACTIVE_CAREFUL
         ):
             result = self.run_on_harness(
                 query,
@@ -8451,13 +8462,70 @@ class MemAgent:
         query = str(checkpoint.get("query") or "")
         user_id = checkpoint.get("user_id")
 
-        def done(response: Optional[str], stored: Optional[str] = None):
+        def _settle_proactive_suggestion(
+            status: str,
+            *,
+            result_text: Optional[str] = None,
+            new_proposal_id: Optional[str] = None,
+        ) -> None:
+            suggestion_id = str(checkpoint.get("proactive_suggestion") or "").strip()
+            if not suggestion_id:
+                return
+            try:
+                from ..proactive.store import ProactiveStore, utcnow
+
+                pstore = ProactiveStore(
+                    getattr(self, "memory_provider", None), self.agent_id, user_id
+                )
+
+                def _apply(data: Dict[str, Any]) -> None:
+                    for event in data["events"]:
+                        if event.get("id") == suggestion_id:
+                            event["status"] = status
+                            if new_proposal_id is not None:
+                                event["proposal_id"] = new_proposal_id
+                            if result_text is not None:
+                                event["result"] = str(result_text)[:4000]
+                            event["updated_at"] = utcnow()
+                            return
+
+                pstore.update(_apply)
+            except Exception:
+                logger.debug(
+                    "Could not update proactive suggestion after approval resume",
+                    exc_info=True,
+                )
+
+        def done(
+            response: Optional[str],
+            stored: Optional[str] = None,
+            *,
+            chained_proposal: Any = None,
+        ):
             self._persist_workflow_run(workflow)
             self._settle_approval_turn(
                 checkpoint,
                 proposal_id,
                 stored or response or self._approval_decided_note(proposal, decision),
             )
+            if chained_proposal is not None:
+                chained_id = str(getattr(chained_proposal, "proposal_id", "") or "")
+                chained_tool = str(
+                    getattr(chained_proposal, "tool_name", "") or "a tool"
+                )
+                chained_why = str(getattr(chained_proposal, "policy_reason", "") or "")
+                note = f"Waiting for your approval to run {chained_tool}." + (
+                    f" {chained_why}" if chained_why else ""
+                )
+                _settle_proactive_suggestion(
+                    "awaiting_approval",
+                    result_text=note,
+                    new_proposal_id=chained_id,
+                )
+            elif decision == "approved" and response is not None:
+                _settle_proactive_suggestion("done", result_text=response)
+            elif decision == "rejected":
+                _settle_proactive_suggestion("dismissed")
             return ApprovalResumeResult(
                 proposal=proposal,
                 tool_result=tool_result,
@@ -8482,43 +8550,71 @@ class MemAgent:
         ]
         tools = self._build_llm_tools(query, user_id=user_id)
         self._set_provider_cache_scope()
+        from contextlib import nullcontext
+
+        from ..proactive.guard import CAREFUL, OPEN, acting
+        from ..tool_context import reset_tool_context, set_tool_context
+
+        guard = checkpoint.get("proactive_guard")
+        guard_mode = (
+            guard.get("mode")
+            if isinstance(guard, dict) and guard.get("mode") in (CAREFUL, OPEN)
+            else None
+        )
+        guard_cm = (
+            acting(guard_mode, str(guard.get("reason") or ""))
+            if guard_mode
+            else nullcontext()
+        )
+        resume_tc: Dict[str, Any] = {"user_id": user_id}
+        if checkpoint.get("proactive_suggestion"):
+            resume_tc["proactive_suggestion"] = checkpoint["proactive_suggestion"]
+        if guard_mode == CAREFUL:
+            resume_tc["_memorizz_skip_delegation"] = True
+        tc_token = set_tool_context(resume_tc)
         try:
-            for iteration in range(self._get_tool_iteration_limit()):
-                response = self._generate_with_trace(
-                    _to_jsonable(messages),
-                    tools=tools,
-                    iteration=iteration + 1,
-                    stage="approval_resume",
-                )
-                self._record_context_window_usage(
-                    stage=f"approval_resume_{iteration + 1}"
-                )
-                if isinstance(response, str):
-                    return done(response)
-                if hasattr(response, "choices") and response.choices:
-                    message = response.choices[0].message
-                    if not message.tool_calls:
-                        if message.content:
-                            return done(message.content)
-                        return done(
-                            "I couldn't generate a response.",
-                            self._approval_decided_note(proposal, decision),
-                        )
-                    self._append_assistant_tool_calls(messages, message)
-                    self._execute_turn_tool_calls(
-                        message.tool_calls,
-                        messages,
-                        workflow,
-                        user_id,
-                        streaming=False,
-                        query=query,
+            with guard_cm:
+                for iteration in range(self._get_tool_iteration_limit()):
+                    response = self._generate_with_trace(
+                        _to_jsonable(messages),
+                        tools=tools,
+                        iteration=iteration + 1,
+                        stage="approval_resume",
                     )
-                    continue
-                break
+                    self._record_context_window_usage(
+                        stage=f"approval_resume_{iteration + 1}"
+                    )
+                    if isinstance(response, str):
+                        return done(response)
+                    if hasattr(response, "choices") and response.choices:
+                        message = response.choices[0].message
+                        if not message.tool_calls:
+                            if message.content:
+                                return done(message.content)
+                            return done(
+                                "I couldn't generate a response.",
+                                self._approval_decided_note(proposal, decision),
+                            )
+                        self._append_assistant_tool_calls(messages, message)
+                        self._execute_turn_tool_calls(
+                            message.tool_calls,
+                            messages,
+                            workflow,
+                            user_id,
+                            streaming=False,
+                            query=query,
+                        )
+                        continue
+                    break
         except ApprovalRequired as approval:
             # The run reached another guarded call: its waiting note takes
             # the place of this one.
-            return done(self._approval_required_payload(approval.proposal))
+            return done(
+                self._approval_required_payload(approval.proposal),
+                chained_proposal=approval.proposal,
+            )
+        finally:
+            reset_tool_context(tc_token)
         return done(
             "I reached the maximum number of tool-call iterations while resuming.",
             self._approval_decided_note(proposal, decision),
@@ -8658,10 +8754,14 @@ class MemAgent:
                 stacklevel=2,
             )
 
+        from ..proactive.guard import CAREFUL as _PROACTIVE_CAREFUL
+        from ..proactive.guard import active_guard as _active_proactive_guard
+
         if (
             self.meta_harness is not None
             and self.meta_harness_mode == "runtime"
             and not (tool_context or {}).get("_memorizz_harness_native")
+            and (_active_proactive_guard() or {}).get("mode") != _PROACTIVE_CAREFUL
         ):
             yield self.run(
                 query,
@@ -9847,7 +9947,35 @@ class MemAgent:
                 )
             except Exception:
                 pass
+        from ..proactive.guard import active_guard, guarded_policy
+
+        if active_guard() is not None:
+            # A step the agent took on its own: see proactive.guard for which
+            # calls wait for approval.
+            value = guarded_policy(
+                tool_name,
+                value,
+                declared=target is not None or self._tool_declares_policy(tool_name),
+            )
         return value
+
+    def _tool_declares_policy(self, tool_name: str) -> bool:
+        """Whether a tool states its own effects with ``governed_tool``, as
+        opposed to a plain callable, which is given the defaults (no side
+        effects) without anyone having said so."""
+        manager = self.tool_manager
+        if manager is None:
+            return False
+        try:
+            function = manager.get_tool_callable(str(tool_name))
+        except Exception:
+            return False
+        seen = 0
+        while function is not None and seen < 8:
+            if getattr(function, "__memorizz_tool_policy__", None) is not None:
+                return True
+            function, seen = getattr(function, "__wrapped__", None), seen + 1
+        return False
 
     def _tool_cache_key(
         self,
@@ -10268,6 +10396,11 @@ class MemAgent:
                     and policy.get("requires_approval")
                     and not self._approval_execution_active
                 ):
+                    from ..proactive.guard import active_guard as _active_guard
+                    from ..tool_context import get_tool_context
+
+                    _proactive_guard = _active_guard()
+                    _tc = get_tool_context() or {}
                     checkpoint = {
                         "version": 1,
                         "query": query,
@@ -10297,6 +10430,10 @@ class MemAgent:
                             if workflow is not None
                             else None
                         ),
+                        "proactive_guard": (
+                            dict(_proactive_guard) if _proactive_guard else None
+                        ),
+                        "proactive_suggestion": _tc.get("proactive_suggestion"),
                     }
                     if workflow is not None:
                         workflow.awaiting_approval = True
@@ -14564,6 +14701,146 @@ class MemAgent:
     # Persona learning (docs/guides/persona-learning.md)
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Proactive: offering a next step, and taking it
+    # ------------------------------------------------------------------
+
+    def with_proactive(self, level: Any = True, **settings: Any):
+        """Make the agent proactive; see :class:`~memorizz.proactive.ProactivePolicy`.
+
+        ``level`` is ``True`` or ``"low"`` (suggest only), ``"medium"`` (also
+        carry out steps that change nothing), ``"high"`` (carry out steps with
+        any tool; a tool that needs approval still waits), ``"ultra"`` (high,
+        and predict steps from the user's habits; experimental), or ``False``
+        to turn it off. ``settings`` are the policy's other fields, such as
+        ``scan_tools``, ``daily_actions`` and ``predict``. Returns the agent.
+        """
+        from ..proactive.policy import ProactivePolicy
+
+        policy = ProactivePolicy.from_value(level)
+        if settings:
+            policy = ProactivePolicy.from_value({**policy.to_dict(), **settings})
+        self.proactive = policy
+        if not policy.enabled and self._proactive_engine is not None:
+            self._proactive_engine.stop()
+        return self
+
+    @property
+    def proactive_engine(self) -> Any:
+        """The :class:`~memorizz.proactive.ProactiveEngine` of this agent."""
+        if self._proactive_engine is None:
+            from ..proactive.engine import ProactiveEngine
+
+            self._proactive_engine = ProactiveEngine(self)
+        return self._proactive_engine
+
+    def suggest(
+        self,
+        activity: Any = None,
+        *,
+        memory_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        trigger: str = "view",
+        force: bool = False,
+    ) -> List[Any]:
+        """Ask the agent whether it has a next step to offer.
+
+        ``activity`` is what the user is doing: a string, or a dict with
+        ``title``, ``text``, ``url`` and ``kind``. With none, the agent goes
+        by the conversation in ``memory_id`` (and ``thread_id``). Returns a
+        list of at most one :class:`~memorizz.proactive.Suggestion`; an empty
+        list means it stayed quiet, or was not due (see ``proactive_status``).
+        At ``medium`` and ``high`` the suggestion may already be carried out:
+        its ``status`` is then ``done`` or ``awaiting_approval``.
+        """
+        return self.proactive_engine.suggest(
+            activity,
+            memory_id=memory_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            trigger=trigger,
+            force=force,
+        )
+
+    def suggestions(
+        self,
+        *,
+        status: Optional[str] = None,
+        limit: int = 20,
+        user_id: Optional[str] = None,
+    ) -> List[Any]:
+        """Suggestions this agent has made, newest first."""
+        return self.proactive_engine.list(status=status, limit=limit, user_id=user_id)
+
+    def accept_suggestion(
+        self,
+        suggestion_id: str,
+        *,
+        run: bool = True,
+        user_id: Optional[str] = None,
+        memory_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+    ) -> Any:
+        """Say yes to a suggestion; the agent carries it out as a turn."""
+        return self.proactive_engine.accept(
+            suggestion_id,
+            run=run,
+            user_id=user_id,
+            memory_id=memory_id,
+            thread_id=thread_id,
+        )
+
+    def dismiss_suggestion(
+        self, suggestion_id: str, user_id: Optional[str] = None
+    ) -> Any:
+        """Say no to a suggestion; it is not offered again."""
+        return self.proactive_engine.dismiss(suggestion_id, user_id=user_id)
+
+    def snooze_suggestions(
+        self, seconds: Optional[int] = None, user_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Not now: no suggestions for ``seconds`` (an hour by default)."""
+        return self.proactive_engine.snooze(seconds, user_id=user_id)
+
+    def on_suggestion(self, callback: Callable[[Any], None]) -> Callable[[], None]:
+        """Call ``callback`` with each suggestion offered or carried out."""
+        return self.proactive_engine.on_suggestion(callback)
+
+    def proactive_status(self, user_id: Optional[str] = None) -> Dict[str, Any]:
+        """Level, today's allowance, snooze and what deciding has cost."""
+        return self.proactive_engine.status(user_id)
+
+    def proactive_tick(
+        self,
+        *,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """One scan with nobody asking; call it on any schedule. ``force``
+        scans now, whatever the schedule and the allowance say."""
+        return self.proactive_engine.tick(
+            memory_id=memory_id, user_id=user_id, force=force
+        )
+
+    def start_proactive(
+        self,
+        *,
+        interval: Optional[float] = None,
+        memory_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> None:
+        """Scan in the background of this process until ``stop_proactive``."""
+        self.proactive_engine.start(
+            interval=interval, memory_id=memory_id, user_id=user_id
+        )
+
+    def stop_proactive(self) -> None:
+        """Stop the background scan started by ``start_proactive``."""
+        if self._proactive_engine is not None:
+            self._proactive_engine.stop()
+
     def with_persona_learning(self, enabled: bool = True, **settings: Any):
         """Grow the persona from conversations and memories, off the turn.
 
@@ -16190,6 +16467,7 @@ class MemAgent:
                 if self.persona_learning.enabled
                 else None
             ),
+            "proactive": (self.proactive.to_dict() if self.proactive.enabled else None),
             "memory_routing": (
                 self.memory_routing.to_dict() if self.memory_routing.enabled else None
             ),

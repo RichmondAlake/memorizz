@@ -48,6 +48,8 @@ class MemAgentModel(BaseModel):
     memory_consolidation: Optional[Dict[str, Any]] = None
     # Persona learning settings (PersonaLearningConfig); None = off.
     persona_learning: Optional[Dict[str, Any]] = None
+    # Proactive settings (ProactivePolicy); None = not proactive.
+    proactive: Optional[Dict[str, Any]] = None
     # Voice: whether the agent speaks, and its VoiceConfig (provider, voice,
     # models). Never credentials: those come from the environment.
     voice: Optional[bool] = False

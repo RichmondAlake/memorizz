@@ -410,6 +410,26 @@ def automations_run(
     raise typer.Exit(0 if ok else 1)
 
 
+proactive_app = typer.Typer(help="Proactive agents: the scanning worker.")
+app.add_typer(proactive_app, name="proactive")
+
+
+@proactive_app.command(
+    "run", help="Scan saved proactive agents on their schedule, with nobody asking."
+)
+def proactive_run(
+    poll_interval: int = typer.Option(30, "--poll-interval"),
+    once: bool = typer.Option(False, "--once", help="Scan what is due, then exit."),
+    agent: Optional[List[str]] = typer.Option(
+        None, "--agent", help="Only this agent ID (repeatable)."
+    ),
+):
+    from .operations import run_proactive
+
+    ok = run_proactive(poll_interval=poll_interval, once=once, agent_ids=agent)
+    raise typer.Exit(0 if ok else 1)
+
+
 # --------------------------------------------------------------------------- #
 # Build / wizard helpers
 # --------------------------------------------------------------------------- #

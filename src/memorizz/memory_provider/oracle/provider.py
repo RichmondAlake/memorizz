@@ -7293,9 +7293,29 @@ class OracleProvider(
             ordinary = [
                 f"COALESCE({jv('record_type')}, ' ') "
                 "NOT LIKE 'observability\\_%' ESCAPE '\\'",
+                f"COALESCE({jv('record_type')}, ' ') <> 'proactive_state'",
                 *predicates,
             ]
             branches.append("(" + " AND ".join(ordinary) + ")")
+        if user_id is not _UNSET or agents:
+            proactive = [f"{jv('record_type')} = 'proactive_state'"]
+            if user_id is not _UNSET:
+                if user_id is None:
+                    proactive.append(f"{jv('user_id')} IS NULL")
+                else:
+                    proactive.append(f"{jv('user_id')} = :scope_user_id")
+                    params["scope_user_id"] = user_id
+            if agents:
+                binds = []
+                for index, agent_id in enumerate(agents):
+                    key = f"scope_agent_{index}"
+                    binds.append(f":{key}")
+                    params[key] = agent_id
+                proactive.append(
+                    f"COALESCE({jv('agent_id')}, owner_agent_id) "
+                    f"IN ({', '.join(binds)})"
+                )
+            branches.append("(" + " AND ".join(proactive) + ")")
         if not keep_traces:
             traced = [trace_type]
             if memory_id is not None:
@@ -8485,6 +8505,23 @@ class OracleProvider(
 
             for memory_id in dict.fromkeys(memagent.memory_ids or []):
                 self.delete_memory_units(memory_id, agent_id=agent_id)
+            try:
+                jv = self._observability_json_value
+                with self._get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        f"DELETE FROM {self._get_table_name(MemoryType.SHARED_MEMORY)} "
+                        f"WHERE {jv('record_type')} = 'proactive_state' "
+                        f"AND COALESCE({jv('agent_id')}, owner_agent_id) = :agent_id",
+                        {"agent_id": str(agent_id)},
+                    )
+                    conn.commit()
+            except Exception as exc:
+                logger.debug(
+                    "Proactive records for %s were not removed on cascade: %s",
+                    agent_id,
+                    exc,
+                )
 
         return self.delete_by_id(agent_id, MemoryType.MEMAGENT)
 

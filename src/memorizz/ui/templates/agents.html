@@ -127,6 +127,8 @@
                         <a href="/agents/{{ agent_id_value }}/playground">{{ agent_display_name }}</a>
                         <span class="fleet-id">{{ agent_id_value[:8] }}</span>
                         {% if agent.self_aware %}<a class="pill pill--info" href="/agents/{{ agent_id_value }}/source" title="This agent can read and change its own code">Self-aware</a>{% endif %}
+                        {% set pro = proactive_badge(agent) %}
+                        {% if pro.enabled %}<a class="pill pill--info fleet-proactive" href="/agents/{{ agent_id_value }}/playground" title="{{ pro.title }} Change the level in the playground.">{{ pro.label }}</a>{% endif %}
                         {% set obs = observability_link(agent) %}
                         {% if obs.enabled and obs.external and obs.url %}<a class="pill pill--info fleet-observability" href="{{ obs.url }}" target="_blank" rel="noopener noreferrer" title="This agent's traces are also sent to {{ obs.label }}. Open them there.">{{ obs.label }} ↗</a>{% elif not obs.enabled %}<span class="pill fleet-observability" title="Observability is off for this agent: its turns leave no traces">Not traced</span>{% endif %}
                         {% if agent_copies.get(agent_id_value, 1) > 1 %}<span class="pill pill--warning fleet-copies" title="{{ agent_copies[agent_id_value] }} stored records share this agent ID">{{ agent_copies[agent_id_value] }} copies</span>{% endif %}

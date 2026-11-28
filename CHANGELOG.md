@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Proactive agents.** `MemAgent(proactive=...)` and
+  `MemAgentBuilder.with_proactive(...)` make an agent offer a next step, and
+  at higher levels take it. `True` or `"low"` suggests only; `"medium"` also
+  carries out steps whose tools change nothing; `"high"` carries out its
+  steps with any tool, and a tool that needs approval still pauses;
+  `"ultra"` is `"high"` plus an experimental mode that predicts a step from
+  the user's habits. Off unless asked for, and saved with the agent.
+  - **Suggestions in the SDK**: `agent.suggest()`, `suggestions()`,
+    `accept_suggestion()`, `dismiss_suggestion()`, `snooze_suggestions()`,
+    `on_suggestion()` and `proactive_status()`. A `Suggestion` carries its
+    title, message, the request it would run, the evidence it rests on,
+    whether the agent asked or acted, and why.
+  - **What runs alone is decided by each tool, not the model.** A step the
+    agent takes is an ordinary turn in which a tool with side effects (at
+    `medium`), or one that declares nothing about itself, pauses as a durable
+    approval. No level skips an approval a tool asks for.
+  - **Scanning**: `proactive_tick()`, `start_proactive()` and the
+    `memorizz proactive run` worker look for a step with nobody asking, and
+    can read the agent's connected read-only tools while they do
+    (`scan=True` or `scan_tools`). A step that came from something the agent
+    read outside is only suggested, at every level, unless
+    `allow_external_actions` is set.
+  - **In the playground**: a Proactive control above the message box, and a
+    card for each suggestion with Do it, Not now and Dismiss. A step the
+    agent took shows as Done for you; one waiting on a tool shows as Waiting
+    for your approval, and is approved or rejected on the card. A proactive
+    agent wears a Proactive badge naming its level, in the playground and in
+    the Agents list.
+  - Each look is a short run of about three model calls, behind a cooldown, a
+    daily allowance and a check that the context has changed. See
+    [Proactive Agents](docs/guides/proactive-agents.md).
+- A second workshop notebook, `examples/workshop/02_proactive_agent.ipynb`.
+
 ## 0.17.28 — 2026-11-28
 
 ### Changed behaviour

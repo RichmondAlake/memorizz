@@ -69,6 +69,7 @@ class MemAgentBuilder:
         self._background_model: Any = None
         self._memory_consolidation: Any = None
         self._persona_learning: Any = None
+        self._proactive: Any = None
         self._voice: bool = False
         self._voice_config: Any = None
         self._observability: Any = None
@@ -530,6 +531,20 @@ class MemAgentBuilder:
         self._memory_consolidation = {**settings, "enabled": enabled}
         return self
 
+    def with_proactive(self, level: Any = True, **settings: Any) -> "MemAgentBuilder":
+        """Have the agent offer next steps, and take them at higher levels.
+
+        ``level`` is ``True``/``"low"``, ``"medium"``, ``"high"`` or
+        ``"ultra"``; ``settings`` are other ``ProactivePolicy`` fields.
+        """
+        from ...proactive.policy import ProactivePolicy
+
+        policy = ProactivePolicy.from_value(level)
+        if settings:
+            policy = ProactivePolicy.from_value({**policy.to_dict(), **settings})
+        self._proactive = policy
+        return self
+
     def with_persona_learning(
         self, enabled: bool = True, **settings: Any
     ) -> "MemAgentBuilder":
@@ -763,6 +778,7 @@ class MemAgentBuilder:
                 ),
                 memory_consolidation=self._memory_consolidation,
                 persona_learning=self._persona_learning,
+                proactive=self._proactive,
                 voice=self._voice,
                 voice_config=self._voice_config,
                 observability=self._observability,

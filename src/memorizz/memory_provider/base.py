@@ -321,18 +321,34 @@ def delete_scope_matches(
     if fields is None:
         return False
     agents = set(agent_ids or ())
-    if store == "shared_memory" and is_trace_record(row, store):
+    if store == "shared_memory":
         from ..observability.normalization import read_payload
 
         payload = read_payload(row) or {}
-        values = (
-            row.get("trace_memory_id")
-            or payload.get("trace_memory_id")
-            or payload.get("memory_id"),
-            row.get("user_id", payload.get("user_id")),
-            row.get("agent_id") or payload.get("agent_id") or row.get("owner_agent_id"),
-        )
-        present = (True, True, True)
+        record_type = row.get("record_type") or payload.get("record_type")
+        if str(record_type or "").startswith(TRACE_RECORD_PREFIX):
+            values = (
+                row.get("trace_memory_id")
+                or payload.get("trace_memory_id")
+                or payload.get("memory_id"),
+                row.get("user_id", payload.get("user_id")),
+                row.get("agent_id")
+                or payload.get("agent_id")
+                or row.get("owner_agent_id"),
+            )
+            present = (True, True, True)
+        elif record_type == "proactive_state":
+            values = (
+                None,
+                row.get("user_id", payload.get("user_id")),
+                row.get("agent_id")
+                or payload.get("agent_id")
+                or row.get("owner_agent_id"),
+            )
+            present = (False, True, True)
+        else:
+            values = tuple(row.get(field) if field else None for field in fields)
+            present = tuple(bool(field) for field in fields)
     else:
         values = tuple(row.get(field) if field else None for field in fields)
         present = tuple(bool(field) for field in fields)

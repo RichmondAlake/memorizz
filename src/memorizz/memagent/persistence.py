@@ -189,6 +189,11 @@ def save_agent(agent):
                 if agent.persona_learning.enabled
                 else None
             ),
+            proactive=(
+                agent.proactive.to_dict()
+                if getattr(getattr(agent, "proactive", None), "enabled", False)
+                else None
+            ),
             voice=bool(getattr(agent, "voice", False)),
             voice_config=getattr(agent, "voice_config", None),
             observability=bool(getattr(agent, "observability", True)),
@@ -839,6 +844,7 @@ def _saved_settings(saved_memagent: Any) -> Dict[str, Any]:
         "background_llm_config": _dict_or_none(field("background_llm_config")),
         "memory_consolidation": _dict_or_none(field("memory_consolidation")),
         "persona_learning": _dict_or_none(field("persona_learning")),
+        "proactive": _dict_or_none(field("proactive")),
         "voice": bool(field("voice")),
         "voice_config": _saved_voice_config(field("voice_config")),
         # Records saved before the switch existed have no value: traces on.
@@ -1221,6 +1227,12 @@ def _refresh_persona(agent, persona) -> None:
         agent.set_persona(persona, save=False)
 
 
+def _refresh_proactive(agent, proactive) -> None:
+    from ..proactive.policy import ProactivePolicy
+
+    agent.proactive = ProactivePolicy.from_value(proactive)
+
+
 def _refresh_persona_learning(agent, persona_learning) -> None:
     from ..learning.persona_learning import PersonaLearningConfig
 
@@ -1534,6 +1546,7 @@ _REFRESH_STEPS: Tuple[Tuple[Tuple[str, ...], Callable[..., None]], ...] = (
     (("tools",), _code_owned),
     (("persona",), _refresh_persona),
     (("persona_learning",), _refresh_persona_learning),
+    (("proactive",), _refresh_proactive),
     (("voice", "voice_config"), _refresh_voice),
     (("observability", "observability_provider"), _refresh_observability),
     (

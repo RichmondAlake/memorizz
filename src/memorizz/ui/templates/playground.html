@@ -5,7 +5,7 @@
 {% block body_attrs %} class="page-playground" data-sidebar-scope="playground" data-sidebar-default="collapsed"{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="/static/css/playground.css?v=37">
+<link rel="stylesheet" href="/static/css/playground.css?v=40">
 <link rel="stylesheet" href="/static/css/pages/memory-evolution.css?v=8">
 <script src="/static/js/memory-evolution.js?v=8" defer></script>
 <script src="/static/js/context-history.js?v=2" defer></script>
@@ -18,6 +18,7 @@
 <script src="/static/js/playground-call.js?v=1" defer></script>
 <script src="/static/js/local-models.js?v=1"></script>
 <script src="/static/js/playground-timers.js?v=1" defer></script>
+<script src="/static/js/playground-proactive.js?v=4" defer></script>
 <script src="/static/js/playground-displays.js?v=7"></script>
 <link rel="stylesheet" href="/static/css/pages/harnesses.css?v=31">
 <script src="/static/js/harness-trajectory.js?v=16"></script>
@@ -274,6 +275,8 @@
                 <h1><button type="button" class="pg-agent-name" id="pg-agent-name" data-mutates onclick="pgStartAgentRename()" title="Rename this agent"><span class="pg-agent-name-text">{{ agent_title }}</span><span class="sr-only"> (rename)</span><svg class="pg-agent-name-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button></h1>
                 <button type="button" class="pg-model-chip" onclick="pgOpenSettingsGroup('model', 'cfg-llm-provider')" title="{{ llm_provider }} / {{ llm_model }} · change the model in Settings">{{ llm_model }}</button>
                 {% if self_aware %}<a class="pg-model-chip pg-aware-chip" href="/agents/{{ agent.agent_id }}/source" title="This agent can read and change its own code. Open its source, versions and fixes.">{{ self_aware_label }}</a>{% endif %}
+                {% set pro = proactive_badge(agent) %}
+                <button type="button" class="pg-model-chip pg-aware-chip pg-proactive-chip" id="pg-proactive-chip" data-level="{{ pro.level }}" title="{{ pro.title }}{% if pro.enabled %} Change the level below the conversation.{% endif %}"{% if not pro.enabled %} hidden{% endif %}>{{ pro.label }}</button>
             </div>
             <div class="pg-topbar-actions">
                 <form method="post" action="/agents/{{ agent.agent_id }}/favorite" class="playground-favorite-form">
@@ -309,6 +312,22 @@
 
         <div class="pg-composer-wrap">
             <div class="pg-timers" id="pg-timers" aria-label="Timers" hidden></div>
+            <div class="pg-proactive" id="pg-proactive" aria-label="Proactive suggestions">
+                <div class="pg-proactive-cards" aria-live="polite"></div>
+                <div class="pg-proactive-bar">
+                    <label class="pg-proactive-field" for="pg-proactive-level">Proactive
+                        <select id="pg-proactive-level" class="pg-proactive-select">
+                            <option value="off">Off</option>
+                            <option value="low">Low</option>
+                            <option value="medium">Medium</option>
+                            <option value="high">High</option>
+                        </select>
+                    </label>
+                    <label class="pg-proactive-check" title="Let the agent look at its connected read-only tools for something to act on"><input type="checkbox" id="pg-proactive-scan" disabled> Scan sources</label>
+                    <label class="pg-proactive-check" title="Experimental: suggest from your habits as well as what is in front of it"><input type="checkbox" id="pg-proactive-predict" disabled> Predict <span class="pg-proactive-tag">experimental</span></label>
+                    <span class="pg-proactive-note"></span>
+                </div>
+            </div>
             <div class="pg-call-panel" id="pg-call-panel" role="status" aria-live="polite" hidden>
                 <div class="pg-call-head">
                     <span class="pg-call-dot" aria-hidden="true"></span>
@@ -446,6 +465,7 @@
                     <div><dt>Web search</dt><dd><button type="button" class="pg-fact-link" onclick="pgOpenSettingsGroup('web', 'cfg-internet-provider')">{{ internet_titles.get(internet_provider, internet_provider) if internet_provider else 'Off' }}</button></dd></div>
                     <div><dt>Code sandbox</dt><dd><button type="button" class="pg-fact-link" onclick="pgOpenSettingsGroup('web', 'cfg-sandbox-provider')">{{ {'e2b': 'E2B', 'daytona': 'Daytona', 'graalpy': 'GraalPy'}.get(sandbox_effective, sandbox_effective) if sandbox_effective else 'Off' }}{% if sandbox_effective and not sandbox_provider %} (default){% endif %}</button></dd></div>
                     <div class="pg-facts-wide"><dt>Self-aware</dt><dd>{% if self_aware %}<a href="/agents/{{ agent.agent_id }}/source">{{ self_aware_label|replace('Self-aware · ', 'Yes · ')|replace('Self-aware', 'Yes') }}</a>{% else %}No · <a href="/agents/{{ agent.agent_id }}/source">give it its own source</a>{% endif %}</dd></div>
+                    <div class="pg-facts-wide"><dt>Proactive</dt><dd><button type="button" class="pg-fact-link" id="pg-proactive-fact" title="Change the level below the conversation">{{ pro.label|replace('Proactive · ', '') if pro.enabled else 'Off' }}</button></dd></div>
                     <div class="pg-facts-wide"><dt>Agent ID</dt><dd>{{ id_chip(agent.agent_id|string, 36) }}</dd></div>
                 </dl>
             </section>
@@ -3322,6 +3342,10 @@ function useThreadMemoryId(memoryId, createIfMissing = false) {
     setActiveThreadTab(normalized);
     renderThreadEmptyState(normalized);
     if (window.pgHarnessAccess) window.pgHarnessAccess.render();
+    if (window.pgProactive) {
+        window.pgProactive.clear();
+        window.pgProactive.refresh();
+    }
     void loadThreadMessages(normalized);
     const queryEl = document.getElementById('pg-query');
     if (queryEl) queryEl.focus();

@@ -348,6 +348,14 @@ def capabilities() -> Dict[str, Any]:
                     "memory_routing",
                 ],
             },
+            "proactive": {
+                "available": True,
+                "parameter": "proactive",
+                "levels": ["low", "medium", "high"],
+                "experimental": ["predict"],
+                "off_turn": True,
+                "acts_under": "each tool's declared effects and approval rules",
+            },
             "persona_learning": {
                 "available": True,
                 "parameter": "persona_learning",

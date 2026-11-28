@@ -368,3 +368,56 @@ def run_automations(
             pass
 
     return True
+
+
+def run_proactive(
+    poll_interval: int = 30, once: bool = False, agent_ids: Optional[list] = None
+):
+    """Scan every saved proactive agent when it is due (the headless heartbeat)."""
+    try:
+        from memorizz.cli import agent_factory
+        from memorizz.cli import config as cli_config
+        from memorizz.proactive import run_worker
+    except ImportError as e:
+        print(f"✗ Failed to import: {e}")
+        return False
+
+    cli_config.load_layered_env()
+    warnings: list = []
+    try:
+        provider = agent_factory.detect_memory_provider({}, warnings)
+    except Exception as e:
+        print(f"✗ Failed to configure the memory provider: {e}")
+        return False
+    for warning in warnings:
+        print(f"⚠ {warning}")
+
+    def report(agent_id, result):
+        for suggestion in result.get("suggestions") or []:
+            print(f"{agent_id[:8]}  {result.get('status')}: {suggestion}")
+
+    print(
+        "Proactive worker: scanning saved agents that have proactive set"
+        + ("" if once else f", every {int(poll_interval)}s (Ctrl+C to stop)")
+    )
+    try:
+        ran = run_worker(
+            provider,
+            agent_ids=list(agent_ids) if agent_ids else None,
+            poll_seconds=float(poll_interval),
+            once=once,
+            on_result=report,
+        )
+        if once:
+            print(f"{ran} scan(s) called a model.")
+    except KeyboardInterrupt:
+        return True
+    except Exception as e:
+        print(f"✗ Proactive worker failed: {e}")
+        return False
+    finally:
+        try:
+            provider.close()
+        except Exception:
+            pass
+    return True

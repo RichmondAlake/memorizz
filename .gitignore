@@ -105,11 +105,13 @@ apps/**/src-tauri/target/
 **/.claude/scheduled_tasks.lock
 **/.claude/settings.local.json
 
-# Store written by the continual-learning notebooks
+# Store written by the continual-learning and workshop notebooks
 examples/continual_learning/calderwood_store/
 examples/shared_memory/fern_ember_store/
 examples/shared_memory/fern_ember_home/
 examples/shared_memory/fern_ember_shop/
+my_workshop_agent_store/
+my_proactive_agent_store/
 
 # Simuground: an unreleased UI page kept out of the repository and the
 # published package for now (the UI loads it only when it is present; see

@@ -151,7 +151,29 @@ def _delete_scope_filter(
     if store == "shared_memory":
         trace_type = {"$regex": f"^{TRACE_RECORD_PREFIX}"}
         if plain:
-            branches.append({"$and": [{"record_type": {"$not": trace_type}}, *plain]})
+            branches.append(
+                {
+                    "$and": [
+                        {"record_type": {"$not": trace_type}},
+                        {"record_type": {"$ne": "proactive_state"}},
+                        *plain,
+                    ]
+                }
+            )
+        if user_id is not _UNSET or agents:
+            proactive: List[Dict[str, Any]] = [{"record_type": "proactive_state"}]
+            if user_id is not _UNSET:
+                proactive.append(user_clause("user_id"))
+            if agents:
+                proactive.append(
+                    {
+                        "$or": [
+                            {"agent_id": {"$in": agents}},
+                            {"owner_agent_id": {"$in": agents}},
+                        ]
+                    }
+                )
+            branches.append({"$and": proactive})
         if not keep_traces:
             traced: List[Dict[str, Any]] = [{"record_type": trace_type}]
             if memory_id is not None:
@@ -3281,6 +3303,15 @@ class MongoDBProvider(
             # without a memory_id (personas, toolbox entries) are left alone.
             for memory_id in memagent.memory_ids or []:
                 self.delete_memory_units(memory_id, agent_id=agent_id)
+            self.shared_memory_collection.delete_many(
+                {
+                    "record_type": "proactive_state",
+                    "$or": [
+                        {"owner_agent_id": str(agent_id)},
+                        {"agent_id": str(agent_id)},
+                    ],
+                }
+            )
 
         try:
             result = self.memagent_collection.delete_one(

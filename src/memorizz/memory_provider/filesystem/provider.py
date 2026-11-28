@@ -958,6 +958,18 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
             memagent = self.retrieve_memagent(agent_id)
             for memory_id in (memagent.memory_ids if memagent else None) or []:
                 self.delete_memory_units(memory_id, agent_id=agent_id)
+            for row in list(self.list_all(MemoryType.SHARED_MEMORY) or []):
+                if (
+                    isinstance(row, dict)
+                    and row.get("record_type") == "proactive_state"
+                    and (
+                        row.get("owner_agent_id") == agent_id
+                        or row.get("agent_id") == agent_id
+                    )
+                ):
+                    row_id = row.get("_id") or row.get("id") or row.get("memory_id")
+                    if row_id:
+                        self.delete_by_id(str(row_id), MemoryType.SHARED_MEMORY)
         return self.delete_by_id(agent_id, MemoryType.MEMAGENT)
 
     def update_memagent_memory_ids(self, agent_id: str, memory_ids: List[str]) -> bool:

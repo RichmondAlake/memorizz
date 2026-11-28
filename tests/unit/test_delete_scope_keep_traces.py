@@ -382,7 +382,9 @@ def test_mongodb_filters_by_collection():
         ]
     }
     kept = _delete_scope_filter("shared_memory", None, "u1", [], True)
-    assert kept is None, "a user scope never reaches ordinary shared memory"
+    assert kept == {
+        "$and": [{"record_type": "proactive_state"}, {"user_id": "u1"}]
+    }, "a user scope reaches only user-scoped proactive state, never ordinary shared memory"
 
 
 # --- Oracle (fake cursor) -----------------------------------------------------
@@ -451,9 +453,13 @@ def test_oracle_keep_traces_leaves_observability_records_alone():
     )
     assert result["scope"]["keep_traces"] is True
     ((shared, shared_params),) = _delete_sql(cursor, "shared_memory")
-    assert "NOT LIKE 'observability\\_%' ESCAPE '\\'" in shared
-    assert ") OR (" not in shared, "no branch reaches trace records"
-    assert set(shared_params) == {"scope_memory_id", "scope_agent_0"}
+    where = shared.split("WHERE", 1)[1]
+    branches = where.split(") OR (")
+    assert len(branches) == 2
+    assert "NOT LIKE 'observability\\_%' ESCAPE '\\'" in branches[0]
+    assert "LIKE 'observability\\_%' ESCAPE '\\'" not in branches[1]
+    assert "= 'proactive_state'" in branches[1]
+    assert set(shared_params) == {"scope_memory_id", "scope_user_id", "scope_agent_0"}
     ((conversation, conversation_params),) = _delete_sql(cursor, "conversation_memory")
     assert "role <> 'tool' OR COALESCE(JSON_VALUE(content, '$.type'" in conversation
     assert set(conversation_params) == {
@@ -471,9 +477,10 @@ def test_oracle_default_scopes_trace_records_by_their_json():
     provider.delete_scope(memory_id="m1", user_id="u1", agent_ids=["a1"])
     ((shared, params),) = _delete_sql(cursor, "shared_memory")
     where = shared.split("WHERE", 1)[1]
-    ordinary, traced = where.split(") OR (")
+    ordinary, proactive, traced = where.split(") OR (")
     assert "memory_id = :scope_memory_id" in ordinary
     assert "owner_agent_id IN (:scope_agent_0)" in ordinary
+    assert "= 'proactive_state'" in proactive
     assert "LIKE 'observability\\_%' ESCAPE '\\'" in traced
     assert "COALESCE(JSON_VALUE(content, '$.trace_memory_id'" in traced
     assert (
@@ -485,7 +492,7 @@ def test_oracle_default_scopes_trace_records_by_their_json():
     ((conversation, _params),) = _delete_sql(cursor, "conversation_memory")
     assert "trace_bundle" not in conversation
 
-    # A user-only scope reaches trace records but not ordinary shared memory.
+    # A user-only scope reaches proactive and trace records, not ordinary shared memory.
     cursor.calls.clear()
     provider.delete_scope(user_id=None)
     ((shared, params),) = _delete_sql(cursor, "shared_memory")
@@ -493,4 +500,7 @@ def test_oracle_default_scopes_trace_records_by_their_json():
     assert params == {}
     cursor.calls.clear()
     provider.delete_scope(user_id="u1", keep_traces=True)
-    assert _delete_sql(cursor, "shared_memory") == []
+    ((shared_kept, params_kept),) = _delete_sql(cursor, "shared_memory")
+    assert "= 'proactive_state'" in shared_kept
+    assert "observability" not in shared_kept
+    assert params_kept == {"scope_user_id": "u1"}

@@ -442,6 +442,15 @@ body.page-playground .main-content > * {
     border-color: var(--border-glow);
 }
 
+.pg-proactive-chip[hidden] {
+    display: none;
+}
+
+.pg-proactive-chip:hover {
+    color: var(--accent-primary);
+    border-color: var(--accent-primary);
+}
+
 .pg-topbar-actions {
     display: flex;
     flex: none;
@@ -1008,6 +1017,119 @@ body.page-playground .main-content > * {
     width: 0;
     height: 100%;
     background: var(--accent-primary);
+}
+
+/* Proactive: the level control and the suggestion card above the chat box. */
+.pg-proactive {
+    display: grid;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+
+.pg-proactive-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 14px;
+    color: var(--text-secondary);
+    font-size: 12.5px;
+}
+
+.pg-proactive-field,
+.pg-proactive-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+}
+
+.pg-proactive-select {
+    padding: 2px 6px;
+    color: var(--text-primary);
+    font: inherit;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.pg-proactive-tag {
+    padding: 0 6px;
+    font-size: 11px;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+}
+
+.pg-proactive-note {
+    flex: 1 1 220px;
+    min-width: 0;
+}
+
+.pg-suggestion {
+    display: grid;
+    gap: 4px;
+    padding: 12px 14px 12px 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--accent-primary);
+    border-radius: 14px;
+}
+
+.pg-suggestion-kind {
+    color: var(--text-secondary);
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.pg-suggestion-title {
+    color: var(--text-primary);
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.pg-suggestion-message,
+.pg-suggestion-result {
+    color: var(--text-primary);
+    font-size: 14px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
+.pg-suggestion-result {
+    padding: 8px 10px;
+    white-space: pre-wrap;
+    background: var(--bg-primary, transparent);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+}
+
+.pg-suggestion-why {
+    color: var(--text-secondary);
+    font-size: 12.5px;
+}
+
+.pg-suggestion-details {
+    margin-top: 2px;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+}
+
+.pg-suggestion-details summary {
+    cursor: pointer;
+    user-select: none;
+}
+
+.pg-suggestion-details pre {
+    margin: 4px 0 0;
+    font-size: 12px;
+    overflow-x: auto;
+}
+
+.pg-suggestion-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 6px;
 }
 
 .pg-timer.is-finished .pg-timer-label {

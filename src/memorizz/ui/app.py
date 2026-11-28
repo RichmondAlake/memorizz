@@ -1213,6 +1213,9 @@ def create_app(
     from .routers.timers import router as timers_router
 
     app.include_router(timers_router)
+    from .routers.proactive import router as proactive_router
+
+    app.include_router(proactive_router)
     from .routers.exa import router as exa_router
 
     app.include_router(exa_router)

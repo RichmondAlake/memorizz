@@ -85,6 +85,51 @@ def observability_link(agent: Any) -> Dict[str, Any]:
 
 templates.env.globals["observability_link"] = observability_link
 
+#: What each level means, in the words the playground's level control uses.
+_PROACTIVE_BADGE_NOTES = {
+    "low": "This agent suggests a next step. Nothing runs until you say so.",
+    "medium": (
+        "This agent suggests, and takes steps that change nothing by itself. "
+        "Anything that changes something waits for you."
+    ),
+    "high": (
+        "This agent takes its steps by itself. "
+        "A tool that needs approval still waits for you."
+    ),
+    "ultra": (
+        "This agent takes its steps by itself and predicts steps from your "
+        "habits (experimental). A tool that needs approval still waits for you."
+    ),
+}
+
+
+def proactive_badge(agent: Any) -> Dict[str, Any]:
+    """The Proactive badge of an agent, for the pages that show one.
+
+    ``enabled`` is False for an agent that only answers when asked; the badge
+    is then not shown. ``label`` names the level (``Proactive · Medium``) and
+    ``title`` says what that level lets the agent do.
+    """
+    from ..proactive import ProactivePolicy
+
+    try:
+        policy = ProactivePolicy.from_value(_agent_field(agent, "proactive"))
+    except ValueError:
+        # A setting this install cannot read: the agent runs as not proactive.
+        policy = ProactivePolicy.off()
+    if not policy.enabled:
+        return {"enabled": False, "level": "off", "label": "", "title": ""}
+    level = policy.label
+    return {
+        "enabled": True,
+        "level": level,
+        "label": f"Proactive · {level.capitalize()}",
+        "title": _PROACTIVE_BADGE_NOTES.get(level, _PROACTIVE_BADGE_NOTES["low"]),
+    }
+
+
+templates.env.globals["proactive_badge"] = proactive_badge
+
 
 def observability_trace_link(
     agent: Any, sent_to: Any, root_trace_id: Any, started_at: Any = None

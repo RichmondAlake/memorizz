@@ -23,6 +23,7 @@ nav:
       - Safe Parallel Delegation: guides/delegation.md
       - Tools, Safety & Approvals: guides/tools-and-approvals.md
       - Scheduled Automations: guides/automations.md
+      - Proactive Agents: guides/proactive-agents.md
       - Voice: guides/voice.md
       - An Agent's Own Source: guides/self-source.md
       - Agent Modes:
