@@ -141,6 +141,24 @@ class OpenAIEmbeddingProvider(BaseEmbeddingProvider):
                 dimensions,
             )
             self._send_dimensions = False
+        if openai_model:
+            usage = getattr(response, "usage", None)
+            prompt_tokens = getattr(usage, "prompt_tokens", None) or getattr(
+                usage, "total_tokens", None
+            )
+            if isinstance(prompt_tokens, int) and prompt_tokens > 0:
+                try:
+                    from ...observability.usage_hooks import report_auxiliary_usage
+
+                    report_auxiliary_usage(
+                        kind="embedding",
+                        provider="openai",
+                        model=model,
+                        input_tokens=prompt_tokens,
+                        output_tokens=0,
+                    )
+                except Exception:
+                    logger.debug("Reporting embedding usage failed", exc_info=True)
         rows = sorted(response.data, key=lambda row: getattr(row, "index", 0) or 0)
         vectors = [list(row.embedding) for row in rows]
         if openai_model:

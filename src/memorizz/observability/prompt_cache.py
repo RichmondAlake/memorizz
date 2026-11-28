@@ -59,6 +59,42 @@ def add_call_usage(totals, call):
     return totals
 
 
+_SUMMED_USAGE = (
+    "calls",
+    "input_tokens",
+    "output_tokens",
+    "cached_tokens",
+    "cache_write_tokens",
+    "measured_input_tokens",
+    "cache_reported_calls",
+    "cache_hit_calls",
+    "unpriced_calls",
+)
+
+
+def merge_usage(totals, other):
+    """Add one run's usage totals to another's (in place), for a job made of
+    several runs: a coordinator and the delegates it gave work to. Counters
+    and cost are summed and the cache read rate is worked out again."""
+    if not isinstance(other, dict) or not other:
+        return totals
+    for key in _SUMMED_USAGE:
+        value = other.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            totals[key] = (totals.get(key) or 0) + int(value)
+    cost = other.get("cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        totals["cost_usd"] = round(float(totals.get("cost_usd") or 0) + float(cost), 8)
+    measured = totals.get("measured_input_tokens") or 0
+    if "cached_tokens" in totals or "read_percent" in totals:
+        totals["read_percent"] = (
+            round(100 * (totals.get("cached_tokens") or 0) / measured, 1)
+            if measured
+            else None
+        )
+    return totals
+
+
 def _group_warnings(warnings):
     """Collapse repeated drops per model and cause; keep the first event."""
     grouped = {}

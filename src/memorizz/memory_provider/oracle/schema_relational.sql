@@ -122,7 +122,7 @@ CREATE TABLE personas (
     id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
     persona_id VARCHAR2(255) UNIQUE NOT NULL,
     name VARCHAR2(255) NOT NULL,
-    role_type VARCHAR2(50),                   -- 'expert', 'critic', 'coordinator', etc.
+    role_type VARCHAR2(600 CHAR),             -- 'expert', or a role written as a sentence
     background CLOB,
     traits CLOB CHECK (traits IS JSON),       -- JSON array of traits
     expertise CLOB CHECK (expertise IS JSON), -- JSON array of expertise areas

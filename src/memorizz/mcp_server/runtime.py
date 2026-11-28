@@ -2598,6 +2598,8 @@ class MemorizzRuntime:
                 if not values:
                     note = "No semantic matches, so these are keyword matches."
                 values = (values + extra)[:resolved_limit]
+        if resolved_type == MemoryType.CONVERSATION_MEMORY:
+            values = self._with_turn_partners(values, identity)
         result = {
             "ok": True,
             "query": text,
@@ -2609,6 +2611,43 @@ class MemorizzRuntime:
         if note:
             result["note"] = note
         return result
+
+    def _with_turn_partners(
+        self, rows: List[Dict[str, Any]], identity: RequestIdentity
+    ) -> List[Dict[str, Any]]:
+        """Give each conversation message found the other half of its turn.
+
+        A question matches earlier requests far better than their replies, so
+        a search for what was said returned the requests and not the answers.
+        Each hit stays the record it is; a request gains ``turn.reply`` and a
+        reply ``turn.request``, and a turn found by both halves is listed
+        once. A partner this caller may not see is left out.
+        """
+        from ..memagent.utils.whole_turns import with_turn_partners
+
+        read = getattr(
+            self.provider, "retrieve_conversation_history_ordered_by_timestamp", None
+        )
+        if not rows or not callable(read):
+            return rows
+        scoped = _accepts_keyword(read, "user_id")
+
+        def read_thread(memory_id: str, thread_id: str):
+            kwargs: Dict[str, Any] = {"thread_id": thread_id}
+            if scoped:
+                kwargs["user_id"] = identity.principal
+            return read(memory_id, **kwargs)
+
+        try:
+            joined = with_turn_partners(
+                rows,
+                read_thread,
+                visible=lambda row: _document_user_id(row) == identity.principal,
+            )
+        except Exception as exc:
+            logger.debug("Search results left as single messages: %s", exc)
+            return rows
+        return [_json_value(row) for row in joined]
 
     def connector_search(
         self,

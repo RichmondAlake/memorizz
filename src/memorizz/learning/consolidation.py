@@ -337,19 +337,95 @@ class ConsolidationResult:
         }
 
 
+def _model_provider_and_name(model: Any) -> Tuple[str, str]:
+    try:
+        config = (
+            model.get_config() if callable(getattr(model, "get_config", None)) else None
+        )
+    except Exception:
+        config = None
+    provider = ""
+    name = ""
+    if isinstance(config, Mapping):
+        provider = str(config.get("provider") or "").strip().lower()
+        name = str(config.get("model") or config.get("deployment_name") or "").strip()
+    if not name:
+        name = str(getattr(model, "model", "") or "").strip()
+    if not provider:
+        cls_name = type(model).__name__.lower()
+        if "openai" in cls_name:
+            provider = "openai"
+        elif "anthropic" in cls_name or "claude" in cls_name:
+            provider = "anthropic"
+        elif "gemini" in cls_name or "google" in cls_name:
+            provider = "gemini"
+    return provider, name
+
+
+def _emit_background_usage(model: Any, response: Any = None) -> None:
+    from ..observability.usage_hooks import consume_thread_usage, report_auxiliary_usage
+
+    recorded_on_thread, usage = consume_thread_usage(model)
+    if not recorded_on_thread:
+        if response is not None:
+            raw_usage = getattr(response, "usage", None)
+            if isinstance(raw_usage, Mapping):
+                usage = raw_usage
+            elif raw_usage is not None:
+                usage = {
+                    "prompt_tokens": getattr(raw_usage, "prompt_tokens", None)
+                    or getattr(raw_usage, "input_tokens", None),
+                    "completion_tokens": getattr(raw_usage, "completion_tokens", None)
+                    or getattr(raw_usage, "output_tokens", None),
+                    "total_tokens": getattr(raw_usage, "total_tokens", None),
+                }
+        if usage is None:
+            getter = getattr(model, "get_last_usage", None)
+            if callable(getter):
+                try:
+                    usage = getter()
+                except Exception:
+                    usage = None
+        if usage is None:
+            usage = getattr(model, "_last_usage", None)
+    if not usage:
+        return
+    try:
+        provider, model_name = _model_provider_and_name(model)
+        report_auxiliary_usage(
+            kind="background",
+            provider=provider,
+            model=model_name,
+            usage=usage,
+        )
+    except Exception:
+        logger.debug("Reporting background model usage failed", exc_info=True)
+
+
 def text_generator(model: Any) -> Optional[Callable[[str], str]]:
     """A one-prompt text call on any MemoRizz model, or None without one."""
     if model is None:
         return None
+    from ..observability.usage_hooks import clear_thread_usage
+
     text_fn = getattr(model, "generate_text", None)
     if callable(text_fn):
-        return lambda prompt: str(text_fn(prompt) or "")
+
+        def _call_text(prompt: str) -> str:
+            clear_thread_usage()
+            result = text_fn(prompt)
+            _emit_background_usage(model)
+            return str(result or "")
+
+        return _call_text
     generate = getattr(model, "generate", None)
     if not callable(generate):
         return None
 
     def _call(prompt: str) -> str:
+        clear_thread_usage()
         response = generate([{"role": "user", "content": prompt}])
+        _emit_background_usage(model, response)
         if isinstance(response, str):
             return response
         choices = getattr(response, "choices", None)

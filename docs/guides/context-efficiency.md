@@ -194,6 +194,32 @@ If `cached_tokens` stays 0 across turns, something is mutating your prefix —
 the usual suspects are a per-turn timestamp in a custom instruction or a
 tool set that changes between requests.
 
+### Spend outside a turn
+
+A turn's usage covers the model calls the turn made. Two kinds of call run
+outside it: the background calls that file facts after a conversation, and
+embedding calls. A host that enforces a budget can hear about both:
+
+```python
+from memorizz.observability.usage_hooks import register_usage_listener
+
+def on_usage(event):
+    # kind is "background" or "embedding"; cost_usd is None when unpriced
+    spent[event["kind"]] += event["cost_usd"] or 0
+
+stop = register_usage_listener(on_usage)   # call stop() to unregister
+```
+
+Each event carries `kind`, `provider`, `model`, `input_tokens`,
+`output_tokens`, `cached_tokens`, `cache_write_tokens`, `cost_usd` at list
+rates and `unpriced`. Embedding events come from the OpenAI embedding
+provider. Nothing is computed when no listener is registered.
+
+One model object serves an agent's chat turns and its background work, so
+every built-in provider records each call's usage on the thread that made
+it. A background call is charged what that call used, not whatever another
+thread's chat turn left on the shared model.
+
 ## Pre-inference deduplication
 
 Everything retrieved for a turn (episodic recall, knowledge-base chunks)
@@ -202,6 +228,8 @@ passes through a dedup/selection pipeline
 window:
 
 1. **Exact dedup** — normalized-content fingerprints across all sources.
+   A recalled conversation message is first joined with the other half of
+   its turn, see [turns are recalled whole](#turns-are-recalled-whole).
 2. **History dedup** — anything already present (verbatim or contained) in
    the conversation window going into this prompt is dropped.
 3. **Near-dup dedup** — cosine similarity ≥ 0.95 between stored embeddings
@@ -227,6 +255,39 @@ Write-path guards complement it: identical consecutive `(query, response)`
 pairs (semantic-cache hits, client retries) are not double-written, and
 entity upserts that add no new information skip the re-embed and re-store
 entirely.
+
+## Turns are recalled whole
+
+A turn is stored, and embedded, as two messages: the request and the reply.
+A new question is much closer in meaning to earlier *requests* than to their
+replies, so asking "what was the email's subject line?" found the request to
+write the email, and the agent's own earlier attempts at the question, and
+not the email. In a memory several agents share, that made a colleague's
+answer unfindable.
+
+Conversation recall now works on turns:
+
+- **A request brings its reply, and a reply its request.** The memory reads
+  `Asked: …` then `Answered: …`. The request is cut to 240 characters; the
+  reply is what the reader needs. Two halves of one turn are one candidate,
+  ranked by the half that matched better.
+- **It looks three times further** than `candidate_limit` for conversation
+  messages, since two messages make one turn. Other memory types are
+  unchanged. At most `2 × candidate_limit` conversations are read to join
+  turns, those of the best matches.
+- **An exchange on record twice is recalled once.** Delegation records the
+  same reply in the thread of the agent that asked and of the one that
+  answered.
+- **A turn says whose reply it was**: `Answered by another agent`, or `Your
+  own answer at the time`. Where other agents' turns were recalled, only the
+  reader's best-matching turn of its own is kept. Its own earlier "I couldn't
+  find it" is the closest match there is to the same question asked again;
+  three of them took every place, and beside them a model repeats itself even
+  with the thing in front of it. An agent alone in its memory keeps all its
+  turns.
+
+The turns of the conversation going on now are already in the window and are
+left as they are.
 
 ## Choose automatic retrieval explicitly
 

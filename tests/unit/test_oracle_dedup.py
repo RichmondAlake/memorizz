@@ -143,7 +143,8 @@ def test_store_persona_update_sql_and_binds_pinned():
     assert cursor.calls[0] == (_PERSONA_SELECT, {"persona_id": "Planner"})
     assert cursor.calls[1] == (
         "UPDATE MEMORIZZ.personas SET name = :name, role_type = :role_type, "
-        "background = :background, memory_id = :memory_id, agent_id = :agent_id, "
+        "background = :background, memory_id = COALESCE(:memory_id, memory_id), "
+        "agent_id = COALESCE(:agent_id, agent_id), "
         "traits = :traits, expertise = :expertise, goals = :goals, "
         "updated_at = SYS_EXTRACT_UTC(SYSTIMESTAMP) "
         "WHERE persona_id = :persona_id",

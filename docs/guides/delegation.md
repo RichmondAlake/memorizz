@@ -221,6 +221,33 @@ instead of returning success-shaped text. Its failure result retains the inner
 only the owning root commits the overall shared-session outcome. Nested reports
 and ledger entries describe their own subgraph, not the parent's aggregate counts.
 
+### What the job used
+
+`report["usage"]` gives the tokens and cost of the whole job:
+
+- `coordinator` is the coordinator's own model calls (the plan, and combining
+  the results).
+- `delegates` is the sum of every delegate's run.
+- `total` is both together.
+
+Each row of `report["tasks"]` has its own `usage`, the run of the delegate
+that did that task. A delegate that is itself a coordinator reports its own
+delegates through its run, with their share under `delegated`.
+
+```python
+report = lead.delegate("Run the launch", memory_id="team", return_report=True)
+report["usage"]["total"]["input_tokens"], report["usage"]["total"].get("cost_usd")
+[(row["task_id"], row["usage"]["calls"]) for row in report["tasks"] if "usage" in row]
+```
+
+After the job the coordinator's `get_last_run_usage()` answers for all of it,
+with the delegates' share under `delegated`. Run usage is kept per context and
+each delegate runs in its own, so before this a coordinator saw only its own
+calls. A task that never ran (blocked, skipped, cancelled before it started)
+has no `usage`. A delegate that runs on a harness reports the tokens and cost
+its harness run gave, and the harness's name, but not `calls`: a harness does
+not say how many model calls it made.
+
 Inspect `recording_warnings` and `reconciliation_required` separately from `ok`.
 They expose failed shared-memory writes, callback/recording errors and unfinished
 workers. A successful paid effect with failed bookkeeping must be reconciled,

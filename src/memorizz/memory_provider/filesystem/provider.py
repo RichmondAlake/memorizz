@@ -394,9 +394,16 @@ class FileSystemProvider(FileSystemVectorStaging, MemoryProvider):
             document.setdefault("memory_id", memory_id)
 
         # A tool log's own tool_log_id doubles as its record ID, so either ID
-        # the model has seen finds it.
+        # the model has seen finds it. A shared session's memory_id is its
+        # record ID too, as on Oracle and MongoDB: a coordinator that joins a
+        # session reads the ID from the record, and with two different IDs a
+        # nested coordinator wrote to one no record was filed under.
         natural_id = (
-            document.get("tool_log_id") if memory_type == MemoryType.TOOL_LOG else None
+            document.get("tool_log_id")
+            if memory_type == MemoryType.TOOL_LOG
+            else document.get("memory_id")
+            if memory_type == MemoryType.SHARED_MEMORY
+            else None
         )
         record_id = str(
             document.get("_id") or document.get("id") or natural_id or uuid.uuid4()

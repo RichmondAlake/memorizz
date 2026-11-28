@@ -1454,3 +1454,116 @@ def test_agent_tool_loads_skip_every_mcp_index_row_type():
     cursor.calls.clear()
     provider._vector_search(MemoryType.TOOLBOX, [0.1, 0.2], limit=3)
     assert "tool_type" not in cursor.calls[0][0].split(" WHERE ")[1]
+
+
+@pytest.mark.unit
+def test_a_persona_saved_on_its_own_keeps_its_agent_and_memory():
+    """An update stores the persona with no agent or memory ID. Writing NULL
+    over the stored ones unlinked it, and its agent loaded with no persona."""
+    cursor = _Cursor(routes=[("SELECT id FROM", ("row-1",))])
+    provider, _connection = _provider(cursor)
+
+    provider._upsert_persona_row(
+        cursor,
+        persona_id="p1",
+        name="Pilot",
+        role_type="Harbour pilot",
+        background="",
+        memory_id=None,
+        agent_id=None,
+        embedding=None,
+        goals="Help ships.",
+        version=2,
+    )
+
+    (update,) = [sql for sql, _ in cursor.calls if sql.startswith("UPDATE")]
+    assert "agent_id = COALESCE(:agent_id, agent_id)" in update
+    assert "memory_id = COALESCE(:memory_id, memory_id)" in update
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "column, widened", [((50, "B"), True), ((600, "B"), True), ((600, "C"), False)]
+)
+def test_a_persona_role_column_made_for_short_names_is_widened(column, widened):
+    """The column was 50 bytes, and a role written as a sentence failed the
+    agent save with ORA-12899. Adding missing columns never widened it."""
+    cursor = _Cursor(routes=[("column_name = 'ROLE_TYPE'", column)])
+    provider, connection = _provider(cursor)
+    catalog = {
+        "columns": {"PERSONAS": {"PERSONA_ID", "ROLE_TYPE"}},
+        "indexes": set(),
+        "indexed_columns": set(),
+        "timestamp_defaults": {},
+    }
+    provider._REQUIRED_COLUMNS = {MemoryType.PERSONAS: [("role_type", "VARCHAR2(1)")]}
+
+    provider._migrate_table_schemas(catalog)
+
+    ddl = [sql for sql, _ in cursor.calls if "MODIFY (role_type" in sql]
+    expected = "ALTER TABLE MEMORIZZ.personas MODIFY (role_type VARCHAR2(600 CHAR))"
+    assert ddl == ([expected] if widened else [])
+
+
+@pytest.mark.unit
+def test_a_new_schema_and_the_migration_agree_on_the_role_width():
+    from pathlib import Path
+
+    import memorizz.memory_provider.oracle as oracle
+
+    root = Path(oracle.__file__).parent
+    assert (
+        "role_type VARCHAR2(600 CHAR)" in (root / "schema_relational.sql").read_text()
+    )
+    migration = (root / "migrations" / "016_persona_role_length.sql").read_text()
+    assert "MODIFY (role_type VARCHAR2(600 CHAR))" in migration
+    assert ("role_type", "VARCHAR2(600 CHAR)") in OracleProvider._REQUIRED_COLUMNS[
+        MemoryType.PERSONAS
+    ]
+
+
+@pytest.mark.unit
+def test_tables_that_could_not_be_created_stop_start_up_with_the_reason():
+    """The failures were only logged and the first write failed with
+    ORA-00942, far from the cause."""
+    provider, _connection = _provider(_Cursor())
+    errors = {
+        "AGENTS": 'ORA-43853: VECTOR type cannot be used in tablespace "SYSTEM"',
+        "PERSONAS": 'ORA-43853: VECTOR type cannot be used in tablespace "SYSTEM"',
+    }
+
+    with pytest.raises(RuntimeError) as error:
+        provider._raise_for_missing_tables(errors, {"columns": {"TOOL_LOG": set()}})
+
+    message = str(error.value)
+    assert "2 table(s)" in message and "agents, personas" in message
+    assert "ORA-43853" in message and "automatic segment space management" in message
+    assert provider.missing_tables == ["agents", "personas"]
+    # A table that exists after all (made by another instance) is not missing.
+    provider._raise_for_missing_tables(
+        errors, {"columns": {"AGENTS": set(), "PERSONAS": set()}}
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("asked", [True, False])
+def test_vector_search_returns_the_vector_it_read_when_asked(asked):
+    """The search selects the embedding column to rank by and then dropped
+    it, so recall on Oracle had no vectors to compare its candidates with."""
+    import memorizz.memory_provider.oracle.provider as oracle
+
+    provider, _connection = _provider(_Cursor())
+    fields = provider._extended_fields(
+        MemoryType.CONVERSATION_MEMORY,
+        oracle._VECTOR_SPECS[MemoryType.CONVERSATION_MEMORY],
+    )
+    values = {id(oracle._EMB_HIDDEN): [0.5, 0.25], id(oracle._SCORE_FIELD): 0.9}
+    row = tuple(values.get(id(field)) for field in fields)
+    cursor = _Cursor(rows=[row])
+    provider, _connection = _provider(cursor)
+
+    (found,) = provider._vector_search(
+        MemoryType.CONVERSATION_MEMORY, [0.1, 0.2], limit=1, include_embedding=asked
+    )
+
+    assert found.get("embedding") == ([0.5, 0.25] if asked else None)

@@ -247,6 +247,16 @@ semantic search on, for example
 when some records were stored before embeddings were on. `memorizz_store_memory`
 embeds what it stores whenever an embedding model works.
 
+**A conversation search returns turns.** A question is much closer in meaning
+to earlier requests than to their replies, so a search of `conversation_memory`
+for what was said found the request and not the answer. Each message found now
+carries the other half of its turn: a request has `turn.reply` (`id`, `content`
+and the `agent_id` that answered) and a reply has `turn.request` (`id`,
+`content`). The result is still the record that matched, so its ID works with
+`memorizz_get_memory`, `memorizz_update_memory` and `memorizz_forget_memory`.
+A turn found by both halves is listed once, and a partner another tenant wrote
+is left out.
+
 **Fine-tuned models.** With a memory-routing model swapped in (see
 [Fine-tuning](fine-tuning.md#putting-a-model-to-work)),
 `memorizz_store_memory(content, memory_type="auto")` files the memory where

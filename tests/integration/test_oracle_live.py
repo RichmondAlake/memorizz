@@ -9,7 +9,8 @@
     pytest tests/integration/test_oracle_live.py -m integration
 
 They skip without those variables. Rows are tagged ``memorizz-live-test`` and
-removed. Embeddings are stubbed to MEMORIZZ_TEST_ORACLE_DIMENSIONS (768).
+removed. Embeddings are stubbed to the size of the schema's persona vectors
+(MEMORIZZ_TEST_ORACLE_DIMENSIONS overrides).
 """
 
 from __future__ import annotations
@@ -31,7 +32,26 @@ if not all(settings.values()):
 oracledb = pytest.importorskip("oracledb")
 
 TAG = "memorizz-live-test"
-DIMENSIONS = int(os.environ.get("MEMORIZZ_TEST_ORACLE_DIMENSIONS", "768"))
+
+
+def _dimensions() -> int:
+    """The size of the schema's persona vectors. A schema these tests create
+    takes the test suite's one-dimension stub; an existing one is usually 768.
+    MEMORIZZ_TEST_ORACLE_DIMENSIONS overrides."""
+    if os.environ.get("MEMORIZZ_TEST_ORACLE_DIMENSIONS"):
+        return int(os.environ["MEMORIZZ_TEST_ORACLE_DIMENSIONS"])
+    _provider().close()  # creates the tables of a new schema
+    with oracledb.connect(
+        user=settings["USER"], password=settings["PASSWORD"], dsn=settings["DSN"]
+    ) as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            "SELECT vector_info FROM user_tab_columns "
+            "WHERE table_name = 'PERSONAS' AND data_type = 'VECTOR'"
+        )
+        row = cursor.fetchone()
+    size = str(row[0] if row else "").partition("(")[2].partition(",")[0]
+    return int(size) if size.isdigit() else 768
 
 
 def _provider():
@@ -52,7 +72,7 @@ def _provider():
 def provider(monkeypatch):
     monkeypatch.setattr(
         "memorizz.long_term.semantic.persona.persona.get_embedding",
-        lambda text, **kwargs: [0.1] * DIMENSIONS,
+        lambda text, **kwargs: [0.1] * _dimensions(),
     )
     store = _provider()
     yield store

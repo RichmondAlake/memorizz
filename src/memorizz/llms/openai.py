@@ -573,12 +573,17 @@ class OpenAI(ResponsesToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
                 kwargs[key] = value
         self._apply_cache_options(kwargs)
 
+    def _record_usage(self, usage: Optional[Dict[str, int]]) -> None:
+        # Setting it also records the usage for this thread, on every
+        # provider (see ResponseMetadataMixin._last_usage).
+        self._last_usage = usage
+
     def _generate_responses(self, messages, tools, tool_choice):
         kwargs = self._responses_kwargs(messages, tools, tool_choice)
-        self._last_usage = None
+        self._record_usage(None)
         self._last_response_metadata = {}
         response = self.client.responses.create(**kwargs)
-        self._last_usage = self._extract_responses_usage(response)
+        self._record_usage(self._extract_responses_usage(response))
         from .response_metadata import response_metadata
 
         self._last_response_metadata = response_metadata(
@@ -637,10 +642,10 @@ class OpenAI(ResponsesToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
             kwargs["instructions"] = instructions
 
         self._apply_responses_options(kwargs)
-        self._last_usage = None
+        self._record_usage(None)
         self._last_response_metadata = {}
         response = self.client.responses.create(**kwargs)
-        self._last_usage = self._extract_responses_usage(response)
+        self._record_usage(self._extract_responses_usage(response))
         from .response_metadata import response_metadata
 
         self._last_response_metadata = response_metadata(
@@ -685,10 +690,10 @@ class OpenAI(ResponsesToolMetadataMixin, ResponseMetadataMixin, LLMProvider):
             kwargs.update(self._request_options)
         self._apply_cache_options(kwargs)
 
-        self._last_usage = None
+        self._record_usage(None)
         self._last_response_metadata = {}
         response = self._create_chat_completion(kwargs)
-        self._last_usage = self._extract_usage(response)
+        self._record_usage(self._extract_usage(response))
         from .response_metadata import response_metadata
 
         self._last_response_metadata = response_metadata(

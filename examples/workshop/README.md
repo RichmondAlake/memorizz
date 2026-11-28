@@ -5,11 +5,11 @@ Build your own `MemAgent` locally and put it on stage in the shared Simuground a
 ## Have ready before the workshop
 
 1. **Python 3.10+** (or Google Colab / JupyterLab).
-2. **MemoRizz installed:**
+2. **MemoRizz `0.17.27` or later installed:**
    ```bash
-   pip install memorizz
+   pip install -U "memorizz>=0.17.27"
    ```
-   *(If you are running in a fresh virtual environment, `pip install memorizz jupyterlab` is everything you need.)*
+   *(If you are running in a fresh virtual environment, `pip install -U "memorizz>=0.17.27" jupyterlab` is everything you need.)*
 3. **A model API key** (e.g. `OPENAI_API_KEY`) for testing your agent locally before you publish it. Once published, the workshop server runs your agent on the host's model and budget.
 4. **Your workshop key (`wk_...`)**, handed out at the start of the session.
 

@@ -820,3 +820,62 @@ def test_turns_are_recorded_and_summarized_for_the_caller_only(
         runtime.record_turn("proj", "t", "x", "y", _identity("carol", READ_SCOPE))
     with pytest.raises(MemorizzServerError, match="memory_id and thread_id"):
         runtime.record_turn("", "t", "x", "y", alice)
+
+
+def _say(runtime, thread, second, role, text, user="alice", agent="cole"):
+    from memorizz import MemoryType
+
+    return runtime.provider.store(
+        {
+            "memory_id": "team",
+            "thread_id": thread,
+            "role": role,
+            "content": text,
+            "agent_id": agent,
+            "user_id": user,
+            "timestamp": f"2026-11-28T10:00:0{second}+00:00",
+        },
+        MemoryType.CONVERSATION_MEMORY,
+    )
+
+
+@pytest.mark.unit
+def test_a_conversation_search_brings_the_reply_with_the_request(
+    tmp_path, use_embedder
+):
+    """A question matches the request to write the email, which shares no
+    word with the email. The hit stays the record it is and gains the reply."""
+    use_embedder(_NoEmbedder())
+    runtime = _runtime(tmp_path)
+    alice = _identity()
+    asked = _say(runtime, "write", 1, "user", "Write the Spring Sale announcement.")
+    said = _say(runtime, "write", 2, "assistant", "Ferns: 20% off, little refresh.")
+    # Both halves of this turn match; it is listed once.
+    _say(runtime, "plan", 3, "user", "Plan the Spring Sale announcement timing.")
+    _say(runtime, "plan", 4, "assistant", "Spring Sale announcement goes out Monday.")
+    # A reply another tenant wrote is not handed over.
+    _say(runtime, "other", 5, "user", "Spring Sale announcement for wholesale?")
+    _say(runtime, "other", 6, "assistant", "Wholesale is separate.", user="bob")
+
+    result = runtime.search_memories(
+        "Spring Sale announcement", "conversation_memory", alice, memory_id="team"
+    )
+
+    by_thread = {row["thread_id"]: row for row in result["memories"]}
+    assert result["count"] == len(result["memories"]) == 3
+    write = by_thread["write"]
+    assert str(write["_id"]) == str(asked) and write["role"] == "user"
+    assert write["turn"] == {
+        "reply": {
+            "id": str(said),
+            "content": "Ferns: 20% off, little refresh.",
+            "agent_id": "cole",
+        }
+    }
+    plan = by_thread["plan"]
+    assert set(plan["turn"]) in ({"reply"}, {"request"})
+    assert "turn" not in by_thread["other"]
+    # Other memory types are returned as before.
+    runtime.remember("Spring Sale announcement rules", "knowledge_base", alice)
+    kb = runtime.search_memories("Spring Sale announcement", "knowledge_base", alice)
+    assert all("turn" not in row for row in kb["memories"])

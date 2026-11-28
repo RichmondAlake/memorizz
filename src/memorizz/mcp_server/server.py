@@ -1079,7 +1079,9 @@ def create_memorizz_mcp_server(
 
         Without a working embedding model it falls back to keyword matches;
         search_mode says which (semantic, keyword or hybrid). Superseded
-        records are hidden unless include_superseded is true.
+        records are hidden unless include_superseded is true. A conversation
+        message comes with the other half of its turn under turn: a request
+        with turn.reply, a reply with turn.request.
         """
         return await _tool_call(
             service.search_memories,

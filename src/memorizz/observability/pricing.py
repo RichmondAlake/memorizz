@@ -282,6 +282,23 @@ def _openai_cards():
                 long_input_multiplier=Decimal(2) if long else Decimal(1),
                 long_output_multiplier=Decimal("1.5") if long else Decimal(1),
             )
+    embedding_rates = {
+        "text-embedding-3-small": Decimal("0.02"),
+        "text-embedding-3-large": Decimal("0.13"),
+        "text-embedding-ada-002": Decimal("0.10"),
+    }
+    for model, rate in embedding_rates.items():
+        yield RateCard(
+            provider="openai",
+            model=model,
+            service_tier="default",
+            input_per_million=rate,
+            cached_input_per_million=rate,
+            output_per_million=Decimal(0),
+            source_url="https://developers.openai.com/api/docs/pricing",
+            as_of="2026-11-26",
+            version="openai-standard-2026-11-26",
+        )
 
 
 def _anthropic_cards():

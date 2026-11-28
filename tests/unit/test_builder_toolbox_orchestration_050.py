@@ -963,6 +963,12 @@ def test_orchestrator_marks_failed_runtime_harness_delegate_as_failed():
             status=HarnessStatus.BUDGET_EXCEEDED,
             error_code="step_budget_exceeded",
             error="Harness step budget was exceeded",
+            usage={
+                "input_tokens": 900,
+                "cached_input_tokens": 300,
+                "output_tokens": 40,
+            },
+            cost_usd=0.0123,
         )
     )
     orchestrator = MultiAgentOrchestrator(root, [delegate])
@@ -981,6 +987,18 @@ def test_orchestrator_marks_failed_runtime_harness_delegate_as_failed():
         )
 
     delegate.run_on_harness.assert_called_once()
+    # What the harness used is counted in the job, failed run or not.
+    rows = [{"task_id": "review"}]
+    usage = orchestrator._job_usage(rows)
+    assert rows[0]["usage"] == {
+        "input_tokens": 900,
+        "output_tokens": 40,
+        "cached_tokens": 300,
+        "cost_usd": 0.0123,
+        "harness": "claude-code",
+    }
+    assert usage["delegates"]["input_tokens"] == 900
+    assert usage["total"]["cost_usd"] == 0.0123
     args, kwargs = delegate.run_on_harness.call_args
     assert args == ("Review the code",)
     assert kwargs["memory_id"] == "memory-1" and kwargs["thread_id"] == "thread-1"

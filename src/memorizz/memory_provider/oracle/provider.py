@@ -1867,6 +1867,54 @@ class OracleProvider(
             return []
         return [name.lower() for name in expected if name not in present]
 
+    #: What to do about the usual reasons a table cannot be created.
+    _SCHEMA_ERROR_HINTS = {
+        "ORA-43853": (
+            "This schema's default tablespace does not use automatic segment "
+            "space management, which VECTOR columns need. Give the user a "
+            "default tablespace that does (USERS or DATA on most databases, "
+            "never SYSTEM) and start again."
+        ),
+        "ORA-01031": "The database user needs the CREATE TABLE privilege.",
+        "ORA-01950": "The database user needs a quota on its default tablespace.",
+        "ORA-00902": (
+            "This database has no VECTOR type; MemoRizz needs Oracle Database "
+            "23ai or later."
+        ),
+    }
+
+    def _raise_for_missing_tables(
+        self, table_errors: Dict[str, str], catalog: Dict[str, Any]
+    ) -> None:
+        """Stop at start-up when tables MemoRizz needs could not be created.
+
+        The failures were only logged, the provider came up, and the first
+        write failed with ORA-00942 (table does not exist), far from the
+        cause. ``table_errors`` holds each failed CREATE TABLE and its error.
+        """
+        present = catalog.get("columns") or {}
+        missing = sorted(name for name in table_errors if name not in present)
+        if not missing:
+            return
+        self.missing_tables = [name.lower() for name in missing]
+        first = table_errors[missing[0]]
+        hint = next(
+            (
+                text
+                for code, text in self._SCHEMA_ERROR_HINTS.items()
+                if any(code in table_errors[name] for name in missing)
+            ),
+            "",
+        )
+        shown = ", ".join(self.missing_tables[:6])
+        if len(missing) > 6:
+            shown += f" and {len(missing) - 6} more"
+        raise RuntimeError(
+            f"Oracle schema setup failed: {len(missing)} table(s) MemoRizz needs "
+            f"could not be created in {self._schema_owner()} ({shown}). "
+            f"First error: {first}" + (f" {hint}" if hint else "")
+        )
+
     def _create_memory_stores(self) -> None:
         """Create all memory store tables from the bundled relational schema.
 
@@ -1925,6 +1973,9 @@ class OracleProvider(
         with self._get_connection() as conn:
             cursor = conn.cursor()
             created = skipped = failed = 0
+            # Tables whose CREATE failed, with the reason, to say so at once
+            # rather than on the first write (see _raise_for_missing_tables).
+            table_errors: Dict[str, str] = {}
             for stmt in statements:
                 # Vector indexes are governed separately by index_policy.
                 # Exact VECTOR_DISTANCE queries do not require an index.
@@ -1955,6 +2006,11 @@ class OracleProvider(
                         skipped += 1
                     else:
                         failed += 1
+                        table = re.match(r"^\s*CREATE\s+TABLE\s+(\w+)", stmt, re.I)
+                        if table:
+                            table_errors.setdefault(
+                                table.group(1).upper(), str(exc).splitlines()[0]
+                            )
                         if failed <= 3:
                             # Verbose for the first few so operators can
                             # diagnose a genuinely broken schema file.
@@ -1973,6 +2029,7 @@ class OracleProvider(
             # and the additive column migration below, so startup issues DDL
             # only for objects that are actually missing.
             catalog = self._load_schema_catalog(cursor)
+            self._raise_for_missing_tables(table_errors, catalog)
             self._create_standard_indexes(cursor, conn, catalog)
 
         # Ensure existing tables have all the columns the provider expects.
@@ -2043,7 +2100,7 @@ class OracleProvider(
         ],
         MemoryType.PERSONAS: [
             ("persona_id", "VARCHAR2(255)"),
-            ("role_type", "VARCHAR2(50)"),
+            ("role_type", "VARCHAR2(600 CHAR)"),
             ("background", "CLOB"),
             ("traits", "CLOB"),
             ("expertise", "CLOB"),
@@ -2219,6 +2276,51 @@ class OracleProvider(
             "timestamp_defaults": timestamp_defaults,
         }
 
+    #: A persona's role is free text ("Night-shift harbour pilot who trains
+    #: the junior pilots"), not one of a few short role names.
+    _PERSONA_ROLE_CHARS = 600
+
+    def _widen_persona_role(self, cursor, conn) -> None:
+        """Make ``personas.role_type`` wide enough for a role written as a
+        sentence. The column was created 50 bytes wide, and a longer role
+        failed the whole agent save with ORA-12899. Adding missing columns
+        never widens one that exists, so this does."""
+        try:
+            cursor.execute(
+                """
+                SELECT char_length, char_used
+                FROM all_tab_columns
+                WHERE owner = :owner
+                  AND table_name = 'PERSONAS'
+                  AND column_name = 'ROLE_TYPE'
+                """,
+                {"owner": self._schema_owner()},
+            )
+            row = cursor.fetchone()
+            if not row:
+                return
+            wide_enough = (
+                int(row[0] or 0) >= self._PERSONA_ROLE_CHARS and str(row[1]) == "C"
+            )
+            if wide_enough:
+                return
+            cursor.execute(
+                f"ALTER TABLE {self._get_table_name(MemoryType.PERSONAS)} "
+                f"MODIFY (role_type VARCHAR2({self._PERSONA_ROLE_CHARS} CHAR))"
+            )
+            conn.commit()
+            logger.info(
+                "Migrated personas: role_type widened to %s characters",
+                self._PERSONA_ROLE_CHARS,
+            )
+        except Exception as exc:
+            conn.rollback()
+            logger.warning(
+                "Could not widen personas.role_type (run migrations/"
+                "016_persona_role_length.sql): %s",
+                exc,
+            )
+
     def _migrate_table_schemas(self, catalog: Optional[Dict[str, Any]] = None) -> None:
         """Add any missing columns to existing tables.
 
@@ -2267,6 +2369,11 @@ class OracleProvider(
                                 table_bare,
                                 exc,
                             )
+
+            if "ROLE_TYPE" in (
+                table_columns.get(MemoryType.PERSONAS.value.upper()) or ()
+            ):
+                self._widen_persona_role(cursor, conn)
 
             # Canonicalize legacy summary source IDs after both columns exist.
             summary_columns = table_columns.get(MemoryType.SUMMARIES.value.upper())
@@ -3503,8 +3610,11 @@ class OracleProvider(
                 "name = :name",
                 "role_type = :role_type",
                 "background = :background",
-                "memory_id = :memory_id",
-                "agent_id = :agent_id",
+                # A persona saved on its own (an update, a learned change)
+                # carries no agent or memory ID. Writing NULL over the stored
+                # ones unlinked it: its agent then loaded with no persona.
+                "memory_id = COALESCE(:memory_id, memory_id)",
+                "agent_id = COALESCE(:agent_id, agent_id)",
                 "traits = :traits",
                 "expertise = :expertise",
                 *(f"{column} = :{column}" for column in evolution),
@@ -4638,6 +4748,7 @@ class OracleProvider(
                 limit,
                 user_id=kwargs.get("user_id", _UNSET),
                 memory_id=memory_id,
+                include_embedding=include_embedding,
             )
         elif memory_store_type == MemoryType.SUMMARIES:
             return self.retrieve_summaries_by_query(
@@ -4646,6 +4757,7 @@ class OracleProvider(
                 user_id=kwargs.get("user_id", _UNSET),
                 memory_id=memory_id,
                 thread_id=kwargs.get("thread_id"),
+                include_embedding=include_embedding,
             )
         elif memory_store_type == MemoryType.ENTITY_MEMORY:
             if isinstance(query, dict):
@@ -4666,6 +4778,7 @@ class OracleProvider(
                 limit=limit,
                 memory_id=kwargs.get("memory_id"),
                 user_id=kwargs.get("user_id", _UNSET),
+                include_embedding=include_embedding,
             )
         elif memory_store_type == MemoryType.SEMANTIC_CACHE:
             if isinstance(query, dict):
@@ -4714,6 +4827,7 @@ class OracleProvider(
                 memory_id=kwargs.get("memory_id"),
                 user_id=kwargs.get("user_id", _UNSET),
                 knowledge_base_ids=kwargs.get("knowledge_base_ids"),
+                include_embedding=include_embedding,
             )
             return rows
         elif memory_store_type == MemoryType.CONVERSATION_MEMORY:
@@ -4745,6 +4859,7 @@ class OracleProvider(
                     ),
                     memory_id=kwargs.get("memory_id"),
                     user_id=kwargs.get("user_id", _UNSET),
+                    include_embedding=include_embedding,
                 )
             return []
         else:
@@ -7309,6 +7424,7 @@ class OracleProvider(
         limit: int = 1,
         user_id: Any = _UNSET,
         memory_id: Optional[str] = None,
+        include_embedding: bool = False,
     ) -> Optional[List[Dict[str, Any]]]:
         """Retrieve workflows using vector search."""
         from ...embeddings import get_embedding
@@ -7325,6 +7441,7 @@ class OracleProvider(
             limit=limit,
             user_id=user_id,
             memory_id=memory_id,
+            include_embedding=include_embedding,
         )
 
     def retrieve_summaries_by_query(
@@ -7334,6 +7451,7 @@ class OracleProvider(
         user_id: Any = _UNSET,
         memory_id: Optional[str] = None,
         thread_id: Optional[str] = None,
+        include_embedding: bool = False,
     ) -> Optional[List[Dict[str, Any]]]:
         """Retrieve summaries using vector search."""
         from ...embeddings import get_embedding
@@ -7351,6 +7469,7 @@ class OracleProvider(
             user_id=user_id,
             memory_id=memory_id,
             filters={"thread_id": thread_id} if thread_id is not None else None,
+            include_embedding=include_embedding,
         )
 
     def find_similar_cache_entries(
@@ -7539,9 +7658,15 @@ class OracleProvider(
         memory_id: str = None,
         user_id: Any = _UNSET,
         knowledge_base_ids: Optional[List[str]] = None,
+        include_embedding: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Perform vector similarity search using Oracle's VECTOR_DISTANCE function.
+
+        With ``include_embedding`` each row carries its stored vector. The
+        search reads that column anyway, so it costs nothing more; recall
+        needs it to drop near-duplicates and to keep what it selects varied
+        without embedding the rows again.
 
         Parameters:
         -----------
@@ -7643,6 +7768,10 @@ class OracleProvider(
                     logger.warning("Vector search not supported for %s", memory_type)
                     return []
                 fields = self._extended_fields(memory_type, fields)
+                if include_embedding:
+                    fields = tuple(
+                        _EMB_OPT if field is _EMB_HIDDEN else field for field in fields
+                    )
 
                 approximate = self.config.vector_search_mode == "approximate"
                 hint = "/*+ VECTOR_INDEX_TRANSFORM */" if approximate else ""
@@ -7665,7 +7794,12 @@ class OracleProvider(
                 else:
                     cursor.execute(sql, params)
 
-                return [self._apply_row_fields(fields, row) for row in cursor]
+                return [
+                    self._apply_row_fields(
+                        fields, row, include_embedding=include_embedding
+                    )
+                    for row in cursor
+                ]
             except Exception as e:
                 error_str = str(e)
                 if self._is_vector_distance_dimension_mismatch_error(error_str):
@@ -7724,6 +7858,7 @@ class OracleProvider(
                             memory_id=memory_id,
                             user_id=_UNSET,
                             knowledge_base_ids=knowledge_base_ids,
+                            include_embedding=include_embedding,
                         )
                     self._vector_search_disabled_for.add(memory_type)
                     logger.warning(
@@ -8777,12 +8912,13 @@ class OracleProvider(
             if persona_row:
                 from ...long_term.semantic.persona.persona import Persona
 
-                # Convert role_type string to enum
-                role_type_str = persona_row[2] or "general"
-                role = RoleType.GENERAL
+                # Preserve custom role strings (such as workshop personas) while
+                # normalizing known RoleType enum values.
+                role_type_str = str(persona_row[2] or "").strip()
+                role_value = role_type_str or RoleType.GENERAL.value
                 for role_enum in RoleType:
-                    if role_enum.value == role_type_str:
-                        role = role_enum
+                    if role_enum.value.lower() == role_value.lower():
+                        role_value = role_enum.value
                         break
 
                 traits = self._deserialize_json_field(persona_row[5])
@@ -8791,7 +8927,7 @@ class OracleProvider(
                 background_text = self._read_lob_value(persona_row[3]) or ""
                 stored_persona = {
                     "name": persona_row[1],
-                    "role": role.value,
+                    "role": role_value,
                     "background": background_text,
                     "persona_id": persona_row[0],
                     # goals / version / evolution_history; rows saved before

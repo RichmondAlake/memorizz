@@ -108,6 +108,9 @@ class MultiAgentOrchestrator:
         self._recording_warnings = []
         self._recording_lock = threading.Lock()
         self._worker_metadata = {}
+        # What each delegate's run used, read in the worker that ran it: run
+        # usage is kept per context, so the coordinator cannot see it later.
+        self._task_usage: Dict[str, Dict[str, Any]] = {}
         self._child_threads = {}
         self._task_results = {}
         self.shared_memory = SharedMemory(root_agent.memory_provider)
@@ -574,6 +577,7 @@ class MultiAgentOrchestrator:
                 "cancellation_reason": self._cancel_reason,
             }
         )
+        usage = self._job_usage(tasks)
         report = {
             "ok": ok,
             "partial": bool(counts["completed"] and not ok),
@@ -591,6 +595,7 @@ class MultiAgentOrchestrator:
             "failures": failures,
             "consolidation": consolidation,
             "execution": execution,
+            "usage": usage,
             "error": str(error) if error is not None else None,
             "error_code": getattr(error, "code", type(error).__name__)
             if error is not None
@@ -646,6 +651,64 @@ class MultiAgentOrchestrator:
             report["recording_warnings"] or report["counts"]["cancelling"]
         )
 
+    @staticmethod
+    def _harness_usage(result) -> Dict[str, Any]:
+        """A harness run's tokens and cost in the keys run usage has. A
+        harness does not say how many model calls it made, so ``calls`` is
+        left out."""
+        raw = getattr(result, "usage", None)
+        raw = raw if isinstance(raw, dict) else {}
+        used: Dict[str, Any] = {}
+        for key, names in (
+            ("input_tokens", ("input_tokens",)),
+            ("output_tokens", ("output_tokens",)),
+            ("cached_tokens", ("cached_tokens", "cached_input_tokens")),
+        ):
+            for name in names:
+                value = raw.get(name)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    used[key] = int(value)
+                    break
+        cost = getattr(result, "cost_usd", None)
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            used["cost_usd"] = round(float(cost), 8)
+        if used:
+            used["harness"] = str(getattr(result, "harness", "") or "")
+        return used
+
+    def _job_usage(self, tasks) -> Dict[str, Any]:
+        """Tokens and cost of the whole job: the coordinator's own calls (the
+        plan, and combining the results), each delegate's run, and the total.
+        Each task row gets its own ``usage``, and the coordinator's run usage
+        is made the job's, so ``get_last_run_usage()`` answers for all of it
+        (a nested coordinator's delegates are counted through it too)."""
+        from .observability.prompt_cache import merge_usage
+
+        with self._recording_lock:
+            by_task = {key: dict(value) for key, value in self._task_usage.items()}
+        delegates: Dict[str, Any] = {}
+        for row in tasks:
+            used = by_task.get(str(row.get("task_id")))
+            if used:
+                row["usage"] = used
+                merge_usage(delegates, used)
+        own: Dict[str, Any] = {}
+        reader = getattr(self.root_agent, "get_last_run_usage", None)
+        if callable(reader):
+            try:
+                own = dict(reader() or {})
+            except Exception:
+                own = {}
+        own.pop("delegated", None)
+        total = merge_usage(merge_usage({}, own), delegates)
+        fold = getattr(self.root_agent, "add_delegated_usage", None)
+        if delegates and callable(fold):
+            try:
+                fold(delegates)
+            except Exception:
+                logger.debug("Could not add the delegates' usage", exc_info=True)
+        return {"coordinator": own, "delegates": delegates, "total": total}
+
     def _run_task(self, task, agent, memory_id, thread_id, dependency_results):
         """Worker boundary: propagate cancellation, but isolate answer streaming."""
         strict_token = delegated_execution.set(True)
@@ -661,6 +724,7 @@ class MultiAgentOrchestrator:
         status = "failed"
         error = None
         tool_token = None
+        usage_before = getattr(agent, "_run_usage", None)
         try:
             tool_token = set_tool_context(
                 {
@@ -722,6 +786,12 @@ class MultiAgentOrchestrator:
             error = exc
             raise
         finally:
+            # A run starts its usage afresh, so the same object as before the
+            # task means the task made no run (its usage is an earlier one's).
+            used = getattr(agent, "_run_usage", None)
+            if isinstance(used, dict) and used and used is not usage_before:
+                with self._recording_lock:
+                    self._task_usage.setdefault(task.task_id, copy.deepcopy(used))
             event = self._task_event(
                 task,
                 "task_settled",
@@ -1236,6 +1306,12 @@ class MultiAgentOrchestrator:
                         harness_run_id=run_id,
                     ),
                 )
+                # A harness reports its own usage; it never passes through the
+                # delegate's run usage. Counted whether or not the run succeeded.
+                used = self._harness_usage(harness_result)
+                if used:
+                    with self._recording_lock:
+                        self._task_usage[task.task_id] = used
                 if not harness_result.ok:
                     code = harness_result.error_code or harness_result.status.value
                     detail = harness_result.error or "runtime harness delegate failed"
@@ -1724,7 +1800,7 @@ class MultiAgentOrchestrator:
                     f"Found existing session for agent {self.root_agent.agent_id}"
                 )
                 logger.info(
-                    f"Session hierarchy: {self.shared_memory.get_agent_hierarchy(str(existing_session.get('_id')))}"
+                    f"Session hierarchy: {self.shared_memory.get_agent_hierarchy(str(existing_session.get('memory_id') or existing_session.get('_id')))}"
                 )
                 return existing_session
 

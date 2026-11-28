@@ -199,10 +199,10 @@ class Anthropic(JsonPromptToolMetadataMixin, ResponseMetadataMixin, LLMProvider)
             message_breakpoints=int(getattr(self, "_cache_single_shot_prompts", False)),
         )
 
-        self._last_usage = None
+        self._record_usage(None)
         self._last_response_metadata = {}
         response = self.client.messages.create(**kwargs)
-        self._last_usage = self._extract_usage(response)
+        self._record_usage(self._extract_usage(response))
         from .response_metadata import response_metadata
 
         self._last_response_metadata = response_metadata(
@@ -210,6 +210,11 @@ class Anthropic(JsonPromptToolMetadataMixin, ResponseMetadataMixin, LLMProvider)
             max_output_tokens=kwargs.get("max_tokens"),
         )
         return self._text_from_response(response)
+
+    def _record_usage(self, usage: Optional[Dict[str, int]]) -> None:
+        # Setting it also records the usage for this thread, on every
+        # provider (see ResponseMetadataMixin._last_usage).
+        self._last_usage = usage
 
     # ------------------------------------------------------------------
     # Core generate (chat-completions style)
@@ -229,10 +234,10 @@ class Anthropic(JsonPromptToolMetadataMixin, ResponseMetadataMixin, LLMProvider)
         """
         kwargs = self._build_request_kwargs(messages, tools, tool_choice)
 
-        self._last_usage = None
+        self._record_usage(None)
         self._last_response_metadata = {}
         response = self.client.messages.create(**kwargs)
-        self._last_usage = self._extract_usage(response)
+        self._record_usage(self._extract_usage(response))
         from .response_metadata import response_metadata
 
         self._last_response_metadata = response_metadata(

@@ -110,9 +110,31 @@ class LLMProvider(Protocol):
 class ResponseMetadataMixin:
     """``get_last_response_metadata`` for providers that record their last
     response (cache, usage and stop details); unknown values are omitted.
-    Optional: providers without it remain valid."""
+    Also where ``_last_usage`` lives, for every built-in provider. Optional:
+    providers without it remain valid."""
 
     def get_last_response_metadata(self) -> Dict[str, Any]:
         from .response_metadata import last_response_metadata
 
         return last_response_metadata(self)
+
+    @property
+    def _last_usage(self) -> Optional[Dict[str, int]]:
+        """Token usage of this provider's most recent call.
+
+        Every provider sets it after a call (and clears it before one), on
+        every path: text, tools, structured output and streaming. Setting it
+        also records the usage for the calling thread, because one model
+        object is shared by an agent's chat turns and its background work:
+        code that reads "the last usage" right after its own call could
+        otherwise be handed another thread's. See
+        ``observability.usage_hooks.consume_thread_usage``.
+        """
+        return self.__dict__.get("_last_usage_value")
+
+    @_last_usage.setter
+    def _last_usage(self, usage: Optional[Dict[str, int]]) -> None:
+        self.__dict__["_last_usage_value"] = usage
+        from ..observability.usage_hooks import record_thread_usage
+
+        record_thread_usage(self, usage)

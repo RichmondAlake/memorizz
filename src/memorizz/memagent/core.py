@@ -480,6 +480,10 @@ def _shared_upkeep(provider: Any, agent_id: Optional[str]) -> _UpkeepState:
         return by_agent.setdefault(str(agent_id), _UpkeepState())
 
 
+#: How many times further conversation recall looks than its candidate limit.
+_TURN_OVERFETCH = 3
+
+
 class MemAgent:
     """MemAgent class that orchestrates manager components."""
 
@@ -6709,6 +6713,20 @@ class MemAgent:
                 int(self._run_usage.get("unpriced_calls") or 0) + 1
             )
 
+    def add_delegated_usage(self, usage: Dict[str, Any]) -> None:
+        """Add what this coordinator's delegates used to its own run usage,
+        so one total covers the job. The delegates' share is kept under
+        ``delegated`` as well."""
+        from ..observability.prompt_cache import merge_usage
+
+        if not isinstance(usage, dict) or not usage:
+            return
+        totals = dict(self._run_usage)
+        delegated = merge_usage(dict(totals.pop("delegated", None) or {}), usage)
+        merge_usage(totals, usage)
+        totals["delegated"] = delegated
+        self._run_usage = totals
+
     def count_model_call(
         self, *, stage: str = "delegation", duration_ms: Optional[float] = None
     ) -> None:
@@ -7703,6 +7721,10 @@ class MemAgent:
         task_completion_policy: Any = None,
     ) -> Any:
         """Execute a configured deterministic or model-generated delegation plan."""
+        if self._stream_trace_events is None:
+            # Called directly, not inside a turn: this job's usage starts here,
+            # not on top of an earlier run's.
+            self._run_usage = {}
         if not self.delegates:
             raise ValueError("This agent has no configured delegates")
         if not self.memory_provider:
@@ -11456,7 +11478,15 @@ class MemAgent:
                             query=retrieval_query,
                             memory_type=memory_type,
                             memory_id=memory_id,
-                            limit=policy.candidate_limit,
+                            # A turn is two rows and a question matches
+                            # earlier questions best: look further, so the
+                            # turns that answer it are among the candidates.
+                            limit=policy.candidate_limit
+                            * (
+                                _TURN_OVERFETCH
+                                if memory_type == MemoryType.CONVERSATION_MEMORY
+                                else 1
+                            ),
                             user_id=user_id,
                             include_embedding=True,
                             thread_id=retrieval_thread_id,
@@ -11474,6 +11504,8 @@ class MemAgent:
                                 if row is None:
                                     continue
                             candidates.append((source, row))
+
+                candidates = self._recall_whole_turns(candidates, user_id, policy)
 
                 if candidates:
                     query_embedding = None
@@ -16345,6 +16377,40 @@ class MemAgent:
             if value:
                 return str(value)
         return ""
+
+    def _recall_whole_turns(
+        self, candidates: List[Tuple[str, Any]], user_id: Optional[str], policy: Any
+    ) -> List[Tuple[str, Any]]:
+        """Give each recalled conversation row the other half of its turn
+        (see ``utils/whole_turns``). Other sources pass through untouched."""
+        turns = [row for source, row in candidates if source == "episodic"]
+        provider = self.memory_provider
+        if not turns or provider is None:
+            return candidates
+        from .utils.whole_turns import whole_turns
+
+        def read_thread(memory_id: str, thread_id: str):
+            return self._timed_memory_read(
+                "episodic",
+                provider.retrieve_conversation_history_ordered_by_timestamp,
+                memory_id,
+                user_id=user_id,
+                thread_id=thread_id,
+            )
+
+        try:
+            whole = whole_turns(
+                turns,
+                read_thread,
+                skip_thread=self._current_thread_id,
+                max_threads=max(1, int(policy.candidate_limit)) * 2,
+                reader_agent_id=getattr(self, "agent_id", None),
+            )
+        except Exception as exc:
+            logger.debug("Recalled turns were left as single messages: %s", exc)
+            return candidates
+        rest = [(source, row) for source, row in candidates if source != "episodic"]
+        return rest + [("episodic", row) for row in whole]
 
     def _schedule_memory_reinforcement(
         self, selected: List[Dict[str, Any]], candidates: Iterable[Tuple[str, Any]]
