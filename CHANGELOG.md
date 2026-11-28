@@ -1,5 +1,98 @@
 # Changelog
 
+## 0.17.28 — 2026-11-28
+
+### Changed behaviour
+
+- **Conversation recall brings a turn whole.** A recalled request comes with
+  the reply that followed it and a recalled reply with its request, as one
+  memory (`Asked: …` / `Answered: …`). Recall looks three times further than
+  `candidate_limit` for conversation messages, an exchange recorded in two
+  threads is recalled once, and a turn says whether the reply was the
+  reader's own or another agent's. Where other agents' turns were recalled,
+  only the reader's best-matching turn of its own is kept. Before, a question
+  matched earlier questions and never their answers: on a shared memory an
+  agent asked for the subject line of the email a colleague had just written
+  answered "I can't see the email" 3 times of 3, and now quotes it 8 times of
+  8. Recalled conversation text reads differently in prompts, and each turn
+  reads up to `2 × candidate_limit` conversations from the store. See
+  [turns are recalled whole](docs/guides/context-efficiency.md#turns-are-recalled-whole).
+
+### Added
+
+- **What a delegated job used.** `delegate(..., return_report=True)` returns
+  `report["usage"]` with the coordinator's calls, the delegates' runs and the
+  total, and each row of `report["tasks"]` has the `usage` of the delegate
+  that did it. The coordinator's `get_last_run_usage()` covers the whole job
+  afterwards, with the delegates' share under `delegated`. Run usage is kept
+  per context, so a coordinator saw only its own calls before. A delegate
+  that runs on a harness is counted with the tokens and cost its harness run
+  reported.
+- **A way to hear about model spend outside a turn.**
+  `memorizz.observability.usage_hooks.register_usage_listener(callback)`
+  calls back for model calls that never pass through a turn's own
+  accounting: the background calls that file facts after a conversation
+  (`kind="background"`) and OpenAI embedding calls (`kind="embedding"`). Each
+  event carries the provider, the model, token counts and the cost at list
+  rates, or `unpriced`. A host that enforces a budget can count these without
+  reading provider bills. Nothing is computed when no listener is registered.
+- **List rates for OpenAI embedding models** (`text-embedding-3-small`,
+  `text-embedding-3-large`, `text-embedding-ada-002`), so embedding calls can
+  be priced.
+- **Every model provider records its usage on the thread that made the
+  call.** One model object serves an agent's chat turns and its background
+  work, so code that read "the last usage" after its own call could be handed
+  another thread's. OpenAI, Azure OpenAI, Anthropic, Ollama, OpenRouter,
+  Gemini, other gateways, Hugging Face and MLX models all record per thread
+  now, on every path including streaming, and background spend is attributed
+  from that record.
+
+### Fixed
+
+- **A lead under another lead writes to the board on the file store.** The
+  file store filed a shared session under a new record ID and ignored the
+  session's own `memory_id`. A coordinator that joined a session read the
+  second ID, which no record was filed under, so none of its board entries or
+  sub-agents were saved and the hierarchy came back empty. A shared session's
+  `memory_id` is now its record ID, as on Oracle and MongoDB. Records that
+  bring their own ID (change history, traces) are unchanged.
+- The "Session hierarchy" log line of a joining coordinator looked the
+  session up by the wrong ID.
+- **Oracle: an updated persona stays with its agent.** A persona saved on its
+  own (`persona.update(...)`, a learned change) carries no agent or memory
+  ID, and the Oracle provider wrote NULL over the stored ones. The agent then
+  loaded with no persona, and the next save left the row orphaned.
+- **Oracle: a persona role can be a sentence.** `personas.role_type` was 50
+  bytes wide, so a longer role failed the whole agent save with ORA-12899.
+  New schemas create it 600 characters wide, the provider widens an existing
+  column at startup, and `migrations/016_persona_role_length.sql` does the
+  same by hand. A custom role is also kept as written on load instead of
+  being read back as `general`.
+- **Oracle: recalled memories come with their vectors.** Vector search read
+  each row's vector and then dropped it, even when recall asked for it, so on
+  Oracle near-duplicate memories were not collapsed and selection did not
+  keep its choices varied. `include_embedding=True` now returns the vector
+  for conversation, knowledge base, entity, workflow and summary searches, at
+  no extra cost to the query.
+- **Oracle: a schema that cannot hold the tables fails at start-up, with the
+  reason.** Failed `CREATE TABLE` statements were only logged, the provider
+  came up, and the first write failed with ORA-00942. Start-up now raises,
+  naming the missing tables and the first error, with what to do for the
+  usual causes (a default tablespace without automatic segment space
+  management, which VECTOR columns need; no CREATE TABLE privilege; no
+  tablespace quota; a database older than 23ai).
+- **A conversation search over MCP returns turns.** `memorizz_search_memories`
+  on `conversation_memory` gives each message found the other half of its
+  turn (`turn.reply` on a request, `turn.request` on a reply), lists a turn
+  found by both halves once, and leaves out a partner another tenant wrote.
+  The result is still the record that matched.
+- The workshop notebook (`examples/workshop/01_build_and_publish.ipynb`)
+  installs MemoRizz 0.17.27 or later and stops with a message when an older
+  version is already loaded in the kernel.
+- The live Oracle tests (`tests/integration/test_oracle_live.py`) pass on a
+  schema they create: the stubbed embedding takes the size of the schema's
+  persona vectors instead of assuming 768.
+
 ## 0.17.27 — 2026-11-27
 
 ### Changed behaviour
